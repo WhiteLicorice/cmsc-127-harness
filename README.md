@@ -1,8 +1,132 @@
 # CMSC 127 Harness
 
-The harness reads an ERD block, compares it with PostgreSQL, and checks a
-student's toolchain. Python holds the parser and the comparator. The doctor
-scripts report missing tools and give a repair for each failure.
+The harness is the course's local toolchain. It has a read-only page that shows
+a PostgreSQL database, a comparator that checks an entity-relationship diagram
+(ERD) against the live schema, a runner that checks a pair's work, and doctor
+scripts that report missing tools. Python holds the parser and the comparator.
+The page uses Python and TypeScript.
+
+## The Harness Page
+
+The harness page shows a PostgreSQL database while you work. It is the visual
+tool for the course. Keep it open beside your terminal.
+
+### Start the Page
+
+Start PostgreSQL first. Install the Python packages in `requirements.txt` and
+activate the Python environment (see Install and Test). Open Git Bash. Go to
+the bundle root, the folder that holds `start.sh`. Run this command:
+
+```bash
+./start.sh
+```
+
+The script starts the server and opens the default browser. It prints the
+address, usually `http://127.0.0.1:55440/`. If the browser does not open, open
+the address that the script prints. Press Ctrl+C in the Git Bash window to stop
+the server.
+
+The server binds to `127.0.0.1`, the loopback address. It accepts connections
+from this computer only.
+
+The page reads the PostgreSQL connection URL from `CMSC127_DATABASE_URL`. Set
+this variable in the same shell before you start the page. For example:
+
+```bash
+export CMSC127_DATABASE_URL='postgresql://your_user@127.0.0.1:5432/your_database'
+```
+
+Replace `your_user` and `your_database` with your PostgreSQL role and database.
+The `check.sh` script, which runs the course checks, reads the same variable.
+
+### The Seven Panels
+
+The page has seven panels. Use the tabs at the top of the page to switch
+panels. A schema is a named group of tables. The schema selector sets the
+schema for the Tables, Schema, and Roles panels.
+
+| Panel | What it shows |
+|---|---|
+| Tables | Every table and view in the selected schema, with its rows. A view is a saved query that acts like a table. Each row that is new, changed, or gone since the last poll carries a mark. Rows compare by primary key, the column or columns that identify a row, or by the whole row when the table has no primary key. The panel shows at most 100 rows per table and states the cap. |
+| Changes | Each change that the polls observed, in time order: the time, the table, the kind of change, and the key. The feed keeps the last 100 observations. It needs no hook in your code. |
+| Schema | The live schema as a diagram, beside the ERD from the `README.md` in the folder where you started the page. The panel lists each difference, each relationship in words, each `NOT NULL` column, and each table constraint. The diagram shows each column type. |
+| Sessions | Each other open connection to the database (a session), whether it holds an open transaction (a group of statements that either all take effect or none do), and the session it waits for. |
+| Checks | The last result from `check.sh`: each case, pass or fail, and the expected rows beside the actual rows for a failed case. The panel reads `.cmsc127/last-run.json`. It does not start a run. |
+| Roles | Each database role, which is a user or a group of users, and its privileges on each table, such as `SELECT` or `INSERT`. |
+| Status | The server, the database, the connected role, and the time of the last poll. A plain message appears when the server is down or the password is wrong. |
+
+### What the Page Reads
+
+The page is read-only. It sends `SELECT` statements and reads PostgreSQL's
+catalog. It has no query box and no edit control. Every write comes from your
+own Python or `psql`.
+
+The page reads committed data. A transaction that another session has open
+stays invisible until that session runs `COMMIT`. Lab 3 uses this behavior to
+show isolation.
+
+The page polls the database every second. It shows at most 100 rows per table
+and keeps the last 100 change events. A change outside the row cap may not
+appear in the feed.
+
+### Limits
+
+The Windows firewall result is unverified. The server binds to `127.0.0.1`,
+so a prompt is unlikely. No test has confirmed that a prompt is absent.
+
+The default browser on macOS and Linux is unverified. The page ran in Edge on
+Windows. The GitHub workflow loads the page in Chromium without a visible
+window on Ubuntu, macOS, and Windows. That check does not prove that each
+system's default browser opens and draws the page.
+
+### Build the Bundle
+
+This section is for the harness developer. A student needs no Node.js and no
+compiler.
+
+The release bundle holds these files:
+
+- `server.py`, the Python server.
+- `comparator.py`, the ERD comparator.
+- `erd_parser.py`, the ERD parser.
+- `start.sh`, the start script.
+- `public/index.html` and `public/style.css`, the page shell and its style.
+- `public/app.js`, `public/panelRegistry.js`, `public/panelRequest.js`, and
+  `public/panels/*.js`, the compiled TypeScript modules.
+- `public/vendor/mermaid.min.js` and `public/vendor/MERMAID-LICENSE.txt`, the
+  diagram script and its license.
+
+The Python server uses the packages in `requirements.txt`. Build the bundle
+with Node.js 24.9.x and npm 11.6.0:
+
+```bash
+npm ci
+npm run build
+```
+
+`npm run build` runs the strict type check, compiles the TypeScript, and copies
+the assets into `dist/bundle`.
+
+The page project uses these tool versions:
+
+| Tool | Version |
+|---|---|
+| Node.js | 24.9.x |
+| npm | 11.6.0 |
+| TypeScript | 5.9.3 |
+| Vitest | 5.1.0 |
+| Vite | 6.4.6 |
+| Pyright | 1.1.414 |
+| Playwright | 1.64.1 |
+| Python | 3.15 or newer |
+| Mermaid | 12.3.0 |
+
+Node.js is pinned to 24.9.x in `.nvmrc` and `package.json`. TypeScript 5.9.3
+passed the strict type check. Vitest 5.1.0 declares an engine range that
+includes Node 24. Vite 6.4.6 satisfies the Vite 6 peer requirement of Vitest.
+Pyright 1.1.414 runs the strict Python check. Playwright 1.64.1 runs the
+headless browser smoke. Mermaid 12.3.0 is stored with its MIT license, so the
+page needs no network.
 
 ## Compare an ERD
 
