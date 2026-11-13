@@ -14,8 +14,24 @@ tool for the course. Keep it open beside your terminal.
 ### Start the Page
 
 Start PostgreSQL first. Install the Python packages in `requirements.txt` and
-activate the Python environment (see Install and Test). Open Git Bash. Go to
-the bundle root, the folder that holds `start.sh`. Run this command:
+activate the Python environment (see Install and Test).
+
+Open Git Bash. Go to your project directory. This directory holds `start.sh`,
+your `README.md`, and the `.cmsc127` folder. The Schema panel reads the ERD from
+the `README.md` in this directory. The Checks panel reads the last result from
+`.cmsc127/last-run.json` in this directory.
+
+The page reads the PostgreSQL connection URL from `CMSC127_DATABASE_URL`. Set
+this variable in the same shell before you start the page. For example:
+
+```bash
+export CMSC127_DATABASE_URL='postgresql://your_user@127.0.0.1:5432/your_database'
+```
+
+Replace `your_user` and `your_database` with your PostgreSQL role and database.
+The `check.sh` script, which runs the course checks, reads the same variable.
+
+Run this command from the project directory:
 
 ```bash
 ./start.sh
@@ -28,16 +44,6 @@ the server.
 
 The server binds to `127.0.0.1`, the loopback address. It accepts connections
 from this computer only.
-
-The page reads the PostgreSQL connection URL from `CMSC127_DATABASE_URL`. Set
-this variable in the same shell before you start the page. For example:
-
-```bash
-export CMSC127_DATABASE_URL='postgresql://your_user@127.0.0.1:5432/your_database'
-```
-
-Replace `your_user` and `your_database` with your PostgreSQL role and database.
-The `check.sh` script, which runs the course checks, reads the same variable.
 
 ### The Seven Panels
 
@@ -73,6 +79,10 @@ appear in the feed.
 
 The Windows firewall result is unverified. The server binds to `127.0.0.1`,
 so a prompt is unlikely. No test has confirmed that a prompt is absent.
+
+A clean offline Windows start is unverified. The replay used a network-connected
+machine. The page loads its assets from the bundle and needs no network, but no
+test has confirmed a start with the network disconnected.
 
 The default browser on macOS and Linux is unverified. The page ran in Edge on
 Windows. The GitHub workflow loads the page in Chromium without a visible
@@ -256,10 +266,17 @@ staged checks from a clean checkout on Ubuntu, macOS, and Windows.
 
 ## Install and Test
 
+This section is for the harness developer. A student runs the prebuilt bundle
+from `start.sh` and needs no Node.js, npm, or compiler. See Start the Page.
+
 Start PostgreSQL first. Use a disposable database and a role that can create
 schemas and tables. The tests drop the schemas
 `t04_compare`, `t04_empty`, and `t04_search_first`. They also drop the table
 `public.t04_default`.
+
+Install Node.js 24.9.x and npm 11.6.0 first (see Build the Bundle). The Python
+tests read `dist/bundle`. Git leaves that directory out of the repository. Run
+`npm ci` and `npm run build` before the Python tests.
 
 In PowerShell on Windows, run:
 
@@ -267,6 +284,8 @@ In PowerShell on Windows, run:
 py -3.15 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+npm ci
+npm run build
 npm install --global pyright@1.1.414
 $env:CMSC127_DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
 $env:PGHOST = '127.0.0.1'
@@ -287,6 +306,8 @@ In WSL, Linux, or macOS, install the drivers and set the connection variables:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+npm ci
+npm run build
 npm install --global pyright@1.1.414
 export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
 export PGHOST=127.0.0.1
@@ -296,6 +317,15 @@ export PGPASSWORD=password
 export PGDATABASE=postgres
 python -m unittest discover --start-directory tests --top-level-directory . --verbose
 ```
+
+A student skips `npm ci` and `npm run build`. The release bundle already holds
+`dist/bundle`, and `./start.sh` runs it.
+
+The browser checks need a disposable database. `npm run smoke:browser` creates
+a `public.smoke_student` table, loads the page in Chromium without a window,
+and drops the table when it finishes. `npm run smoke:schema` needs
+`CMSC127_PAIR_DATABASE_URL`, a database whose only schema is `pair` with a
+`student` table. The workflow creates that database before the check.
 
 The WSL route uses Python 3.12.3 and PostgreSQL 16.15. The Windows and macOS
 routes use Python 3.15.2 and PostgreSQL 18.6.
