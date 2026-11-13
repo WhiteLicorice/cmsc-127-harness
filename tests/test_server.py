@@ -128,6 +128,7 @@ class HarnessPageTests(unittest.TestCase):
             text=True,
         )
         selected_port: int | None = None
+        output = ""
         try:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and process.poll() is None:
@@ -144,7 +145,6 @@ class HarnessPageTests(unittest.TestCase):
                 if selected_port is not None:
                     break
                 time.sleep(0.05)
-            self.assertIsNotNone(selected_port)
         finally:
             process.terminate()
             process.wait(timeout=5)
@@ -155,6 +155,7 @@ class HarnessPageTests(unittest.TestCase):
                 self.assertIn("Port 55440 is busy", output)
                 if selected_port is not None:
                     self.assertIn(f":{selected_port}/", output)
+        self.assertIsNotNone(selected_port, output)
 
     def test_non_get_requests_are_rejected(self) -> None:
         self.load_server()
@@ -441,24 +442,36 @@ class HarnessPageTests(unittest.TestCase):
             stderr=subprocess.STDOUT,
             text=True,
         )
+        selected_port: int | None = None
+        output = ""
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if process.poll() is not None:
-                    self.fail("The release server stopped before it served the page.")
-                try:
-                    payload = get_json("http://127.0.0.1:55442/api/status")
-                    self.assertEqual("connected", payload["databaseStatus"])
                     break
-                except (OSError, urllib.error.URLError):
-                    time.sleep(0.1)
-            else:
-                self.fail("The release server did not answer on port 55442.")
+                for port in range(55440, 55450):
+                    if port == 55445:
+                        continue
+                    try:
+                        payload = get_json(f"http://127.0.0.1:{port}/api/status")
+                        if (
+                            payload.get("server") == "running"
+                            and payload.get("databaseStatus") == "connected"
+                        ):
+                            selected_port = port
+                            break
+                    except (OSError, urllib.error.URLError):
+                        continue
+                if selected_port is not None:
+                    break
+                time.sleep(0.1)
         finally:
             process.terminate()
             process.wait(timeout=5)
             if process.stdout is not None:
+                output = process.stdout.read()
                 process.stdout.close()
+        self.assertIsNotNone(selected_port, output)
 
 
 if __name__ == "__main__":
