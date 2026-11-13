@@ -33,13 +33,25 @@ jobs:
       PGDATABASE: postgres
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
       - uses: actions/setup-python@v7
         with:
           python-version: 3.15.2
-      - run: python -m venv .venv
-      - run: .venv/bin/python -m pip install -r requirements.txt
-      - run: npm install --global pyright@1.1.414
-      - run: pyright
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          npm ci
+      - name: Check Python types
+        run: npm exec -- pyright
+      - name: Test and build
+        run: |
+          npm run typecheck
+          npm test -- --reporter=verbose
+          npm run build
       - run: .venv/bin/python -m unittest discover --start-directory tests --top-level-directory . --verbose
 
   native:
@@ -56,6 +68,10 @@ jobs:
       PGDATABASE: postgres
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
       - uses: actions/setup-python@v7
         with:
           python-version: 3.15.2
@@ -98,12 +114,21 @@ jobs:
           pg_ctl -D "$RUNNER_TEMP/t04-pg" -l "$RUNNER_TEMP/t04-pg.log" -o '-h 127.0.0.1 -p 55435' -w start
       - name: Install Python dependencies on Windows
         if: runner.os == 'Windows'
-        run: .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+        run: |
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+          npm ci
       - name: Install Python dependencies on Unix
         if: runner.os != 'Windows'
-        run: .venv/bin/python -m pip install -r requirements.txt
-      - run: npm install --global pyright@1.1.414
-      - run: pyright
+        run: |
+          .venv/bin/python -m pip install -r requirements.txt
+          npm ci
+      - name: Check Python types
+        run: npm exec -- pyright
+      - name: Test and build
+        run: |
+          npm run typecheck
+          npm test -- --reporter=verbose
+          npm run build
       - name: Run tests on Windows
         if: runner.os == 'Windows'
         run: .\.venv\Scripts\python.exe -m unittest discover --start-directory tests --top-level-directory . --verbose

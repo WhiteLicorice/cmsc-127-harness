@@ -175,7 +175,7 @@ CROSS JOIN pg_catalog.pg_class AS table_row
 JOIN pg_catalog.pg_namespace AS namespace_row ON namespace_row.oid = table_row.relnamespace
 WHERE namespace_row.nspname = %s
   AND table_row.relkind IN ('r', 'p', 'v', 'm')
-  AND role_row.rolname NOT LIKE 'pg\_%' ESCAPE '\'
+  AND role_row.rolname NOT LIKE 'pg\_%%' ESCAPE '\'
 ORDER BY role_row.rolname, table_row.relname
 """
 
@@ -235,7 +235,11 @@ def _fetch_rows(
     parameters: tuple[object, ...] = (),
 ) -> list[dict[str, object]]:
     with connection.cursor() as cursor:
-        cursor.execute(cast(LiteralString, statement), parameters)
+        query = cast(LiteralString, statement)
+        if parameters:
+            cursor.execute(query, parameters)
+        else:
+            cursor.execute(query)
         return [cast(dict[str, object], row) for row in cursor.fetchall()]
 
 
@@ -396,6 +400,19 @@ def _schema_endpoint(
             }
         )
 
+    relationship_data = [
+        {
+            "child": relationship["child"],
+            "parent": relationship["parent"],
+            "label": relationship["label"],
+            "childColumns": relationship["child_columns"],
+            "parentColumns": relationship["parent_columns"],
+            "required": relationship["required"],
+            "unique": relationship["unique"],
+        }
+        for relationship in relationships
+    ]
+
     if erd_text:
         with _connect_tuple(server.context) as connection:
             differences = compare_erd(connection, erd_text, schema)
@@ -415,7 +432,7 @@ def _schema_endpoint(
         "schema": schema,
         "erdText": erd_text,
         "tables": table_data,
-        "relationships": relationships,
+        "relationships": _json_value(relationship_data),
         "differences": difference_data,
     }
 
