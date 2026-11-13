@@ -31,7 +31,7 @@ export type SchemaRelationship = {
 };
 
 export type SchemaInput = {
-  schema: string;
+  schema: string | null;
   erdText: string;
   tables: SchemaTable[];
   relationships: SchemaRelationship[];
