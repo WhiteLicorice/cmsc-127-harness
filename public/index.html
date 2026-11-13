@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CMSC 127 Harness</title>
+    <link rel="stylesheet" href="/style.css">
+    <script defer src="/vendor/mermaid.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <h1>CMSC 127 Harness</h1>
+        <p>Read-only view of committed PostgreSQL data.</p>
+      </div>
+      <label for="schema-select">Schema</label>
+      <select id="schema-select" disabled></select>
+    </header>
+    <main>
+      <p id="connection-message" class="connection-message" role="status" hidden></p>
+      <p id="poll-summary" class="poll-summary">Waiting for the first poll.</p>
+      <nav id="panels" class="panel-tabs" aria-label="Harness panels"></nav>
+      <section id="panel-content" class="panel-content" aria-live="polite">
+        <p>Loading the harness.</p>
+      </section>
+    </main>
+  </body>
+</html>
