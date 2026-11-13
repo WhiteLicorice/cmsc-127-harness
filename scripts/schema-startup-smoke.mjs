@@ -96,9 +96,14 @@ try {
 
   await page.getByRole("button", { name: "Schema", exact: true }).click();
   await page.waitForTimeout(1_500);
-  const schemaSvgs = await page.locator(".mermaid").evaluateAll((nodes) =>
-    nodes.map((node) => node.querySelectorAll("svg").length),
+  const schemaNodes = await page.locator(".mermaid").evaluateAll((nodes) =>
+    nodes.map((node) => ({
+      svgs: node.querySelectorAll("svg").length,
+      text: node.textContent ?? "",
+    })),
   );
+  const schemaSvgs = schemaNodes.map((node) => node.svgs);
+  const schemaText = schemaNodes.map((node) => node.text);
   await page.screenshot({ path: resolve(artifactRoot, "schema-startup-schema.png"), fullPage: true });
   record(`schema diagrams: ${JSON.stringify(schemaSvgs)}`);
 
@@ -119,6 +124,12 @@ try {
   }
   if (JSON.stringify(schemaSvgs) !== JSON.stringify([1, 1])) {
     throw new Error(`The Schema panel did not draw both diagrams: ${JSON.stringify(schemaSvgs)}`);
+  }
+  if (schemaText.some((text) => /Syntax error/i.test(text))) {
+    throw new Error(`A schema diagram failed to render: ${JSON.stringify(schemaText)}`);
+  }
+  if (!schemaText.every((text) => text.includes("student"))) {
+    throw new Error(`A schema diagram did not draw the expected entity: ${JSON.stringify(schemaText)}`);
   }
   if (browserErrors.length > 0) {
     throw new Error(`Browser errors: ${browserErrors.join(" | ")}`);
