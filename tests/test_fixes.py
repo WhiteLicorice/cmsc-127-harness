@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from types import TracebackType
 from typing import Callable, Protocol, cast
@@ -276,6 +276,228 @@ class FormFaultTests(unittest.TestCase):
             self.assertEqual(2, exit_code, output.getvalue())
             self.assertIn("== form fault ==", output.getvalue())
             self.assertFalse((root / ".cmsc127" / "last-run.json").exists())
+
+    def assert_malformed_field_fault(
+        self: FormFaultTests,
+        root: Path,
+        location: str,
+        message: str,
+    ) -> None:
+        output = StringIO()
+        errors = StringIO()
+        create_database = mock.Mock(side_effect=AssertionError("database was created"))
+        exit_code = -1
+        with mock.patch.object(runner, "_create_database", create_database):
+            with mock.patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1:1/postgres"},
+            ):
+                with redirect_stdout(output), redirect_stderr(errors):
+                    try:
+                        exit_code = main(["1", "--root", str(root)])
+                    except BaseException as error:
+                        self.fail(f"runner raised {error!r} instead of a form fault")
+
+        self.assertEqual(2, exit_code, output.getvalue())
+        self.assertIn("== form fault ==", output.getvalue())
+        self.assertIn(location, output.getvalue())
+        self.assertIn(message, output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue() + errors.getvalue())
+        create_database.assert_not_called()
+        self.assertFalse((root / ".cmsc127" / "last-run.json").exists())
+
+    def test_race_session_array_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(
+                root / "cases" / "manifest.json",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "bad",
+                                "stage": 1,
+                                "kind": "race",
+                                "file": "cases/bad.json",
+                            }
+                        ],
+                    }
+                ),
+            )
+            write(
+                root / "cases" / "bad.json",
+                '{\n  "steps": [{"session": [], "sql": "SELECT 1"}],\n'
+                '  "check_sql": "SELECT 1"\n}\n',
+            )
+            write(root / "cases" / "bad.expected", '{"columns":["value"],"rows":[[1]]}\n')
+
+            self.assert_malformed_field_fault(
+                root,
+                "bad.json: line 2, column 25",
+                "session must be a or b",
+            )
+
+    def test_race_session_object_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(
+                root / "cases" / "manifest.json",
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "bad",
+                                "stage": 1,
+                                "kind": "race",
+                                "file": "cases/bad.json",
+                            }
+                        ],
+                    }
+                ),
+            )
+            write(
+                root / "cases" / "bad.json",
+                '{\n  "steps": [{"session": {}, "sql": "SELECT 1"}],\n'
+                '  "check_sql": "SELECT 1"\n}\n',
+            )
+            write(root / "cases" / "bad.expected", '{"columns":["value"],"rows":[[1]]}\n')
+
+            self.assert_malformed_field_fault(
+                root,
+                "bad.json: line 2, column 25",
+                "session must be a or b",
+            )
+
+    def test_feature_array_value_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_pair(root)
+            write(
+                root / "cases" / "manifest.json",
+                '{\n'
+                '  "version": 1,\n'
+                '  "cases": [\n'
+                "    {\n"
+                '      "id": "lab1/one",\n'
+                '      "stage": 1,\n'
+                '      "kind": "query",\n'
+                '      "file": "cases/lab1/one.sql"\n'
+                "    }\n"
+                "  ],\n"
+                '  "invariants": [\n'
+                "    {\n"
+                '      "id": "feature",\n'
+                '      "stage": 1,\n'
+                '      "kind": "feature",\n'
+                '      "schema": "public",\n'
+                '      "view": "v",\n'
+                '      "features": [[]]\n'
+                "    }\n"
+                "  ]\n"
+                "}\n",
+            )
+
+            self.assert_malformed_field_fault(
+                root,
+                "manifest.json: line 18, column 20",
+                "unsupported SQL feature",
+            )
+
+    def test_feature_object_value_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_pair(root)
+            write(
+                root / "cases" / "manifest.json",
+                '{\n'
+                '  "version": 1,\n'
+                '  "cases": [\n'
+                "    {\n"
+                '      "id": "lab1/one",\n'
+                '      "stage": 1,\n'
+                '      "kind": "query",\n'
+                '      "file": "cases/lab1/one.sql"\n'
+                "    }\n"
+                "  ],\n"
+                '  "invariants": [\n'
+                "    {\n"
+                '      "id": "feature",\n'
+                '      "stage": 1,\n'
+                '      "kind": "feature",\n'
+                '      "schema": "public",\n'
+                '      "view": "v",\n'
+                '      "features": [{}]\n'
+                "    }\n"
+                "  ]\n"
+                "}\n",
+            )
+
+            self.assert_malformed_field_fault(
+                root,
+                "manifest.json: line 18, column 20",
+                "unsupported SQL feature",
+            )
+
+    def test_case_kind_array_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(
+                root / "cases" / "manifest.json",
+                '{\n'
+                '  "version": 1,\n'
+                '  "cases": [\n'
+                "    {\n"
+                '      "id": "bad",\n'
+                '      "stage": 1,\n'
+                '      "kind": [],\n'
+                '      "file": "cases/bad.sql"\n'
+                "    }\n"
+                "  ]\n"
+                "}\n",
+            )
+
+            self.assert_malformed_field_fault(
+                root,
+                "manifest.json: line 7, column 15",
+                "unsupported kind",
+            )
+
+    def test_invariant_kind_object_is_a_form_fault(self: FormFaultTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_pair(root)
+            write(
+                root / "cases" / "manifest.json",
+                '{\n'
+                '  "version": 1,\n'
+                '  "cases": [\n'
+                "    {\n"
+                '      "id": "lab1/one",\n'
+                '      "stage": 1,\n'
+                '      "kind": "query",\n'
+                '      "file": "cases/lab1/one.sql"\n'
+                "    }\n"
+                "  ],\n"
+                '  "invariants": [\n'
+                "    {\n"
+                '      "id": "feature",\n'
+                '      "stage": 1,\n'
+                '      "kind": {},\n'
+                '      "schema": "public",\n'
+                '      "view": "v",\n'
+                '      "features": ["left_join"]\n'
+                "    }\n"
+                "  ]\n"
+                "}\n",
+            )
+
+            self.assert_malformed_field_fault(
+                root,
+                "manifest.json: line 15, column 15",
+                "unsupported kind",
+            )
 
 
 class PairManifestTests(unittest.TestCase):
