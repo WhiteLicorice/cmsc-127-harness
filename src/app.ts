@@ -141,7 +141,7 @@ async function pollTables(): Promise<void> {
       feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now)].slice(-100);
     }
     pollSummary.textContent = `Last table poll: ${now}. Interval: ${pollInterval} ms.`;
-    showMessage("");
+    showMessage(response.message ?? "");
     if (activePanel === "tables" || activePanel === "changes") {
       renderCurrentPanel();
     }
@@ -198,7 +198,6 @@ schemaSelect.addEventListener("change", () => {
 });
 
 buildPanelButtons();
-schemaSelect.disabled = false;
 void requestJson("/api/changes")
   .then((data) => {
     const settings = data as { pollIntervalMs?: number };
