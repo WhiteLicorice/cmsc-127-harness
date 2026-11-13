@@ -256,7 +256,7 @@ class HarnessPageTests(unittest.TestCase):
         self.load_server()
         with running_server(
             REPOSITORY_ROOT,
-            "postgresql://postgres@127.0.0.1:55446/postgres",
+            "postgresql://postgres@127.0.0.1:55449/postgres",
         ) as base_url:
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
