@@ -29,7 +29,6 @@ from psycopg import sql
 DATABASE_URL = os.environ.get("CMSC127_DATABASE_URL")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_ROOT = REPOSITORY_ROOT / "dist" / "bundle"
-TEST_PORT = 55448
 
 
 @contextmanager
@@ -84,12 +83,12 @@ def test_schema() -> Generator[str, None, None]:
 def running_server(project_root: Path, database_url: str | None) -> Generator[str, None, None]:
     server_module = importlib.import_module("server")
     server = server_module.create_server(
-        project_root, BUNDLE_ROOT / "public", database_url, TEST_PORT
+        project_root, BUNDLE_ROOT / "public", database_url, 0
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{TEST_PORT}"
+        yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
         server.server_close()
@@ -150,7 +149,7 @@ class HarnessPageTests(unittest.TestCase):
 
     def test_server_binds_only_to_loopback(self) -> None:
         server_module = self.load_server()
-        server = server_module.create_server(REPOSITORY_ROOT, BUNDLE_ROOT / "public", None, TEST_PORT)
+        server = server_module.create_server(REPOSITORY_ROOT, BUNDLE_ROOT / "public", None, 0)
         try:
             self.assertEqual("127.0.0.1", server.server_address[0])
         finally:
