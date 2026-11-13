@@ -51,6 +51,10 @@ jobs:
           npm run typecheck
           npm test -- --reporter=verbose
           npm run build
+      - name: Install Chromium for headless smoke
+        run: npx playwright install chromium --with-deps --only-shell
+      - name: Run headless browser smoke
+        run: npm run smoke:browser
       - name: Run all Python tests
         run: .venv/bin/python -m unittest discover --start-directory tests --top-level-directory . --verbose
 
@@ -131,6 +135,11 @@ jobs:
           npm run typecheck
           npm test -- --reporter=verbose
           npm run build
+      - name: Install Chromium for headless smoke on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium --only-shell
+      - name: Run headless browser smoke
+        run: npm run smoke:browser
       - name: Run all Python tests
         if: runner.os == 'Windows'
         shell: pwsh
