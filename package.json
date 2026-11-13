@@ -1,0 +1,20 @@
+{
+  "name": "cmsc-127-harness-page",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.9.x"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "npm run typecheck && tsc && node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "pyright": "1.1.414",
+    "typescript": "5.9.3",
+    "vite": "6.4.6",
+    "vitest": "5.1.0"
+  }
+}

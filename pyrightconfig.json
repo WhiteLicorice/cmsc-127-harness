@@ -1,6 +1,6 @@
 {
   "include": [".", "tests"],
-  "exclude": [".venv", "**/__pycache__/**"],
+  "exclude": [".venv", "dist", "node_modules", "**/__pycache__/**"],
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.15",

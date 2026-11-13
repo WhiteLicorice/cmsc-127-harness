@@ -1,0 +1,181 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #1f2937;
+  background: #f4f6f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.1rem 1.5rem;
+  color: white;
+  background: #17324d;
+}
+
+.page-header div {
+  flex: 1;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.page-header p {
+  margin: 0.3rem 0 0;
+  color: #d8e3ee;
+}
+
+main {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 2rem;
+}
+
+.connection-message {
+  padding: 0.75rem 1rem;
+  border-left: 4px solid #b42318;
+  background: #fee4e2;
+  color: #7a271a;
+}
+
+.poll-summary {
+  color: #526274;
+  font-size: 0.9rem;
+}
+
+.panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  border-bottom: 1px solid #ccd4dd;
+}
+
+.panel-tabs button {
+  padding: 0.65rem 0.9rem;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 0.4rem 0.4rem 0 0;
+  color: #27384a;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel-tabs button[aria-pressed="true"] {
+  border-color: #ccd4dd;
+  background: white;
+  font-weight: 650;
+}
+
+.panel-content {
+  min-height: 20rem;
+  padding: 1.2rem;
+  background: white;
+}
+
+.table-card {
+  margin: 1.2rem 0 2rem;
+}
+
+.table-card h3 {
+  margin: 0 0 0.35rem;
+}
+
+.table-card p,
+.panel-content p {
+  color: #526274;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  margin: 0.75rem 0 1.5rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+th,
+td {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #d7dee6;
+  text-align: left;
+  vertical-align: top;
+}
+
+thead th {
+  background: #edf2f7;
+}
+
+tr.insert {
+  background: #e8f5e9;
+}
+
+tr.update {
+  background: #fff4d6;
+}
+
+tr.delete {
+  background: #fde8e7;
+  color: #7a271a;
+}
+
+pre {
+  max-width: 100%;
+  overflow: auto;
+  padding: 0.75rem;
+  background: #f2f5f8;
+  white-space: pre-wrap;
+}
+
+.mermaid {
+  text-align: center;
+}
+
+.error-message {
+  padding: 0.75rem;
+  border-left: 4px solid #b42318;
+  background: #fee4e2;
+  color: #7a271a !important;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.3fr) 1fr;
+  gap: 0.5rem 1rem;
+}
+
+dt {
+  font-weight: 650;
+}
+
+dd {
+  margin: 0;
+}
+
+@media (max-width: 650px) {
+  .page-header {
+    flex-wrap: wrap;
+  }
+
+  main {
+    padding: 0.75rem;
+  }
+
+  .panel-content {
+    padding: 0.75rem;
+  }
+}
