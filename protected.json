@@ -4,7 +4,7 @@
     ".github/workflows/check.yml": "71b9bd2a08cf5bfea40f46903c834ee2a4f05f7a32fdcbab19675caf35063622",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "check.sh": "7c2f2ef490b4ece6e097840507ac1340b3b033e74823b1ea9785ad1f5ae00046",
+    "check.sh": "21494f9749d0f0948423181668efe4748ea94f1c8866b0bc5765d412440545ad",
     "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
     "cases/manifest.json": "c7307c27d1ec6f28f2403d6dba4964edf39a262378ff8ae41977c5ecb962891c",
     "cases/lab1/health.sql": "8bc0c5f99568e014de054f91776d9d603e2a09f860139fb00ecaf1899b49de67",
