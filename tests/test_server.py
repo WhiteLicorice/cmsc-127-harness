@@ -156,6 +156,18 @@ class HarnessPageTests(unittest.TestCase):
         finally:
             server.server_close()
 
+    def test_server_bind_does_not_resolve_the_loopback_hostname(self) -> None:
+        server_module = self.load_server()
+        with patch("socket.getfqdn", side_effect=AssertionError("reverse DNS lookup ran")):
+            server = server_module.create_server(
+                REPOSITORY_ROOT, BUNDLE_ROOT / "public", None, 0
+            )
+        try:
+            self.assertEqual("127.0.0.1", server.server_address[0])
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
     def test_main_uses_an_os_assigned_port_when_the_preferred_port_is_busy(self) -> None:
         server_module = self.load_server()
         server = Mock()
