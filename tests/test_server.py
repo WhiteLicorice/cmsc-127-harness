@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import os
+import queue
 import subprocess
 import sys
 import socket
@@ -12,12 +14,12 @@ import unittest
 import urllib.error
 import urllib.request
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import ModuleType
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import psycopg
@@ -99,6 +101,49 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+def wait_for_server_port(
+    process: subprocess.Popen[str], timeout: float
+) -> tuple[int | None, list[str], queue.Queue[str], threading.Thread]:
+    if process.stdout is None:
+        raise RuntimeError("The server subprocess has no output stream.")
+    output_queue: queue.Queue[str] = queue.Queue()
+    output: list[str] = []
+
+    def read_output() -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            output_queue.put(line)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            line = output_queue.get(timeout=min(0.1, deadline - time.monotonic()))
+        except queue.Empty:
+            if process.poll() is not None:
+                break
+            continue
+        output.append(line)
+        if "CMSC 127 Harness is available at http://127.0.0.1:" in line:
+            port = int(line.rsplit(":", 1)[1].split("/", 1)[0])
+            return port, output, output_queue, reader
+    return None, output, output_queue, reader
+
+
+def drain_server_output(
+    output: list[str], output_queue: queue.Queue[str], reader: threading.Thread
+) -> str:
+    reader.join(timeout=1)
+    while True:
+        try:
+            output.append(output_queue.get_nowait())
+        except queue.Empty:
+            break
+    return "".join(output)
+
+
 class HarnessPageTests(unittest.TestCase):
     def load_server(self) -> ModuleType:
         return importlib.import_module("server")
@@ -110,6 +155,27 @@ class HarnessPageTests(unittest.TestCase):
             self.assertEqual("127.0.0.1", server.server_address[0])
         finally:
             server.server_close()
+
+    def test_main_uses_an_os_assigned_port_when_the_preferred_port_is_busy(self) -> None:
+        server_module = self.load_server()
+        server = Mock()
+        server.server_port = 60123
+        server.serve_forever.side_effect = KeyboardInterrupt
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch.object(server_module, "create_server", side_effect=[OSError("busy"), server]) as create_server,
+            patch.dict(os.environ, {"CMSC127_PORT": "55440"}),
+            patch.object(sys, "argv", ["server.py", "--no-browser"]),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            exit_code = server_module.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(0, create_server.call_args_list[1].args[3])
+        self.assertIn("http://127.0.0.1:60123/", stdout.getvalue())
+        self.assertIn("Port 55440 is busy", stderr.getvalue())
 
     def test_startup_uses_and_prints_a_free_port(self) -> None:
         self.load_server()
@@ -128,33 +194,29 @@ class HarnessPageTests(unittest.TestCase):
             text=True,
         )
         selected_port: int | None = None
+        output_lines: list[str] = []
+        output_queue: queue.Queue[str] = queue.Queue()
+        reader: threading.Thread | None = None
         output = ""
         try:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and process.poll() is None:
-                for port in [*range(55441, 55450)]:
-                    if port == 55445:
-                        continue
-                    try:
-                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=0.2) as response:
-                            if response.status == 200:
-                                selected_port = port
-                                break
-                    except (OSError, urllib.error.URLError):
-                        continue
-                if selected_port is not None:
-                    break
-                time.sleep(0.05)
+            selected_port, output_lines, output_queue, reader = wait_for_server_port(process, 5)
+            if selected_port is not None:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{selected_port}/", timeout=3
+                ) as response:
+                    self.assertEqual(200, response.status)
         finally:
             process.terminate()
             process.wait(timeout=5)
             held_socket.close()
+            if reader is not None:
+                output = drain_server_output(output_lines, output_queue, reader)
             if process.stdout is not None:
-                output = process.stdout.read()
                 process.stdout.close()
-                self.assertIn("Port 55440 is busy", output)
-                if selected_port is not None:
-                    self.assertIn(f":{selected_port}/", output)
+        self.assertIn("Port 55440 is busy", output)
+        if selected_port is not None:
+            self.assertNotEqual(55440, selected_port)
+            self.assertIn(f":{selected_port}/", output)
         self.assertIsNotNone(selected_port, output)
 
     def test_non_get_requests_are_rejected(self) -> None:
@@ -443,33 +505,28 @@ class HarnessPageTests(unittest.TestCase):
             text=True,
         )
         selected_port: int | None = None
+        output_lines: list[str] = []
+        output_queue: queue.Queue[str] = queue.Queue()
+        reader: threading.Thread | None = None
         output = ""
         try:
+            selected_port, output_lines, output_queue, reader = wait_for_server_port(process, 10)
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    break
-                for port in range(55440, 55450):
-                    if port == 55445:
-                        continue
-                    try:
-                        payload = get_json(f"http://127.0.0.1:{port}/api/status")
-                        if (
-                            payload.get("server") == "running"
-                            and payload.get("databaseStatus") == "connected"
-                        ):
-                            selected_port = port
-                            break
-                    except (OSError, urllib.error.URLError):
-                        continue
-                if selected_port is not None:
-                    break
-                time.sleep(0.1)
+            while selected_port is not None and time.monotonic() < deadline:
+                try:
+                    payload = get_json(f"http://127.0.0.1:{selected_port}/api/status")
+                    if payload.get("server") == "running" and payload.get("databaseStatus") == "connected":
+                        break
+                except (OSError, urllib.error.URLError):
+                    time.sleep(0.1)
+            else:
+                selected_port = None
         finally:
             process.terminate()
             process.wait(timeout=5)
+            if reader is not None:
+                output = drain_server_output(output_lines, output_queue, reader)
             if process.stdout is not None:
-                output = process.stdout.read()
                 process.stdout.close()
         self.assertIsNotNone(selected_port, output)
 

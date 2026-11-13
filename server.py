@@ -643,11 +643,6 @@ def create_server(
     return HarnessHTTPServer(context, port)
 
 
-def _port_candidates(preferred: int) -> list[int]:
-    candidates = [preferred, *range(55440, 55450)]
-    return [port for index, port in enumerate(candidates) if port != 55445 and port not in candidates[:index]]
-
-
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the read-only CMSC 127 harness page.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the default browser.")
@@ -665,22 +660,25 @@ def main() -> int:
 
     bundle_root = Path(__file__).resolve().parent
     project_root = Path.cwd().resolve()
-    server: HarnessHTTPServer | None = None
-    for port in _port_candidates(preferred):
+    try:
+        server = create_server(
+            project_root,
+            bundle_root / "public",
+            os.environ.get("CMSC127_DATABASE_URL"),
+            preferred,
+        )
+    except OSError:
+        print(f"Port {preferred} is busy. Trying another local port.", file=sys.stderr)
         try:
             server = create_server(
                 project_root,
                 bundle_root / "public",
                 os.environ.get("CMSC127_DATABASE_URL"),
-                port,
+                0,
             )
-        except OSError:
-            print(f"Port {port} is busy. Trying another local port.", file=sys.stderr)
-            continue
-        break
-    if server is None:
-        print("Ports 55440 to 55449 are busy. Stop a local program and try again.", file=sys.stderr)
-        return 1
+        except OSError as error:
+            print(f"Could not select a free local port: {error}", file=sys.stderr)
+            return 1
 
     address = f"http://127.0.0.1:{server.server_port}/"
     print(f"CMSC 127 Harness is available at {address}", flush=True)
