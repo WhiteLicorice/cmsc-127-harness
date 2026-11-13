@@ -511,7 +511,97 @@ class ParserEdgeCaseTests(unittest.TestCase):
                     parse_erd(f"erDiagram\n    {declaration}\n")
 
 
+    def test_one_line_entity_accepts_supported_attribute_shapes(
+        self: ParserEdgeCaseTests,
+    ) -> None:
+        declarations: tuple[tuple[str, str, str, frozenset[str]], ...] = (
+            ("int id", "id", "int", frozenset()),
+            ("int id PK", "id", "int", frozenset({"PK"})),
+            ("int id PK, FK", "id", "int", frozenset({"PK", "FK"})),
+            (
+                "numeric(10,2) amount PK",
+                "amount",
+                "numeric(10,2)",
+                frozenset({"PK"}),
+            ),
+        )
+        for declaration, name, type_name, markers in declarations:
+            with self.subTest(declaration=declaration):
+                erd = parse_erd(f"erDiagram\n    parent {{ {declaration} }}\n")
+                attribute = erd.entities["parent"].attributes[name]
+                self.assertEqual(type_name, attribute.type_name)
+                self.assertEqual(markers, attribute.key_markers)
+
+    def test_one_line_entity_rejects_unsupported_attribute_shapes(
+        self: ParserEdgeCaseTests,
+    ) -> None:
+        declarations = (
+            "int id text name",
+            "int id int y",
+            "int id text name PK",
+        )
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                with self.assertRaisesRegex(
+                    ERDParseError, "write each attribute on its own line"
+                ):
+                    parse_erd(f"erDiagram\n    parent {{ {declaration} }}\n")
+
+
 class DoctorDatabaseTests(unittest.TestCase):
+    def test_connection_failure_prints_cause_and_exits_one(
+        self: DoctorDatabaseTests,
+    ) -> None:
+        output = StringIO()
+        with (
+            patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=["3.3.9", "1.31.6"],
+            ),
+            patch.object(
+                doctor_db,
+                "_connect",
+                side_effect=RuntimeError("password authentication failed for user"),
+            ),
+            patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(1, exit_code)
+        self.assertIn(
+            "FAIL  psycopg: The password is wrong. Check the password in CMSC127_DATABASE_URL.",
+            output.getvalue().splitlines(),
+        )
+
+    def test_no_driver_diagnostic_is_not_repeated_by_connection_check(
+        self: DoctorDatabaseTests,
+    ) -> None:
+        output = StringIO()
+        with (
+            patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=[
+                    doctor_db.metadata.PackageNotFoundError,
+                    doctor_db.metadata.PackageNotFoundError,
+                ],
+            ),
+            patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("", output.getvalue())
+
     def test_stale_fallback_version_is_hidden_during_connection_check(
         self: DoctorDatabaseTests,
     ) -> None:

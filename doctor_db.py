@@ -118,7 +118,7 @@ def main() -> int:
         )
         return 1
 
-    installed, failures = _installed_drivers()
+    installed, _failures = _installed_drivers()
     connected = False
     for driver, _version in installed:
         connection = None
@@ -126,14 +126,11 @@ def main() -> int:
             connection = _connect(driver, url)
             connected = True
         except Exception as error:
-            failures.append(f"FAIL  {driver}: {_failure_message(error)}")
+            print(f"FAIL  {driver}: {_failure_message(error)}")
         finally:
             if connection is not None:
                 connection.close()
 
-    for failure in failures:
-        if failure.startswith("FAIL  No course driver is installed."):
-            print(failure)
     return 0 if connected else 1
 
 

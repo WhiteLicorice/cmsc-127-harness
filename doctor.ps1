@@ -39,25 +39,33 @@ if ($virtualEnvironment) {
 }
 if ($null -ne $python) {
     if ($virtualEnvironment) {
-        $pythonVersionOutput = & $python.Source --version 2>$null
+        $pythonOutput = @(& $python.Source --version 2>&1)
     } else {
-        $pythonVersionOutput = & $python.Source -3.15 --version 2>$null
+        $pythonOutput = @(& $python.Source -3.15 --version 2>&1)
     }
-    $pythonVersion = [regex]::Match(
-        [string]$pythonVersionOutput, '\d+(?:\.\d+)+'
-    ).Value
-    $pythonOk = $LASTEXITCODE -eq 0 -and $pythonVersion -eq '3.15.2'
+    $pythonExitCode = $LASTEXITCODE
+    $pythonVersionOutput = ($pythonOutput | ForEach-Object { "$_" }) -join ' '
+    if ([string]::IsNullOrWhiteSpace($pythonVersionOutput)) {
+        $pythonVersion = ''
+    } else {
+        $pythonVersion = [regex]::Match(
+            $pythonVersionOutput, '\d+(?:\.\d+)+'
+        ).Value
+    }
+    $pythonOk = $pythonExitCode -eq 0 -and $pythonVersion -eq '3.15.2'
 }
 if ($null -eq $python) {
     $pythonFailure = 'The Python command is not on PATH.'
+} elseif ([string]::IsNullOrWhiteSpace($pythonVersionOutput)) {
+    $pythonFailure = 'The Python 3.15 command did not run.'
 } else {
-    $pythonFailure = "Python reports $pythonVersion."
+    $pythonFailure = "Python reports $pythonVersionOutput."
 }
 Report-Result $pythonOk 'Python 3.15.2 runs.' $pythonFailure `
     'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
 
-$driversOk = $false
 if ($pythonOk) {
+    $driversOk = $false
     if ($virtualEnvironment) {
         $driverOutput = & $python.Source -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
     } else {
@@ -65,10 +73,12 @@ if ($pythonOk) {
     }
     $driversOk = $LASTEXITCODE -eq 0
     $driverOutput | ForEach-Object { Write-Host $_ }
+    Report-Result $driversOk 'A pinned course database driver is installed.' `
+        'No pinned course database driver passed.' `
+        'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from the harness folder.'
+} else {
+    Write-Host 'Skipped the driver and connection checks because Python did not run.'
 }
-Report-Result $driversOk 'A pinned course database driver is installed.' `
-    'No pinned course database driver passed.' `
-    'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from the harness folder.'
 
 foreach ($tool in @('psql', 'pg_dump')) {
     $application = Find-Application $tool
@@ -78,22 +88,39 @@ foreach ($tool in @('psql', 'pg_dump')) {
         continue
     }
 
-    $toolVersionOutput = & $application.Source --version 2>$null | Select-Object -First 1
-    $toolVersion = [regex]::Match(
-        [string]$toolVersionOutput, '\d+(?:\.\d+)+'
-    ).Value
-    $toolOk = $toolVersion -eq '18.6'
-    Report-Result $toolOk "$tool reports PostgreSQL 18.6." `
-        "$tool reports $toolVersion." $repair
+    $toolOutput = @(& $application.Source --version 2>&1)
+    $toolExitCode = $LASTEXITCODE
+    $toolVersionOutput = ($toolOutput | ForEach-Object { "$_" }) -join ' '
+    if ([string]::IsNullOrWhiteSpace($toolVersionOutput)) {
+        $toolVersion = ''
+        $toolFailure = "$tool did not report a version."
+    } else {
+        $toolVersion = [regex]::Match(
+            $toolVersionOutput, '\d+(?:\.\d+)+'
+        ).Value
+        $toolFailure = "$tool reports $toolVersionOutput."
+    }
+    $toolOk = $toolExitCode -eq 0 -and $toolVersion -eq '18.6'
+    Report-Result $toolOk "$tool reports PostgreSQL 18.6." $toolFailure $repair
 }
 
 $git = Find-Application 'git'
-$gitOk = $null -ne $git
-if ($gitOk) {
-    $gitVersion = git --version
-    $gitOk = -not [string]::IsNullOrWhiteSpace($gitVersion)
+if ($null -eq $git) {
+    $gitOk = $false
+    $gitFailure = 'Git is not on PATH.'
+} else {
+    $gitOutput = @(& $git.Source --version 2>&1)
+    $gitExitCode = $LASTEXITCODE
+    $gitVersionOutput = ($gitOutput | ForEach-Object { "$_" }) -join ' '
+    if ([string]::IsNullOrWhiteSpace($gitVersionOutput)) {
+        $gitOk = $false
+        $gitFailure = 'Git did not report a version.'
+    } else {
+        $gitOk = $gitExitCode -eq 0
+        $gitFailure = "Git reports $gitVersionOutput."
+    }
 }
-Report-Result $gitOk 'Git runs from PATH.' 'Git is not on PATH.' `
+Report-Result $gitOk 'Git runs from PATH.' $gitFailure `
     'Install Git for Windows with WinGet. Run winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements. If WinGet says Git is in use, close Git Bash, bash.exe, and sleep.exe. Run the install command again.'
 
 $service = Get-Service -Name 'postgresql-x64-18' -ErrorAction SilentlyContinue
@@ -109,8 +136,8 @@ Report-Result $portOk 'A server listens on port 5432.' `
     'No server listens on port 5432.' `
     'Run Get-NetTCPConnection -LocalPort 5432. If WSL holds the port, run pg_lsclusters in WSL. Select a free port for one server.'
 
-$databaseOk = $false
 if ($pythonOk) {
+    $databaseOk = $false
     if ($virtualEnvironment) {
         $databaseOutput = & $python.Source -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
     } else {
@@ -118,10 +145,10 @@ if ($pythonOk) {
     }
     $databaseOk = $LASTEXITCODE -eq 0
     $databaseOutput | ForEach-Object { Write-Host $_ }
+    Report-Result $databaseOk 'A course driver connects to the configured database.' `
+        'A course driver did not connect to the configured database.' `
+        'Set CMSC127_DATABASE_URL to the PostgreSQL database for this course. Check its password. Check the host and port. Check the server state.'
 }
-Report-Result $databaseOk 'A course driver connects to the configured database.' `
-    'A course driver did not connect to the configured database.' `
-    'Set CMSC127_DATABASE_URL to the PostgreSQL database for this course. Check its password. Check the host and port. Check the server state.'
 
 Write-Host "$script:passed of $script:total steps complete."
 exit $(if ($script:failed -eq 0) { 0 } else { 1 })
