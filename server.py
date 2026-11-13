@@ -13,6 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any, LiteralString, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -200,6 +201,11 @@ class HarnessHTTPServer(ThreadingHTTPServer):
     def __init__(self, context: AppContext, port: int) -> None:
         self.context = context
         super().__init__(("127.0.0.1", port), RequestHandler)
+
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        self.server_name = cast(str, self.server_address[0])
+        self.server_port = self.server_address[1]
 
 
 def _connect_dict(context: AppContext) -> psycopg.Connection[Any]:
