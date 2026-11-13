@@ -26,6 +26,7 @@ from comparator import Difference, compare_erd
 ROW_CAP = 100
 POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
+_NO_SCHEMA_MESSAGE = "No schema is available in this database. Create a schema, then reload the page."
 
 _SCHEMAS_SQL = r"""
 SELECT schema_name
@@ -281,8 +282,14 @@ def _selected_schema(
     connection: psycopg.Connection[Any], query: dict[str, list[str]]
 ) -> tuple[str | None, list[str]]:
     schemas = _schema_names(connection)
-    requested = query.get("schema", ["public"])[0]
-    return (requested if requested in schemas else None), schemas
+    requested = query.get("schema", [""])[0]
+    if requested in schemas:
+        return requested, schemas
+    if "public" in schemas:
+        return "public", schemas
+    if schemas:
+        return schemas[0], schemas
+    return None, schemas
 
 
 def _group_columns(rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -320,7 +327,13 @@ def _tables_endpoint(
     with _connect_dict(server.context) as connection:
         schema, schemas = _selected_schema(connection, query)
         if schema is None:
-            return 400, {"message": "Choose a schema from the available list."}
+            return 200, {
+                "schema": None,
+                "schemas": schemas,
+                "rowCap": ROW_CAP,
+                "tables": [],
+                "message": _NO_SCHEMA_MESSAGE,
+            }
         table_rows = _fetch_rows(connection, _TABLES_SQL, (schema,))
         column_groups = _group_columns(_fetch_rows(connection, _COLUMNS_SQL, (schema,)))
         tables: list[dict[str, object]] = []
@@ -374,9 +387,24 @@ def _schema_endpoint(
 ) -> tuple[int, object]:
     erd_text = _extract_erd(server.context.project_root)
     with _connect_dict(server.context) as connection:
-        schema, _ = _selected_schema(connection, query)
+        schema, schemas = _selected_schema(connection, query)
         if schema is None:
-            return 400, {"message": "Choose a schema from the available list."}
+            return 200, {
+                "schema": None,
+                "schemas": schemas,
+                "erdText": erd_text,
+                "tables": [],
+                "relationships": [],
+                "differences": [
+                    {
+                        "property": "schema",
+                        "subject": "database",
+                        "erdValue": "one accessible schema",
+                        "schemaValue": "none",
+                        "message": _NO_SCHEMA_MESSAGE,
+                    }
+                ],
+            }
         tables = _fetch_rows(connection, _TABLES_SQL, (schema,))
         columns = _group_columns(_fetch_rows(connection, _COLUMNS_SQL, (schema,)))
         constraints = _fetch_rows(connection, _CONSTRAINTS_SQL, (schema,))
@@ -472,9 +500,14 @@ def _roles_endpoint(
     server: HarnessHTTPServer, query: dict[str, list[str]]
 ) -> tuple[int, object]:
     with _connect_dict(server.context) as connection:
-        schema, _ = _selected_schema(connection, query)
+        schema, schemas = _selected_schema(connection, query)
         if schema is None:
-            return 400, {"message": "Choose a schema from the available list."}
+            return 200, {
+                "schema": None,
+                "schemas": schemas,
+                "privileges": [],
+                "message": _NO_SCHEMA_MESSAGE,
+            }
         privileges = _fetch_rows(connection, _ROLES_SQL, (schema,))
     data = [
         {
