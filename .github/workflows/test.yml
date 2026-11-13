@@ -53,6 +53,13 @@ jobs:
           npm run build
       - name: Install Chromium for headless smoke
         run: npx playwright install chromium --with-deps --only-shell
+      - name: Seed the browser smoke table
+        shell: bash
+        run: |
+          psql "$CMSC127_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c "CREATE TABLE IF NOT EXISTS public.smoke_student (id integer PRIMARY KEY, name text NOT NULL);" \
+            -c "TRUNCATE public.smoke_student;" \
+            -c "INSERT INTO public.smoke_student VALUES (1, 'Ana'), (2, 'Ben');"
       - name: Run headless browser smoke
         run: npm run smoke:browser
       - name: Create the pair-only database
@@ -160,6 +167,13 @@ jobs:
       - name: Install Chromium for headless smoke on macOS and Windows
         if: runner.os != 'Linux'
         run: npx playwright install chromium --only-shell
+      - name: Seed the browser smoke table
+        shell: bash
+        run: |
+          psql "$CMSC127_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c "CREATE TABLE IF NOT EXISTS public.smoke_student (id integer PRIMARY KEY, name text NOT NULL);" \
+            -c "TRUNCATE public.smoke_student;" \
+            -c "INSERT INTO public.smoke_student VALUES (1, 'Ana'), (2, 'Ben');"
       - name: Run headless browser smoke
         run: npm run smoke:browser
       - name: Create the pair-only database
