@@ -52,7 +52,7 @@ check_feature = cast(
     getattr(runner, "_check_feature"),
 )
 check_index = cast(
-    Callable[[Path, object, Mapping[str, object]], list[str]],
+    Callable[[Path, object, Mapping[str, object], set[tuple[str, str]]], list[str]],
     getattr(runner, "_check_index"),
 )
 check_normal_form = cast(
@@ -72,7 +72,7 @@ check_written = cast(
 )
 run_invariants = cast(
     Callable[
-        [Path, Mapping[str, object], object, str, Path, int],
+        [Path, Mapping[str, object], object, str, Path, int, set[tuple[str, str]]],
         list[dict[str, object]],
     ],
     getattr(runner, "_run_invariants"),
@@ -638,14 +638,16 @@ class InvariantTests(unittest.TestCase):
                     root,
                     self.connection,
                     {"file": "report.sql", "index": index},
+                    {(self.schema, index)},
                 ),
             )
             errors = check_index(
                 root,
                 self.connection,
                 {"file": "report.sql", "index": "missing_index"},
+                {(self.schema, index)},
             )
-            self.assertTrue(any("does not use index missing_index" in error for error in errors))
+            self.assertTrue(any("does not exist" in error for error in errors))
 
     def test_protected_files_allow_pair_cases_and_reject_changes(
         self: InvariantTests,
@@ -720,6 +722,7 @@ class InvariantTests(unittest.TestCase):
                 os.environ["CMSC127_DATABASE_URL"],
                 root,
                 1,
+                set(),
             )
 
             self.assertEqual("fail", results[0]["status"])
