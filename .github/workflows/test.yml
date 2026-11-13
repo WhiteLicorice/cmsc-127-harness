@@ -55,6 +55,28 @@ jobs:
         run: npx playwright install chromium --with-deps --only-shell
       - name: Run headless browser smoke
         run: npm run smoke:browser
+      - name: Create the pair-only database
+        shell: bash
+        run: |
+          pair_url="${CMSC127_DATABASE_URL%/*}/t12_pair"
+          psql "$CMSC127_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS t12_pair WITH (FORCE);" \
+            -c "CREATE DATABASE t12_pair;"
+          psql "$pair_url" -v ON_ERROR_STOP=1 \
+            -c "DROP SCHEMA public CASCADE;" \
+            -c "CREATE SCHEMA pair;" \
+            -c "CREATE TABLE pair.student (id integer PRIMARY KEY, name text NOT NULL);" \
+            -c "INSERT INTO pair.student VALUES (1, 'Ana'), (2, 'Ben');"
+          echo "CMSC127_PAIR_DATABASE_URL=$pair_url" >> "$GITHUB_ENV"
+      - name: Run the pair-only schema startup smoke
+        run: npm run smoke:schema
+      - name: Upload browser smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-page-smoke-${{ runner.os }}-${{ github.run_id }}
+          path: smoke-artifacts/
+          if-no-files-found: warn
       - name: Run all Python tests
         run: .venv/bin/python -m unittest discover --start-directory tests --top-level-directory . --verbose
 
@@ -140,6 +162,28 @@ jobs:
         run: npx playwright install chromium --only-shell
       - name: Run headless browser smoke
         run: npm run smoke:browser
+      - name: Create the pair-only database
+        shell: bash
+        run: |
+          pair_url="${CMSC127_DATABASE_URL%/*}/t12_pair"
+          psql "$CMSC127_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS t12_pair WITH (FORCE);" \
+            -c "CREATE DATABASE t12_pair;"
+          psql "$pair_url" -v ON_ERROR_STOP=1 \
+            -c "DROP SCHEMA public CASCADE;" \
+            -c "CREATE SCHEMA pair;" \
+            -c "CREATE TABLE pair.student (id integer PRIMARY KEY, name text NOT NULL);" \
+            -c "INSERT INTO pair.student VALUES (1, 'Ana'), (2, 'Ben');"
+          echo "CMSC127_PAIR_DATABASE_URL=$pair_url" >> "$GITHUB_ENV"
+      - name: Run the pair-only schema startup smoke
+        run: npm run smoke:schema
+      - name: Upload browser smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-page-smoke-${{ runner.os }}-${{ github.run_id }}
+          path: smoke-artifacts/
+          if-no-files-found: warn
       - name: Run all Python tests
         if: runner.os == 'Windows'
         shell: pwsh
