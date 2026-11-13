@@ -26,7 +26,7 @@ from comparator import Difference, compare_erd
 ROW_CAP = 100
 POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
-_NO_SCHEMA_MESSAGE = "No schema is available in this database. Create a schema, then reload the page."
+_NO_SCHEMA_MESSAGE = "No schema is available in this database. Add a schema, then reload the page."
 
 _SCHEMAS_SQL = r"""
 SELECT schema_name
