@@ -225,6 +225,24 @@ class HarnessPageTests(unittest.TestCase):
         source = source_path.read_text(encoding="utf-8")
         self.assertNotRegex(source, r"(?i)\b(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\s")
 
+    def test_parameterless_query_preserves_literal_percent(self) -> None:
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        with psycopg.connect(DATABASE_URL) as connection:
+            rows = server_module._fetch_rows(connection, r"SELECT 'pg\_%' AS pattern")
+        self.assertEqual(r"pg\_%", rows[0][0])
+
+    def test_parameterized_roles_query_preserves_literal_percent(self) -> None:
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        with psycopg.connect(DATABASE_URL) as connection:
+            rows = server_module._fetch_rows(
+                connection, server_module._ROLES_SQL, ("public",)
+            )
+        self.assertIsInstance(rows, list)
+
     def test_checks_endpoint_reads_the_t13_result_file(self) -> None:
         self.load_server()
         with TemporaryDirectory() as temporary_directory:
@@ -278,6 +296,13 @@ class HarnessPageTests(unittest.TestCase):
             with running_server(project_root, database_url) as base_url:
                 payload = get_json(f"{base_url}/api/schema?schema={schema}")
         parent = next(table for table in payload["tables"] if table["name"] == "parent")
+        child_relationship = next(
+            relationship
+            for relationship in payload["relationships"]
+            if relationship["child"] == "child"
+        )
+        self.assertEqual(["parent_id"], child_relationship["childColumns"])
+        self.assertEqual(["id"], child_relationship["parentColumns"])
         self.assertEqual("integer", next(column for column in parent["columns"] if column["name"] == "id")["type"])
         constraint_types = {constraint["type"] for table in payload["tables"] for constraint in table["constraints"]}
         self.assertTrue({"PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK"}.issubset(constraint_types))
