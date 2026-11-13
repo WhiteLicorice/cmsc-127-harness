@@ -1,0 +1,26 @@
+{
+  "files": {
+    ".gitattributes": "ee1d32a246dc6c63e4ddacc3200e3d11ac394993f3d47b5266ff807f35edf087",
+    ".github/workflows/check.yml": "71b9bd2a08cf5bfea40f46903c834ee2a4f05f7a32fdcbab19675caf35063622",
+    ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
+    ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
+    "check.sh": "05c1e0d67083eb42c31bc6641cb4aecb558e5dc7da04d32345ebcd4c535d5148",
+    "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
+    "cases/manifest.json": "eca2f3e35cec9c032c889cdd22990a5a98d87c9323c50167bdc00d1f3b17441e",
+    "cases/lab1/health.sql": "8bc0c5f99568e014de054f91776d9d603e2a09f860139fb00ecaf1899b49de67",
+    "cases/lab1/health.expected": "22c84e36dd3a43270222b210ca863c7db2c561aa4cad2d0a493e641fe50f7b67",
+    "cases/lab2/health.sql": "ecebfa97286c641d8a4483da6b6dd74d2f2c8672380755559664e7b37d35a174",
+    "cases/lab2/health.expected": "06992e7c7c6f675d2a588e29b4ef520dd178f28aeb404472954619f29a60026f",
+    "pyrightconfig.json": "47e3011aebef04fa67814baa636f4b71d8d24d886e1218c0aa25ee562585b97a",
+    "requirements.txt": "5df51f23988cef5dc0636220a9445f132bcb060a67b05ab06015c57cec1377e6",
+    "run": "1775f11b2881357985c82f37e7dde68e0955f8ac309439f946fcc791f0878314"
+  },
+  "allowed_paths": [
+    "README.md",
+    "load.sql",
+    "migrations",
+    "cases/pair",
+    "reports",
+    "answers"
+  ]
+}
