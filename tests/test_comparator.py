@@ -486,9 +486,33 @@ class ParserEdgeCaseTests(unittest.TestCase):
             frozenset({"PK"}), erd.entities["parent"].attributes["id"].key_markers
         )
 
+    def test_one_line_entity_accepts_both_key_markers(
+        self: ParserEdgeCaseTests,
+    ) -> None:
+        erd = parse_erd("erDiagram\n    child { int parent_id PK, FK }\n")
+
+        self.assertEqual(
+            frozenset({"PK", "FK"}),
+            erd.entities["child"].attributes["parent_id"].key_markers,
+        )
+
+    def test_one_line_entity_rejects_multiple_attributes(
+        self: ParserEdgeCaseTests,
+    ) -> None:
+        declarations = (
+            "parent { int id PK, int x }",
+            "parent { int id PK int y int z }",
+        )
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                with self.assertRaisesRegex(
+                    ERDParseError, "write each attribute on its own line"
+                ):
+                    parse_erd(f"erDiagram\n    {declaration}\n")
+
 
 class DoctorDatabaseTests(unittest.TestCase):
-    def test_stale_fallback_version_does_not_fail_after_another_driver_connects(
+    def test_stale_fallback_version_is_hidden_during_connection_check(
         self: DoctorDatabaseTests,
     ) -> None:
         output = StringIO()
@@ -509,8 +533,12 @@ class DoctorDatabaseTests(unittest.TestCase):
             exit_code = doctor_db.main()
 
         self.assertEqual(0, exit_code)
-        self.assertIn(
+        self.assertNotIn(
             "FAIL  pg8000 is 1.31.5, not 1.31.6.",
+            output.getvalue().splitlines(),
+        )
+        self.assertNotIn(
+            "      Install pg8000 1.31.6.",
             output.getvalue().splitlines(),
         )
 

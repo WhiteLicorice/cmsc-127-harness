@@ -138,9 +138,20 @@ def parse_erd(text: str) -> ERD:
             _check_identifier(name, line_number)
             if name in entities:
                 raise ERDParseError(f"line {line_number}: entity {name} appears more than once")
-            attribute = _parse_attribute(
-                one_line_entity_match.group("attribute").strip(), line_number
+            attribute_text = one_line_entity_match.group("attribute").strip()
+            marker_suffix = re.search(
+                r"\s+(?:PK(?:\s*,\s*FK)?|FK)\Z", attribute_text
             )
+            attribute_body = (
+                attribute_text[: marker_suffix.start()]
+                if marker_suffix is not None
+                else attribute_text
+            )
+            if "," in attribute_body or re.search(r"\b(?:PK|FK)\b", attribute_body):
+                raise ERDParseError(
+                    f"line {line_number}: write each attribute on its own line"
+                )
+            attribute = _parse_attribute(attribute_text, line_number)
             entities[name] = Entity(name, {attribute.name: attribute}, line_number)
             continue
 

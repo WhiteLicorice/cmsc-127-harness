@@ -6,11 +6,11 @@ scripts report missing tools and give a repair for each failure.
 
 ## Compare an ERD
 
+Set `CMSC127_DATABASE_URL` to a PostgreSQL database. Install the requirements
+first (see Install and Test). Run this example from the repository root.
+
 Pass a Psycopg or pg8000 connection, the lines inside a Mermaid fence, and an
 optional schema:
-
-Set `CMSC127_DATABASE_URL` to a PostgreSQL database. Install the requirements
-first, then run this example from the repository root.
 
 ```python
 import os
@@ -40,8 +40,8 @@ nullability, and unique constraints. It does not compare types, indexes,
 defaults, or `CHECK` constraints. It does not count stored rows.
 
 When the selected schema has no tables, the comparator returns one message.
-The message includes the schema identifier and asks whether migrations ran against this
-database.
+The message includes the schema identifier and asks whether your migrations
+(SQL files that create and change your tables) ran against this database.
 
 ## Check Python Types
 

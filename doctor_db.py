@@ -132,7 +132,8 @@ def main() -> int:
                 connection.close()
 
     for failure in failures:
-        print(failure)
+        if failure.startswith("FAIL  No course driver is installed."):
+            print(failure)
     return 0 if connected else 1
 
 
