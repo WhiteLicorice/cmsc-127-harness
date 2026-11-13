@@ -1,16 +1,42 @@
 """Check an explicit PostgreSQL URL with each installed course driver."""
 
-from importlib import metadata
+from __future__ import annotations
+
+from importlib import import_module, metadata
 import os
 import sys
+from typing import Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 
 DRIVERS = (("psycopg", "3.3.9"), ("pg8000", "1.31.6"))
 
 
-def _pg8000_connection(url: str):
-    from pg8000 import dbapi
+class _Connection(Protocol):
+    def close(self: _Connection) -> None: ...
+
+
+class _Pg8000API(Protocol):
+    def connect(
+        self: _Pg8000API,
+        *,
+        user: str,
+        host: str,
+        database: str,
+        port: int,
+        password: str | None,
+        timeout: int,
+    ) -> _Connection: ...
+
+
+class _PsycopgAPI(Protocol):
+    def connect(
+        self: _PsycopgAPI, url: str, *, connect_timeout: int
+    ) -> _Connection: ...
+
+
+def _pg8000_connection(url: str) -> _Connection:
+    dbapi = cast(_Pg8000API, import_module("pg8000.dbapi"))
 
     parsed = urlsplit(url)
     return dbapi.connect(
@@ -23,17 +49,16 @@ def _pg8000_connection(url: str):
     )
 
 
-def _connect(driver: str, url: str):
+def _connect(driver: str, url: str) -> _Connection:
     if driver == "psycopg":
-        import psycopg
-
+        psycopg = cast(_PsycopgAPI, import_module("psycopg"))
         return psycopg.connect(url, connect_timeout=3)
     return _pg8000_connection(url)
 
 
 def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
-    installed = []
-    failures = []
+    installed: list[tuple[str, str]] = []
+    failures: list[str] = []
     for driver, expected_version in DRIVERS:
         try:
             version = metadata.version(driver)

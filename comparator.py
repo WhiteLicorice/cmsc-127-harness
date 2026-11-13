@@ -1,8 +1,28 @@
 """Compare an ERD block with tables and constraints in a PostgreSQL schema."""
 
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 from erd_parser import ERD, Relationship, parse_erd
+
+
+class _CatalogCursor(Protocol):
+    def execute(
+        self: _CatalogCursor,
+        query: str,
+        parameters: tuple[str, ...] | None = None,
+    ) -> object: ...
+
+    def fetchall(self: _CatalogCursor) -> Sequence[tuple[object, ...]]: ...
+
+    def close(self: _CatalogCursor) -> None: ...
+
+
+class _Connection(Protocol):
+    def cursor(self: _Connection) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -28,7 +48,7 @@ class _ForeignKey:
     unique: bool
 
     @property
-    def label(self) -> str:
+    def label(self: _ForeignKey) -> str:
         return f"fk_{self.child}_{'_'.join(self.columns)}"
 
 
@@ -74,8 +94,10 @@ ORDER BY child.relname, constraint_row.conname
 """
 
 
-def _fetchall(connection, query: str, parameters: tuple[str, ...]):
-    cursor = connection.cursor()
+def _fetchall(
+    connection: _Connection, query: str, parameters: tuple[str, ...]
+) -> Sequence[tuple[object, ...]]:
+    cursor = cast(_CatalogCursor, connection.cursor())
     try:
         cursor.execute(query, parameters)
         return cursor.fetchall()
@@ -83,25 +105,30 @@ def _fetchall(connection, query: str, parameters: tuple[str, ...]):
         cursor.close()
 
 
-def _read_schema(connection, schema: str) -> dict[str, _Table]:
+def _read_schema(connection: _Connection, schema: str) -> dict[str, _Table]:
     table_rows = _fetchall(connection, _TABLE_SQL, (schema,))
     tables: dict[str, _Table] = {
-        name: _Table({}, frozenset(), []) for (name,) in table_rows
+        cast(str, row[0]): _Table({}, frozenset(), []) for row in table_rows
     }
     if not tables:
         return tables
 
     attribute_numbers: dict[str, dict[int, str]] = {name: {} for name in tables}
-    for table_name, column_name, number, not_null in _fetchall(
-        connection, _COLUMN_SQL, (schema,)
-    ):
+    for row in _fetchall(connection, _COLUMN_SQL, (schema,)):
+        table_name = cast(str, row[0])
+        column_name = cast(str, row[1])
+        number = cast(int, row[2])
+        not_null = cast(bool, row[3])
         table = tables[table_name]
         table.columns[column_name] = _Column(bool(not_null))
         attribute_numbers[table_name][int(number)] = column_name
 
     unique_numbers: dict[str, set[frozenset[int]]] = {name: set() for name in tables}
     constraints = _fetchall(connection, _CONSTRAINT_SQL, (schema,))
-    for table_name, kind, child_numbers, _parent_name in constraints:
+    for row in constraints:
+        table_name = cast(str, row[0])
+        kind = cast(str, row[1])
+        child_numbers = cast(Sequence[int], row[2])
         if kind in ("p", "u"):
             unique_numbers[table_name].add(frozenset(int(value) for value in child_numbers))
             if kind == "p":
@@ -109,7 +136,11 @@ def _read_schema(connection, schema: str) -> dict[str, _Table]:
                     attribute_numbers[table_name][int(value)] for value in child_numbers
                 )
 
-    for table_name, kind, child_numbers, parent_name in constraints:
+    for row in constraints:
+        table_name = cast(str, row[0])
+        kind = cast(str, row[1])
+        child_numbers = cast(Sequence[int], row[2])
+        parent_name = cast(str | None, row[3])
         if kind != "f" or parent_name is None:
             continue
         child_numbers = tuple(int(value) for value in child_numbers)
@@ -140,7 +171,7 @@ def _difference(
     return Difference(property_name, subject, erd_value, schema_value, message)
 
 
-def _column_list(columns) -> str:
+def _column_list(columns: Iterable[str]) -> str:
     return ", ".join(f"`{column}`" for column in sorted(columns))
 
 
@@ -277,7 +308,9 @@ def _compare_relationships(
     return differences
 
 
-def compare_erd(connection, erd_text: str, schema: str = "public") -> list[Difference]:
+def compare_erd(
+    connection: _Connection, erd_text: str, schema: str = "public"
+) -> list[Difference]:
     """Return differences between an ERD block and one PostgreSQL schema."""
     erd = parse_erd(erd_text)
     tables = _read_schema(connection, schema)
@@ -354,7 +387,7 @@ def compare_erd(connection, erd_text: str, schema: str = "public") -> list[Diffe
         if missing_primary or extra_primary:
             expected = f"primary-key columns: {_column_list(schema_primary)}"
             actual = f"ERD PK columns: {_column_list(erd_primary)}"
-            actions = []
+            actions: list[str] = []
             if missing_primary:
                 actions.append(
                     f"Mark {_column_list(missing_primary)} with `PK` in `{table_name}`"
@@ -385,7 +418,7 @@ def compare_erd(connection, erd_text: str, schema: str = "public") -> list[Diffe
         missing_foreign = schema_foreign - erd_foreign
         extra_foreign = erd_foreign - schema_foreign
         if missing_foreign or extra_foreign:
-            actions = []
+            actions: list[str] = []
             if missing_foreign:
                 actions.append(
                     f"Mark {_column_list(missing_foreign)} with `FK` in `{table_name}`"

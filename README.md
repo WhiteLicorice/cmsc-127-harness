@@ -40,6 +40,17 @@ When the selected schema has no tables, the comparator returns one message.
 The message includes the schema identifier and asks whether migrations ran against this
 database.
 
+## Check Python types
+
+The repository requires Python 3.15 or newer. Install Pyright 1.1.414 with
+`npm install --global pyright@1.1.414`, then run `pyright` from the repository
+root. Create `.venv` and install the requirements first. The command checks the
+application and test files in strict mode. Pyright excludes `.venv` and Python
+bytecode caches. There is no untyped test fixture.
+
+The Pylance extension (`ms-python.vscode-pylance`) reads `.vscode/settings.json`
+and checks the whole workspace in strict mode.
+
 ## Install and test
 
 Start PostgreSQL first. Use a disposable database and a role that can create

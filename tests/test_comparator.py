@@ -1,20 +1,74 @@
-import os
-import unittest
+from __future__ import annotations
 
-from comparator import compare_erd
+from collections.abc import Sequence
+from importlib import import_module
+import os
+from types import TracebackType
+import unittest
+from typing import Protocol, cast
+
+from comparator import Difference, compare_erd
 from erd_parser import ERDParseError, parse_erd
 
 
-class ComparatorTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        import psycopg
+class _TestCursor(Protocol):
+    def execute(
+        self: _TestCursor,
+        query: str,
+        parameters: tuple[str, ...] | None = None,
+    ) -> object: ...
 
-        cls.connection = psycopg.connect(os.environ["DATABASE_URL"])
+    def fetchall(self: _TestCursor) -> Sequence[tuple[object, ...]]: ...
+
+    def close(self: _TestCursor) -> None: ...
+
+    def __enter__(self: _TestCursor) -> _TestCursor: ...
+
+    def __exit__(
+        self: _TestCursor,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _TestConnection(Protocol):
+    autocommit: bool
+
+    def cursor(self: _TestConnection) -> _TestCursor: ...
+
+    def close(self: _TestConnection) -> None: ...
+
+
+class _PsycopgAPI(Protocol):
+    def connect(self: _PsycopgAPI, url: str) -> object: ...
+
+
+class _Pg8000API(Protocol):
+    def connect(
+        self: _Pg8000API,
+        *,
+        host: str,
+        port: int,
+        user: str,
+        password: str | None,
+        database: str,
+    ) -> object: ...
+
+
+class ComparatorTests(unittest.TestCase):
+    connection: _TestConnection
+
+    @classmethod
+    def setUpClass(cls: type[ComparatorTests]) -> None:
+        psycopg = cast(_PsycopgAPI, import_module("psycopg"))
+        cls.connection = cast(
+            _TestConnection, psycopg.connect(os.environ["DATABASE_URL"])
+        )
         cls.connection.autocommit = True
 
     @classmethod
-    def tearDownClass(cls):
+    def tearDownClass(cls: type[ComparatorTests]) -> None:
         with cls.connection.cursor() as cursor:
             cursor.execute("DROP SCHEMA IF EXISTS t04_compare CASCADE")
             cursor.execute("DROP SCHEMA IF EXISTS t04_empty CASCADE")
@@ -22,7 +76,7 @@ class ComparatorTests(unittest.TestCase):
             cursor.execute("DROP TABLE IF EXISTS public.t04_default")
         cls.connection.close()
 
-    def setUp(self):
+    def setUp(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("DROP SCHEMA IF EXISTS t04_compare CASCADE")
             cursor.execute("DROP SCHEMA IF EXISTS t04_empty CASCADE")
@@ -31,13 +85,15 @@ class ComparatorTests(unittest.TestCase):
             cursor.execute("CREATE SCHEMA t04_empty")
             cursor.execute("CREATE SCHEMA t04_search_first")
 
-    def compare(self, erd_text, schema="t04_compare"):
+    def compare(
+        self: ComparatorTests, erd_text: str, schema: str = "t04_compare"
+    ) -> list[Difference]:
         return compare_erd(self.connection, erd_text, schema=schema)
 
-    def properties(self, differences):
+    def properties(self: ComparatorTests, differences: Sequence[Difference]) -> set[str]:
         return {difference.property for difference in differences}
 
-    def test_missing_entity_is_reported(self):
+    def test_missing_entity_is_reported(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("CREATE TABLE t04_compare.child (id integer PRIMARY KEY)")
@@ -51,7 +107,7 @@ class ComparatorTests(unittest.TestCase):
         self.assertIn("entity", self.properties(differences))
         self.assertTrue(any("Add entity `child`" in item.message for item in differences))
 
-    def test_wrong_primary_key_is_reported(self):
+    def test_wrong_primary_key_is_reported(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("""CREATE TABLE t04_compare.parent (
                 id integer PRIMARY KEY,
@@ -68,7 +124,7 @@ class ComparatorTests(unittest.TestCase):
         self.assertIn("primary key", self.properties(differences))
         self.assertTrue(any("Mark `id` with `PK`" in item.message for item in differences))
 
-    def test_missing_attribute_is_reported(self):
+    def test_missing_attribute_is_reported(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("""CREATE TABLE t04_compare.parent (
                 id integer PRIMARY KEY,
@@ -84,7 +140,7 @@ class ComparatorTests(unittest.TestCase):
         self.assertIn("attribute", self.properties(differences))
         self.assertTrue(any("Add attribute `label`" in item.message for item in differences))
 
-    def test_missing_foreign_key_marker_and_line_are_reported(self):
+    def test_missing_foreign_key_marker_and_line_are_reported(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("""CREATE TABLE t04_compare.child (
@@ -107,7 +163,7 @@ class ComparatorTests(unittest.TestCase):
         self.assertTrue(any("Mark `parent_id` with `FK`" in item.message for item in differences))
         self.assertTrue(any("Add this relationship line" in item.message for item in differences))
 
-    def test_wrong_cardinality_is_reported(self):
+    def test_wrong_cardinality_is_reported(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("""CREATE TABLE t04_compare.child (
@@ -130,7 +186,7 @@ class ComparatorTests(unittest.TestCase):
         self.assertIn("relationship cardinality", self.properties(differences))
         self.assertTrue(any("parent ||--o{ child" in item.message for item in differences))
 
-    def test_reversed_relationship_endpoints_are_valid(self):
+    def test_reversed_relationship_endpoints_are_valid(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("""CREATE TABLE t04_compare.child (
@@ -152,7 +208,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_nullable_foreign_key_allows_zero_or_one_parent(self):
+    def test_nullable_foreign_key_allows_zero_or_one_parent(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("""CREATE TABLE t04_compare.child (
@@ -174,7 +230,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_unique_foreign_key_allows_at_most_one_child(self):
+    def test_unique_foreign_key_allows_at_most_one_child(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("""CREATE TABLE t04_compare.child (
@@ -196,7 +252,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_many_to_many_uses_two_lines_to_the_associative_table(self):
+    def test_many_to_many_uses_two_lines_to_the_associative_table(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.student (student_id integer PRIMARY KEY)")
             cursor.execute("CREATE TABLE t04_compare.course (course_id integer PRIMARY KEY)")
@@ -224,7 +280,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_composite_foreign_key_label_keeps_declared_column_order(self):
+    def test_composite_foreign_key_label_keeps_declared_column_order(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("""CREATE TABLE t04_compare.parent (
                 tenant_id integer NOT NULL,
@@ -253,7 +309,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_uppercase_identifier_is_rejected(self):
+    def test_uppercase_identifier_is_rejected(self: ComparatorTests) -> None:
         with self.assertRaisesRegex(ERDParseError, "lowercase snake_case"):
             parse_erd("""erDiagram
                 Student {
@@ -261,7 +317,7 @@ class ComparatorTests(unittest.TestCase):
                 }
             """)
 
-    def test_empty_schema_returns_one_actionable_message(self):
+    def test_empty_schema_returns_one_actionable_message(self: ComparatorTests) -> None:
         differences = self.compare("""erDiagram
             missing_entity {
                 int id PK
@@ -275,7 +331,7 @@ class ComparatorTests(unittest.TestCase):
             differences[0].message.lower(),
         )
 
-    def test_schema_argument_ignores_search_path(self):
+    def test_schema_argument_ignores_search_path(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
             cursor.execute("SET search_path TO t04_search_first")
@@ -288,7 +344,7 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_schema_defaults_to_public(self):
+    def test_schema_defaults_to_public(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE public.t04_default (id integer PRIMARY KEY)")
 
@@ -304,18 +360,21 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_pg8000_connection_reads_the_same_catalog(self):
-        import pg8000.dbapi
+    def test_pg8000_connection_reads_the_same_catalog(self: ComparatorTests) -> None:
+        dbapi = cast(_Pg8000API, import_module("pg8000.dbapi"))
 
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
 
-        connection = pg8000.dbapi.connect(
-            host=os.environ.get("PGHOST", "127.0.0.1"),
-            port=int(os.environ.get("PGPORT", "5432")),
-            user=os.environ.get("PGUSER", "postgres"),
-            password=os.environ.get("PGPASSWORD") or None,
-            database=os.environ.get("PGDATABASE", "postgres"),
+        connection = cast(
+            _TestConnection,
+            dbapi.connect(
+                host=os.environ.get("PGHOST", "127.0.0.1"),
+                port=int(os.environ.get("PGPORT", "5432")),
+                user=os.environ.get("PGUSER", "postgres"),
+                password=os.environ.get("PGPASSWORD") or None,
+                database=os.environ.get("PGDATABASE", "postgres"),
+            ),
         )
         connection.autocommit = True
         try:

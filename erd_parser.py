@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+from typing import TypeGuard
 
 
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
@@ -61,9 +62,13 @@ def _check_identifier(identifier: str, line: int) -> None:
         )
 
 
+def _is_string(value: object) -> TypeGuard[str]:
+    return isinstance(value, str)
+
+
 def parse_erd(text: str) -> ERD:
     """Parse one Mermaid erDiagram block, without its Markdown fence."""
-    if not isinstance(text, str):
+    if not _is_string(text):
         raise TypeError("ERD text must be a string")
 
     entities: dict[str, Entity] = {}
