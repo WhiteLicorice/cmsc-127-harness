@@ -137,6 +137,14 @@ try {
     }
     await page.waitForTimeout(panel === "Schema" ? 1_500 : 250);
     if (panel === "Schema") {
+      await page.waitForFunction(
+        () => {
+          const nodes = [...document.querySelectorAll(".mermaid")];
+          return nodes.length === 2 && nodes.every((node) => node.querySelector("svg") !== null);
+        },
+        undefined,
+        { timeout: 10_000 },
+      );
       const schemaNodes = await page.locator(".mermaid").evaluateAll((nodes) =>
         nodes.map((node) => ({
           svgs: node.querySelectorAll("svg").length,
