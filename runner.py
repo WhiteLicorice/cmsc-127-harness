@@ -375,6 +375,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
 
 def load_manifest(root: Path) -> dict[str, object]:
     """Load the manifest and add a source location to each form fault."""
+    root = root.resolve()
     try:
         return _load_manifest(root)
     except ValueError as error:
