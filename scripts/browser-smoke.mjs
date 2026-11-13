@@ -128,6 +128,7 @@ try {
 
   let panelNumber = 2;
   let schemaSvgs = [];
+  let schemaText = [];
   for (const panel of expectedPanels.slice(1)) {
     const button = page.getByRole("button", { name: panel, exact: true });
     await button.click();
@@ -136,9 +137,14 @@ try {
     }
     await page.waitForTimeout(panel === "Schema" ? 1_500 : 250);
     if (panel === "Schema") {
-      schemaSvgs = await page.locator(".mermaid").evaluateAll((nodes) =>
-        nodes.map((node) => node.querySelectorAll("svg").length),
+      const schemaNodes = await page.locator(".mermaid").evaluateAll((nodes) =>
+        nodes.map((node) => ({
+          svgs: node.querySelectorAll("svg").length,
+          text: node.textContent ?? "",
+        })),
       );
+      schemaSvgs = schemaNodes.map((node) => node.svgs);
+      schemaText = schemaNodes.map((node) => node.text);
     }
     const name = `${String(panelNumber).padStart(2, "0")}-${panel.toLowerCase()}.png`;
     panelNumber += 1;
@@ -147,6 +153,12 @@ try {
 
   if (JSON.stringify(schemaSvgs) !== JSON.stringify([1, 1])) {
     throw new Error(`The Schema panel did not draw both diagrams: ${JSON.stringify(schemaSvgs)}`);
+  }
+  if (schemaText.some((text) => /Syntax error/i.test(text))) {
+    throw new Error(`A schema diagram failed to render: ${JSON.stringify(schemaText)}`);
+  }
+  if (!schemaText.every((text) => text.includes("smoke_student"))) {
+    throw new Error(`A schema diagram did not draw the expected entity: ${JSON.stringify(schemaText)}`);
   }
   record(`schema diagrams: ${JSON.stringify(schemaSvgs)}`);
 
