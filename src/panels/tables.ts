@@ -19,10 +19,11 @@ export type RowChange = {
 };
 
 export type TablesResponse = {
-  schema: string;
+  schema: string | null;
   schemas: string[];
   rowCap: number;
   tables: TableSnapshot[];
+  message?: string;
 };
 
 function canonical(value: unknown): string {
@@ -133,6 +134,9 @@ export function renderTableSnapshot(
 }
 
 export function renderTables(current: TablesResponse, previous?: TablesResponse | null): string {
+  if (current.schemas.length === 0) {
+    return `<p>${escapeHtml(current.message ?? "No schema is available in this database.")}</p>`;
+  }
   const oldTables = new Map((previous?.tables ?? []).map((table) => [table.table, table]));
   const cards = current.tables
     .map((table) => renderTableSnapshot(table, oldTables.get(table.table)))

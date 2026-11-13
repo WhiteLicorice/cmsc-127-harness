@@ -53,10 +53,13 @@ async function requestJson(url: string): Promise<unknown> {
 }
 
 function updateSchemas(response: TablesResponse): void {
-  if (response.schemas.length === 0) {
+  if (response.schemas.length === 0 || response.schema === null) {
     schemaSelect.replaceChildren();
+    schemaSelect.disabled = true;
     return;
   }
+  schemaSelect.disabled = false;
+  selectedSchema = response.schema;
   const options = response.schemas.map((schema) => {
     const option = document.createElement("option");
     option.value = schema;
@@ -64,13 +67,6 @@ function updateSchemas(response: TablesResponse): void {
     option.selected = schema === selectedSchema;
     return option;
   });
-  if (!response.schemas.includes(selectedSchema)) {
-    selectedSchema = response.schemas.includes("public") ? "public" : response.schemas[0] ?? "public";
-    const selected = options.find((option) => option.value === selectedSchema);
-    if (selected) {
-      selected.selected = true;
-    }
-  }
   schemaSelect.replaceChildren(...options);
 }
 

@@ -14,7 +14,7 @@ import unittest
 import urllib.error
 import urllib.request
 from collections.abc import Generator
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import ModuleType
 from tempfile import TemporaryDirectory
@@ -356,6 +356,35 @@ class HarnessPageTests(unittest.TestCase):
         self.assertEqual(["id"], tables["parent"]["primaryKey"])
         self.assertEqual(1, tables["parent"]["rows"][0]["id"])
         self.assertIn(schema, payload["schemas"])
+
+    def test_schema_selection_falls_back_when_public_is_absent(self) -> None:
+        server_module = self.load_server()
+        with patch.object(server_module, "_schema_names", return_value=["pair"]):
+            schema, schemas = server_module._selected_schema(cast(Any, None), {})
+        self.assertEqual("pair", schema)
+        self.assertEqual(["pair"], schemas)
+
+    def test_schema_selection_prefers_public_when_the_request_is_unknown(self) -> None:
+        server_module = self.load_server()
+        with patch.object(server_module, "_schema_names", return_value=["pair", "public"]):
+            schema, schemas = server_module._selected_schema(
+                cast(Any, None), {"schema": ["missing"]}
+            )
+        self.assertEqual("public", schema)
+        self.assertEqual(["pair", "public"], schemas)
+
+    def test_tables_endpoint_reports_an_empty_schema_list(self) -> None:
+        server_module = self.load_server()
+        with (
+            patch.object(server_module, "_schema_names", return_value=[]),
+            patch.object(server_module, "_connect_dict", return_value=nullcontext(None)),
+        ):
+            status, payload = server_module._tables_endpoint(Mock(), {})
+        self.assertEqual(200, status)
+        self.assertEqual([], payload["schemas"])
+        self.assertIsNone(payload["schema"])
+        self.assertEqual([], payload["tables"])
+        self.assertIn("No schema", payload["message"])
 
     def test_schema_catalog_query_reports_types_constraints_and_differences(self) -> None:
         self.load_server()
