@@ -9,6 +9,9 @@ scripts report missing tools and give a repair for each failure.
 Pass a Psycopg or pg8000 connection, the lines inside a Mermaid fence, and an
 optional schema:
 
+Set `CMSC127_DATABASE_URL` to a PostgreSQL database. Install the requirements
+first, then run this example from the repository root.
+
 ```python
 import os
 import psycopg
@@ -40,7 +43,7 @@ When the selected schema has no tables, the comparator returns one message.
 The message includes the schema identifier and asks whether migrations ran against this
 database.
 
-## Check Python types
+## Check Python Types
 
 The repository requires Python 3.15 or newer. Install Pyright 1.1.414 with
 `npm install --global pyright@1.1.414`, then run `pyright` from the repository
@@ -51,7 +54,7 @@ bytecode caches. There is no untyped test fixture.
 The Pylance extension (`ms-python.vscode-pylance`) reads `.vscode/settings.json`
 and checks the whole workspace in strict mode.
 
-## Install and test
+## Install and Test
 
 Start PostgreSQL first. Use a disposable database and a role that can create
 schemas and tables. The tests drop the schemas
@@ -64,7 +67,7 @@ In PowerShell on Windows, run:
 py -3.15 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-$env:DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
+$env:CMSC127_DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
 $env:PGHOST = '127.0.0.1'
 $env:PGPORT = '55435'
 $env:PGUSER = 'postgres'
@@ -83,7 +86,7 @@ In WSL, Linux, or macOS, install the drivers and set the connection variables:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-export DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
+export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
 export PGHOST=127.0.0.1
 export PGPORT=55435
 export PGUSER=postgres
@@ -96,7 +99,7 @@ The WSL route uses Python 3.12.3 and PostgreSQL 16.15. The Windows and macOS
 routes use Python 3.15.2 and PostgreSQL 18.6.
 On WSL, add `/usr/lib/postgresql/16/bin` to `PATH` before you run the doctor.
 
-## Run a doctor
+## Run a Doctor
 
 Start PostgreSQL first. Set `CMSC127_DATABASE_URL` to a database that the
 installed course driver can read. The doctor only opens and closes a

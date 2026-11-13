@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import redirect_stdout
 from importlib import import_module
+from io import StringIO
 import os
 from types import TracebackType
 import unittest
+from unittest.mock import Mock, patch
 from typing import Protocol, cast
 
 from comparator import Difference, compare_erd
+import doctor_db
 from erd_parser import ERDParseError, parse_erd
 
 
@@ -63,7 +67,7 @@ class ComparatorTests(unittest.TestCase):
     def setUpClass(cls: type[ComparatorTests]) -> None:
         psycopg = cast(_PsycopgAPI, import_module("psycopg"))
         cls.connection = cast(
-            _TestConnection, psycopg.connect(os.environ["DATABASE_URL"])
+            _TestConnection, psycopg.connect(os.environ["CMSC127_DATABASE_URL"])
         )
         cls.connection.autocommit = True
 
@@ -387,6 +391,128 @@ class ComparatorTests(unittest.TestCase):
             connection.close()
 
         self.assertEqual([], differences)
+
+    def test_uncompared_type_default_check_and_index_differences_return_empty(
+        self: ComparatorTests,
+    ) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("""CREATE TABLE t04_compare.parent (
+                id integer PRIMARY KEY,
+                score integer DEFAULT 7 CHECK (score > 0),
+                code text
+            )""")
+            cursor.execute(
+                "CREATE INDEX parent_code_idx ON t04_compare.parent (code)"
+            )
+
+        differences = self.compare("""erDiagram
+            parent {
+                string id PK
+                text score
+                int code
+            }
+        """)
+
+        self.assertEqual([], differences)
+
+    def test_unique_superset_of_foreign_key_columns_keeps_many_children(
+        self: ComparatorTests,
+    ) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
+            cursor.execute("""CREATE TABLE t04_compare.child (
+                child_id integer PRIMARY KEY,
+                parent_id integer NOT NULL REFERENCES t04_compare.parent (id),
+                other_id integer NOT NULL,
+                UNIQUE (parent_id, other_id)
+            )""")
+
+        differences = self.compare("""erDiagram
+            parent ||--o{ child : fk_child_parent_id
+
+            parent {
+                int id PK
+            }
+            child {
+                int child_id PK
+                int parent_id FK
+                int other_id
+            }
+        """)
+
+        self.assertEqual([], differences)
+
+
+class ParserEdgeCaseTests(unittest.TestCase):
+    def test_reversed_key_marker_order_is_rejected(self: ParserEdgeCaseTests) -> None:
+        with self.assertRaisesRegex(ERDParseError, "PK.*FK"):
+            parse_erd("""erDiagram
+                parent {
+                    int id PK
+                    int parent_id FK, PK
+                }
+            """)
+
+    def test_lowercase_key_marker_is_rejected(self: ParserEdgeCaseTests) -> None:
+        with self.assertRaisesRegex(ERDParseError, "PK.*FK"):
+            parse_erd("""erDiagram
+                parent {
+                    int id pk
+                }
+            """)
+
+    def test_identifier_allows_repeated_underscores(self: ParserEdgeCaseTests) -> None:
+        erd = parse_erd("""erDiagram
+            parent {
+                int a__b
+            }
+        """)
+
+        self.assertIn("a__b", erd.entities["parent"].attributes)
+
+    def test_identifier_allows_trailing_underscore(self: ParserEdgeCaseTests) -> None:
+        erd = parse_erd("""erDiagram
+            parent {
+                int a_
+            }
+        """)
+
+        self.assertIn("a_", erd.entities["parent"].attributes)
+
+    def test_one_line_entity_is_accepted(self: ParserEdgeCaseTests) -> None:
+        erd = parse_erd("erDiagram\n    parent { int id PK }\n")
+
+        self.assertEqual(
+            frozenset({"PK"}), erd.entities["parent"].attributes["id"].key_markers
+        )
+
+
+class DoctorDatabaseTests(unittest.TestCase):
+    def test_stale_fallback_version_does_not_fail_after_another_driver_connects(
+        self: DoctorDatabaseTests,
+    ) -> None:
+        output = StringIO()
+        connection = Mock()
+        with (
+            patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=["3.3.9", "1.31.5"],
+            ),
+            patch.object(doctor_db, "_connect", return_value=connection),
+            patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertIn(
+            "FAIL  pg8000 is 1.31.5, not 1.31.6.",
+            output.getvalue().splitlines(),
+        )
 
 
 if __name__ == "__main__":

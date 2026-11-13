@@ -5,8 +5,11 @@ import re
 from typing import TypeGuard
 
 
-_IDENTIFIER = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*\Z")
+_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*\Z")
 _ENTITY_LINE = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*\{\Z")
+_ONE_LINE_ENTITY = re.compile(
+    r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*\{\s*(?P<attribute>.+)\s*\}\Z"
+)
 _ATTRIBUTE_LINE = re.compile(
     r"(?P<type>.+?)\s+(?P<name>\S+)"
     r"(?:\s+(?P<markers>PK(?:\s*,\s*FK)?|FK))?\Z"
@@ -66,6 +69,30 @@ def _is_string(value: object) -> TypeGuard[str]:
     return isinstance(value, str)
 
 
+def _parse_attribute(source_line: str, line_number: int) -> Attribute:
+    match = _ATTRIBUTE_LINE.fullmatch(source_line)
+    if match is None:
+        raise ERDParseError(
+            f"line {line_number}: write an attribute as a type, an identifier, and optional PK or FK markers"
+        )
+
+    name = match.group("name")
+    if name.casefold() in ("pk", "fk") or "," in name:
+        raise ERDParseError(
+            f"line {line_number}: write key markers in the order PK, FK"
+        )
+
+    _check_identifier(name, line_number)
+    markers = match.group("markers") or ""
+    key_markers = frozenset(part.strip() for part in markers.split(",") if part.strip())
+    return Attribute(
+        name=name,
+        type_name=match.group("type").strip(),
+        key_markers=key_markers,
+        line=line_number,
+    )
+
+
 def parse_erd(text: str) -> ERD:
     """Parse one Mermaid erDiagram block, without its Markdown fence."""
     if not _is_string(text):
@@ -97,25 +124,24 @@ def parse_erd(text: str) -> ERD:
                 attributes = {}
                 continue
 
-            match = _ATTRIBUTE_LINE.fullmatch(line)
-            if match is None:
+            attribute = _parse_attribute(line, line_number)
+            if attribute.name in attributes:
                 raise ERDParseError(
-                    f"line {line_number}: write an attribute as a type, an identifier, and optional PK or FK markers"
+                    f"line {line_number}: attribute {attribute.name} appears more than once"
                 )
+            attributes[attribute.name] = attribute
+            continue
 
-            name = match.group("name")
+        one_line_entity_match = _ONE_LINE_ENTITY.fullmatch(line)
+        if one_line_entity_match is not None:
+            name = one_line_entity_match.group("name")
             _check_identifier(name, line_number)
-            if name in attributes:
-                raise ERDParseError(f"line {line_number}: attribute {name} appears more than once")
-
-            markers = match.group("markers") or ""
-            key_markers = frozenset(part.strip() for part in markers.split(",") if part.strip())
-            attributes[name] = Attribute(
-                name=name,
-                type_name=match.group("type").strip(),
-                key_markers=key_markers,
-                line=line_number,
+            if name in entities:
+                raise ERDParseError(f"line {line_number}: entity {name} appears more than once")
+            attribute = _parse_attribute(
+                one_line_entity_match.group("attribute").strip(), line_number
             )
+            entities[name] = Entity(name, {attribute.name: attribute}, line_number)
             continue
 
         entity_match = _ENTITY_LINE.fullmatch(line)

@@ -66,13 +66,10 @@ def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
             continue
 
         if version != expected_version:
-            failures.append(
-                f"FAIL  {driver} is {version}, not {expected_version}. "
-                f"Install {driver} {expected_version}."
-            )
+            failures.append(f"FAIL  {driver} is {version}, not {expected_version}.")
+            failures.append(f"      Install {driver} {expected_version}.")
         else:
             installed.append((driver, version))
-            print(f"ok    {driver} {version} is installed.")
 
     if not installed:
         failures.append(
@@ -122,11 +119,12 @@ def main() -> int:
         return 1
 
     installed, failures = _installed_drivers()
-    for driver, version in installed:
+    connected = False
+    for driver, _version in installed:
         connection = None
         try:
             connection = _connect(driver, url)
-            print(f"ok    {driver} {version} connected to PostgreSQL.")
+            connected = True
         except Exception as error:
             failures.append(f"FAIL  {driver}: {_failure_message(error)}")
         finally:
@@ -135,7 +133,7 @@ def main() -> int:
 
     for failure in failures:
         print(failure)
-    return 1 if failures else 0
+    return 0 if connected else 1
 
 
 if __name__ == "__main__":

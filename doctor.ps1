@@ -63,13 +63,15 @@ Report-Result $driversOk 'A pinned course database driver is installed.' `
 
 foreach ($tool in @('psql', 'pg_dump')) {
     $application = Find-Application $tool
-    $toolVersion = $null
-    if ($null -ne $application) {
-        $toolVersion = & $application.Source --version 2>$null | Select-Object -First 1
+    $repair = 'Add C:\Program Files\PostgreSQL\18\bin to PATH in Windows settings. Open a new PowerShell. Run the installer if that folder is missing.'
+    if ($null -eq $application) {
+        Report-Result $false "$tool is not on PATH." $repair
+        continue
     }
+
+    $toolVersion = & $application.Source --version 2>$null | Select-Object -First 1
     $toolOk = $null -ne $toolVersion -and $toolVersion -match '18\.6'
-    Report-Result $toolOk "$tool reports PostgreSQL 18.6." `
-        'Add C:\Program Files\PostgreSQL\18\bin to PATH in Windows settings. Open a new PowerShell. Run the installer if that folder is missing.'
+    Report-Result $toolOk "$tool reports PostgreSQL 18.6." $repair
 }
 
 $git = Find-Application 'git'

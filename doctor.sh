@@ -116,7 +116,7 @@ python_ok=false
 if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
     python_version=$(run_python --version 2>&1)
     if [ "$python_version" = "$python_expected" ]; then
-        ok "Python $python_version runs on $os."
+        ok "$python_version runs on $os."
         python_ok=true
     else
         bad "Python reports $python_version on $os." \
