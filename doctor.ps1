@@ -59,7 +59,13 @@ if ($null -eq $python) {
 } elseif ([string]::IsNullOrWhiteSpace($pythonVersionOutput)) {
     $pythonFailure = 'The Python 3.15 command did not run.'
 } else {
-    $pythonFailure = "Python reports $pythonVersionOutput."
+    $pythonFailureOutput = $pythonVersionOutput.TrimEnd()
+    if ($pythonFailureOutput.EndsWith('.')) {
+        $pythonFailureOutput = $pythonFailureOutput.Substring(
+            0, $pythonFailureOutput.Length - 1
+        )
+    }
+    $pythonFailure = "Python reports $pythonFailureOutput."
 }
 Report-Result $pythonOk 'Python 3.15.2 runs.' $pythonFailure `
     'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'

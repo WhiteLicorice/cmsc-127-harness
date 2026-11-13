@@ -114,8 +114,14 @@ run_python() {
 
 python_ok=false
 if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
-    python_version=$(run_python --version 2>&1)
-    if [ "$python_version" = "$python_expected" ]; then
+    python_version=$(run_python --version 2>&1 | tr '\n' ' ')
+    python_exit=$?
+    python_version=${python_version% }
+    python_version=${python_version%.}
+    if [ -z "$python_version" ]; then
+        bad 'The Python command did not run.' \
+            "$python_fix"
+    elif [ "$python_exit" -eq 0 ] && [ "$python_version" = "$python_expected" ]; then
         ok "$python_version runs on $os."
         python_ok=true
     else
@@ -145,7 +151,11 @@ fi
 for tool in psql pg_dump pg_ctl; do
     if command -v "$tool" >/dev/null 2>&1; then
         tool_version=$($tool --version 2>&1 | head -n 1)
-        if [[ "$tool_version" == *"$postgres_expected"* ]]; then
+        tool_exit=$?
+        if [ -z "$tool_version" ] || [ "$tool_exit" -ne 0 ]; then
+            bad "$tool did not report a version." \
+                "$postgres_fix"
+        elif [[ "$tool_version" == *"$postgres_expected"* ]]; then
             ok "$tool reports PostgreSQL $postgres_expected."
         else
             bad "$tool reports $tool_version." \
@@ -157,11 +167,19 @@ for tool in psql pg_dump pg_ctl; do
     fi
 done
 
-if command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; then
-    ok "Git runs on $os."
-else
+if ! command -v git >/dev/null 2>&1; then
     bad 'Git is not on PATH.' \
         "$git_fix"
+else
+    git_version=$(git --version 2>&1 | tr '\n' ' ')
+    git_exit=$?
+    git_version=${git_version% }
+    if [ -z "$git_version" ] || [ "$git_exit" -ne 0 ]; then
+        bad 'Git did not report a version.' \
+            "$git_fix"
+    else
+        ok "Git runs on $os."
+    fi
 fi
 
 if [ "$python_ok" = true ]; then
