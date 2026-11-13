@@ -49,10 +49,9 @@ The repository requires Python 3.15 or newer. Pyright 1.1.414 installs through
 npm. Install Node.js and npm first, from the official guide at
 <https://docs.npmjs.com/downloading-and-installing-node-js-and-npm>. Then run
 `npm install --global pyright@1.1.414` and `pyright` from the repository root.
-You do not need npm if you only check types with Pylance in VS Code. Create
-`.venv` and install the requirements first. The command checks the application
-and test files in strict mode. Pyright excludes `.venv` and Python bytecode
-caches. There is no untyped test fixture.
+Create `.venv` and install the requirements first. The command checks the
+application and test files in strict mode. Pyright excludes `.venv` and Python
+bytecode caches. There is no untyped test fixture.
 
 The Pylance extension (`ms-python.vscode-pylance`) reads `.vscode/settings.json`
 and checks the whole workspace in strict mode.
@@ -80,6 +79,10 @@ JSON sidecar and may have an `.exit` sidecar. A case file that the manifest
 does not list fails before the runner creates a database. The runner reads
 all cases up to the requested stage. Stage 2 includes stage 1.
 
+A pair adds its own cases in `cases/pair/manifest.json`. The pair manifest uses
+the same fields. Its files stay inside `cases/pair/`. The published
+manifest stays unchanged, so the protected-file check still passes.
+
 Result data uses a JSON object with `columns` and `rows` fields. SQL `NULL`
 uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
 `1.00` match. Column names and column order must match. Row order must match
@@ -91,23 +94,37 @@ The runner supports six case kinds. `output` calls the pair's `./run` command.
 `state` checks rows after an operation. `race` runs SQL steps on two sessions
 in the manifest order. `query` runs a SQL file directly.
 
-The invariant list runs after the cases. `work_sql` runs report files as SQL,
-so pair Python cannot filter their rows. `normal_form` checks that each
-determinant and dependent column set shares a table and that a primary or
-unique key enforces the determinant. `feature` looks for a named SQL feature
-in a view definition from the PostgreSQL catalog. It can miss a feature that
-the query text hides, or accept a feature that does no useful work. `index`
-checks the plan from `EXPLAIN`. `backup_restore` calls the pair's commands and
-compares table rows before and after restore. `protected` checks published
-file hashes. `written` checks that required headings have content. It does
-not judge the content. `contribution` prints changed lines by Git author and
-week. The instructor reads that table. It does not set a score.
+The invariant list runs after the cases. `work_sql` runs report files as SQL.
+Pair Python is not in the path. It cannot filter their rows. `normal_form`
+checks every mapped table and column against the catalog, then checks that a
+primary or unique key enforces the determinant. `feature` looks for a named SQL
+feature in a view definition from the PostgreSQL catalog. It can miss a feature
+that the query text hides. It can also accept a feature that does no useful
+work. `index` reads the structured plan from `EXPLAIN`. It compares the index
+identity with the catalog. It requires that a migration created the index. The
+check disables sequential scans, so the plan does not prove the optimizer's
+ordinary choice.
+`backup_restore` calls the pair's commands and compares table rows before and
+after restore. `protected` checks published file hashes. `written` checks that
+required headings have content. It does not judge the content. `contribution`
+prints commits and changed lines by member and week. The instructor reads that
+table. It does not set a score. `pyright` runs strict Pyright and rejects a
+student `# pyright: ignore` directive. When Pyright is absent, the check fails
+with the Node.js and npm repair.
 
 Each result line identifies a case or invariant. A failed group does not hide the
 other group results. A `SKIP` line gives a reason and does not count as a pass.
-The final count follows `== result ==`. The runner writes the last result to
-`.cmsc127/last-run.json` for the course page. A form fault stops scoring and
-reports its line and column.
+An `INFO` line carries the contribution table and does not count. The final
+count follows `== result ==` and includes the Pyright result. The runner writes
+the last result to `.cmsc127/last-run.json` for the course page. A form fault
+stops the run before it creates a database and reports the file, line, and
+column.
+
+Run one case with `./check.sh --case CASE_ID`. Run the form check without a
+database with `./check.sh --form-lint`. Both commands exit 0 on success, 1 on a
+failed check, and 2 on a form fault or a usage error. The form check prints no
+expected answer. Set `CMSC127_RUNNER_DIR` to a local harness checkout to test
+the runner before a release.
 
 The harness self-tests use a separate scratch database. Run them with
 `./check.sh --self-test`. The GitHub workflow runs the self-tests and the same
@@ -126,6 +143,7 @@ In PowerShell on Windows, run:
 py -3.15 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+npm install --global pyright@1.1.414
 $env:CMSC127_DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
 $env:PGHOST = '127.0.0.1'
 $env:PGPORT = '55435'
@@ -145,6 +163,7 @@ In WSL, Linux, or macOS, install the drivers and set the connection variables:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+npm install --global pyright@1.1.414
 export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
 export PGHOST=127.0.0.1
 export PGPORT=55435

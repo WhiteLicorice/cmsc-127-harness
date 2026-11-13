@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_right
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -29,6 +29,17 @@ from comparator import compare_erd
 
 
 CASE_KINDS = {"output", "schema", "reject", "state", "race", "query"}
+INVARIANT_KINDS = {
+    "work_sql",
+    "normal_form",
+    "feature",
+    "index",
+    "backup_restore",
+    "protected",
+    "written",
+    "contribution",
+    "pyright",
+}
 CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 FEATURE_PATTERNS = {
@@ -78,6 +89,31 @@ class _DbConnection(Protocol):
     def close(self: _DbConnection) -> None: ...
 
 
+class FormFault(ValueError):
+    """A form fault with a source location."""
+
+    def __init__(
+        self,
+        path: Path,
+        line: int,
+        column: int,
+        message: str,
+        *,
+        root: Path | None = None,
+    ) -> None:
+        self.path = path
+        self.line = line
+        self.column = column
+        self.message = message
+        display = path.name
+        if root is not None:
+            try:
+                display = path.relative_to(root).as_posix()
+            except ValueError:
+                display = path.name
+        super().__init__(f"{display}: line {line}, column {column}: {message}")
+
+
 def _as_object(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
@@ -87,21 +123,15 @@ def _as_object(value: object, label: str) -> dict[str, object]:
     return {str(key): item for key, item in candidate.items()}
 
 
-def _as_list(value: object, label: str) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError(f"{label} must be a list")
-    return cast(list[object], value)
-
-
 def _read_json(path: Path) -> object:
     try:
-        return json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal)
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"{path.name}: line {error.lineno}, column {error.colno}: {error.msg}"
-        ) from error
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
-        raise ValueError(f"{path.name}: file is not UTF-8 text") from error
+        raise FormFault(path, 1, 1, "file is not UTF-8 text") from error
+    try:
+        return json.loads(text, parse_float=Decimal)
+    except json.JSONDecodeError as error:
+        raise FormFault(path, error.lineno, error.colno, error.msg) from error
 
 
 def _json_locations(text: str) -> dict[tuple[str | int, ...], tuple[int, int]]:
@@ -159,190 +189,368 @@ def _json_locations(text: str) -> dict[tuple[str | int, ...], tuple[int, int]]:
     return locations
 
 
-def _form_fault_location(root: Path, message: str) -> str:
-    manifest_path = root / "cases" / "manifest.json"
-    if not manifest_path.is_file():
-        return f"cases/manifest.json: line 1, column 1: {message}"
+def _json_fault(
+    path: Path,
+    text: str,
+    location: tuple[str | int, ...],
+    message: str,
+    *,
+    root: Path | None = None,
+) -> FormFault:
     try:
-        text = manifest_path.read_text(encoding="utf-8")
-        parsed = json.loads(text, parse_float=Decimal)
         locations = _json_locations(text)
-    except (OSError, ValueError, UnicodeDecodeError):
-        return f"cases/manifest.json: line 1, column 1: {message}"
-    if isinstance(parsed, dict):
-        parsed_object = _as_object(cast(object, parsed), "cases/manifest.json")
-    else:
-        parsed_object = {}
+    except (ValueError, IndexError):
+        locations = {}
+    line, column = locations.get(location, (1, 1))
+    return FormFault(path, line, column, message, root=root)
 
-    manifest_location: tuple[str | int, ...] = ()
-    sidecar_path: Path | None = None
-    sidecar_location: tuple[str | int, ...] = ()
-    case_items = parsed_object.get("cases")
-    cases = cast(list[object], case_items) if isinstance(case_items, list) else []
-    matching_cases: list[int] = []
-    for index, raw_case in enumerate(cases):
-        if isinstance(raw_case, dict):
-            raw_case_object = _as_object(cast(object, raw_case), f"case {index + 1}")
-            case_id = raw_case_object.get("id")
-            if isinstance(case_id, str) and message.startswith(
-                (f"case {case_id}:", f"case {case_id} .expected:")
-            ):
-                matching_cases.append(index)
-    case_index: int | None = None
-    if matching_cases:
-        case_index = matching_cases[-1] if "duplicate id" in message else matching_cases[0]
-    numbered_case = re.match(r"case (\d+):", message)
-    if case_index is None and numbered_case is not None:
-        case_index = int(numbered_case.group(1)) - 1
-    if case_index is not None and 0 <= case_index < len(cases):
-        case_value = cases[case_index]
-        case_path: tuple[str | int, ...] = ("cases", case_index)
-        manifest_location = case_path
-        if isinstance(case_value, dict):
-            case_object = _as_object(cast(object, case_value), f"case {case_index + 1}")
-            if ".expected" in message:
-                relative_file = case_object.get("file")
-                if isinstance(relative_file, str):
-                    case_file = root / relative_file
-                    sidecar_path = case_file.with_suffix(".expected")
-                    if "columns" in message:
-                        sidecar_location = ("columns",)
-                    elif "rows" in message:
-                        sidecar_location = ("rows",)
-                manifest_location = (*case_path, "file")
-            elif ".exit" in message:
-                relative_file = case_object.get("file")
-                if isinstance(relative_file, str):
-                    sidecar_path = (root / relative_file).with_suffix(".exit")
-                manifest_location = (*case_path, "file")
-            elif "duplicate id" in message or " id " in message:
-                manifest_location = (*case_path, "id")
-            elif "stage" in message:
-                manifest_location = (*case_path, "stage")
-            elif "kind" in message:
-                manifest_location = (*case_path, "kind")
-            elif "file" in message:
-                manifest_location = (*case_path, "file")
-    elif message.startswith("cases/manifest.json: version"):
-        manifest_location = ("version",)
-    elif "invariant " in message:
-        match = re.search(r"invariant (\d+)", message)
-        if match is not None:
-            manifest_location = ("invariants", int(match.group(1)) - 1)
-            if "stage" in message:
-                manifest_location = (*manifest_location, "stage")
-    elif "skip " in message:
-        match = re.search(r"skip (\d+)", message)
-        if match is not None:
-            manifest_location = ("skips", int(match.group(1)) - 1)
-            if "stage" in message:
-                manifest_location = (*manifest_location, "stage")
-    elif "cases" in message or "unlisted case" in message:
-        manifest_location = ("cases",)
-    elif "invariants" in message:
-        manifest_location = ("invariants",)
-    elif "skips" in message:
-        manifest_location = ("skips",)
 
-    if sidecar_path is not None and sidecar_path.is_file():
+def _validate_dataset(
+    value: Mapping[str, object],
+    fault: Callable[[str, tuple[str | int, ...]], FormFault],
+    base: tuple[str | int, ...],
+) -> None:
+    columns = value.get("columns")
+    if not isinstance(columns, list):
+        raise fault("columns must be a list", (*base, "columns"))
+    column_list = cast(list[object], columns)
+    for column_index, name in enumerate(column_list):
+        if not isinstance(name, str):
+            raise fault(
+                f"column {column_index + 1} must be a string",
+                (*base, "columns", column_index),
+            )
+    rows = value.get("rows")
+    if not isinstance(rows, list):
+        raise fault("rows must be a list", (*base, "rows"))
+    for row_index, row in enumerate(cast(list[object], rows)):
+        if not isinstance(row, list):
+            raise fault(
+                f"row {row_index + 1} must be a list",
+                (*base, "rows", row_index),
+            )
+        row_values = cast(list[object], row)
+        if len(row_values) != len(column_list):
+            raise fault(
+                f"row {row_index + 1} must have {len(column_list)} values",
+                (*base, "rows", row_index),
+            )
+        for cell in row_values:
+            if isinstance(cell, (dict, list)):
+                raise fault(
+                    f"row {row_index + 1} must hold JSON scalars",
+                    (*base, "rows", row_index),
+                )
+
+
+def _validate_expected(path: Path, expected: Mapping[str, object], kind: str) -> None:
+    text = path.read_text(encoding="utf-8")
+
+    def fault(message: str, location: tuple[str | int, ...]) -> FormFault:
+        return _json_fault(path, text, location, message)
+
+    if kind == "reject":
+        sqlstate = expected.get("sqlstate")
+        if sqlstate is not None and not isinstance(sqlstate, str):
+            raise fault("sqlstate must be a string", ("sqlstate",))
+        return
+    _validate_dataset(expected, fault, ())
+
+
+def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    try:
+        body = _as_object(_read_json(path), f"case {case_id}")
+    except ValueError as error:
+        raise _json_fault(path, text, (), str(error)) from error
+
+    def fault(message: str, location: tuple[str | int, ...]) -> FormFault:
+        return _json_fault(path, text, location, message)
+
+    if kind == "state":
+        if not isinstance(body.get("operation"), str):
+            raise fault("operation must be a string", ("operation",))
+        if not isinstance(body.get("check_sql"), str):
+            raise fault("check_sql must be a string", ("check_sql",))
+        return
+    steps = body.get("steps")
+    if not isinstance(steps, list):
+        raise fault("steps must be a list", ("steps",))
+    for index, raw_step in enumerate(cast(list[object], steps)):
         try:
-            sidecar_text = sidecar_path.read_text(encoding="utf-8")
-            sidecar_value = json.loads(sidecar_text, parse_float=Decimal)
-            if isinstance(sidecar_value, dict):
-                sidecar_locations = _json_locations(sidecar_text)
-                line, column = sidecar_locations.get(sidecar_location, (1, 1))
-                relative = sidecar_path.relative_to(root).as_posix()
-                return f"{relative}: line {line}, column {column}: {message}"
-        except (OSError, ValueError, UnicodeDecodeError):
-            pass
-    line, column = locations.get(manifest_location, locations.get((), (1, 1)))
-    return f"cases/manifest.json: line {line}, column {column}: {message}"
+            step = _as_object(raw_step, "step")
+        except ValueError as error:
+            raise fault(str(error), ("steps", index)) from error
+        if step.get("session") not in {"a", "b"}:
+            raise fault("session must be a or b", ("steps", index, "session"))
+        if not isinstance(step.get("sql"), str):
+            raise fault("sql must be a string", ("steps", index, "sql"))
+        expected = step.get("expected")
+        if expected is not None:
+            try:
+                expected_object = _as_object(expected, "expected")
+            except ValueError as error:
+                raise fault(str(error), ("steps", index, "expected")) from error
+            _validate_dataset(expected_object, fault, ("steps", index, "expected"))
+    if not isinstance(body.get("check_sql"), str):
+        raise fault("check_sql must be a string", ("check_sql",))
+
+
+def _validate_invariant_fields(
+    invariant: Mapping[str, object],
+    kind: str,
+    index: int,
+    fault: Callable[[str, tuple[str | int, ...]], FormFault],
+    location: tuple[str | int, ...],
+) -> None:
+    def require(name: str, expected_type: type[object], description: str) -> object:
+        value = invariant.get(name)
+        if not isinstance(value, expected_type):
+            raise fault(
+                f"invariant {index}: {kind} needs a {description}",
+                (*location, name),
+            )
+        return value
+
+    if kind == "work_sql":
+        files = require("files", list, "files list")
+        file_list = cast(list[object], files)
+        if not file_list:
+            raise fault(
+                f"invariant {index}: work_sql needs a non-empty files list",
+                (*location, "files"),
+            )
+        for file_index, file_name in enumerate(file_list):
+            if not isinstance(file_name, str) or not file_name.endswith(".sql"):
+                raise fault(
+                    f"invariant {index}: work_sql needs SQL files",
+                    (*location, "files", file_index),
+                )
+    elif kind == "normal_form":
+        require("mapping", dict, "mapping object")
+        rules = require("rules", list, "rules list")
+        for rule_index, raw_rule in enumerate(cast(list[object], rules)):
+            try:
+                rule = _as_object(raw_rule, "rule")
+            except ValueError as error:
+                raise fault(str(error), (*location, "rules", rule_index)) from error
+            for field in ("determinant", "dependent"):
+                if not isinstance(rule.get(field), list):
+                    raise fault(
+                        f"invariant {index}: rule {rule_index + 1} needs a {field} list",
+                        (*location, "rules", rule_index, field),
+                    )
+    elif kind == "feature":
+        require("schema", str, "schema string")
+        require("view", str, "view string")
+        features = require("features", list, "features list")
+        for feature_index, feature in enumerate(cast(list[object], features)):
+            if feature not in FEATURE_PATTERNS:
+                raise fault(
+                    f"invariant {index}: unsupported SQL feature {feature!r}",
+                    (*location, "features", feature_index),
+                )
+    elif kind == "index":
+        require("file", str, "file string")
+        require("index", str, "index string")
+    elif kind == "written":
+        require("file", str, "file string")
+        sections = require("sections", list, "sections list")
+        for section_index, section in enumerate(cast(list[object], sections)):
+            if not isinstance(section, str):
+                raise fault(
+                    f"invariant {index}: section names must be strings",
+                    (*location, "sections", section_index),
+                )
+
+
+def _validate_case(
+    root: Path,
+    case_root: Path,
+    raw_case: object,
+    index: int,
+    fault: Callable[[str, tuple[str | int, ...]], FormFault],
+    identifiers: set[str],
+    listed: set[Path],
+    *,
+    pair: bool = False,
+) -> dict[str, object]:
+    location = ("cases", index - 1)
+    try:
+        case = _as_object(raw_case, f"case {index}")
+    except ValueError as error:
+        raise fault(str(error), location) from error
+    case_id = case.get("id")
+    if not isinstance(case_id, str) or not case_id:
+        raise fault(f"case {index}: id must be a non-empty string", (*location, "id"))
+    if case_id in identifiers:
+        raise fault(f"case {case_id}: duplicate id", (*location, "id"))
+    identifiers.add(case_id)
+    stage = case.get("stage")
+    if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
+        raise fault(
+            f"case {case_id}: stage must be a positive integer",
+            (*location, "stage"),
+        )
+    kind = case.get("kind")
+    if kind not in CASE_KINDS:
+        raise fault(f"case {case_id}: unsupported kind {kind!r}", (*location, "kind"))
+    relative_file = case.get("file")
+    if not isinstance(relative_file, str) or not relative_file:
+        raise fault(
+            f"case {case_id}: file must be a relative path",
+            (*location, "file"),
+        )
+    case_path = (root / relative_file).resolve()
+    try:
+        case_path.relative_to(case_root.resolve())
+    except ValueError as error:
+        raise fault(
+            f"case {case_id}: file must be inside cases/",
+            (*location, "file"),
+        ) from error
+    if pair:
+        try:
+            case_path.relative_to((case_root / "pair").resolve())
+        except ValueError as error:
+            raise fault(
+                f"case {case_id}: file must be inside cases/pair/",
+                (*location, "file"),
+            ) from error
+    if not case_path.is_file():
+        raise fault(
+            f"case {case_id}: case file is missing: {relative_file}",
+            (*location, "file"),
+        )
+    allowed_suffixes = {
+        "output": {".json", ".sql", ".sh"},
+        "schema": {".erd", ".md"},
+        "reject": {".sql"},
+        "state": {".json"},
+        "race": {".json"},
+        "query": {".sql"},
+    }
+    if case_path.suffix not in allowed_suffixes[str(kind)]:
+        raise fault(
+            f"case {case_id}: {kind} needs a supported case-file type",
+            (*location, "file"),
+        )
+    listed.add(case_path)
+    expected_path = case_path.with_suffix(".expected")
+    if not expected_path.is_file():
+        raise fault(
+            f"case {case_id}: .expected sidecar is missing",
+            (*location, "file"),
+        )
+    expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
+    _validate_expected(expected_path, expected, str(kind))
+    exit_path = case_path.with_suffix(".exit")
+    if exit_path.exists():
+        try:
+            expected_exit = int(exit_path.read_text(encoding="utf-8").strip())
+        except (ValueError, UnicodeDecodeError) as error:
+            raise FormFault(exit_path, 1, 1, "must contain one integer", root=root) from error
+        if expected_exit < 0:
+            raise FormFault(exit_path, 1, 1, "must be zero or greater", root=root)
+    if kind in {"state", "race"}:
+        _validate_case_body(case_path, str(kind), case_id)
+    return case
+
+
+def _load_pair_manifest(
+    root: Path,
+    case_root: Path,
+    identifiers: set[str],
+    listed: set[Path],
+) -> list[dict[str, object]]:
+    pair_path = case_root / "pair" / "manifest.json"
+    if not pair_path.is_file():
+        return []
+    text = pair_path.read_text(encoding="utf-8")
+    pair_manifest = _as_object(_read_json(pair_path), "cases/pair/manifest.json")
+    locations = _json_locations(text)
+
+    def fault(message: str, location: tuple[str | int, ...] = ()) -> FormFault:
+        line, column = locations.get(location, (1, 1))
+        return FormFault(pair_path, line, column, message, root=root)
+
+    if pair_manifest.get("version") != 1:
+        raise fault("version must be 1", ("version",))
+    if "invariants" in pair_manifest or "skips" in pair_manifest:
+        raise fault("the pair manifest may list only cases", ())
+    raw_cases = pair_manifest.get("cases")
+    if not isinstance(raw_cases, list):
+        raise fault("cases must be a list", ("cases",))
+    cases: list[dict[str, object]] = []
+    for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
+        cases.append(
+            _validate_case(
+                root,
+                case_root,
+                raw_case,
+                index,
+                fault,
+                identifiers,
+                listed,
+                pair=True,
+            )
+        )
+    return cases
 
 
 def _load_manifest(root: Path) -> dict[str, object]:
-    """Load and validate the pair's manifest and its case-file inventory."""
+    """Load and validate the published manifest and the pair manifest."""
     case_root = root / "cases"
     manifest_path = case_root / "manifest.json"
     if not manifest_path.is_file():
-        raise ValueError("cases/manifest.json: file is missing")
+        raise FormFault(manifest_path, 1, 1, "file is missing", root=root)
+    manifest_text = manifest_path.read_text(encoding="utf-8")
     manifest = _as_object(_read_json(manifest_path), "cases/manifest.json")
+    locations = _json_locations(manifest_text)
+
+    def fault(message: str, location: tuple[str | int, ...] = ()) -> FormFault:
+        line, column = locations.get(location, (1, 1))
+        return FormFault(manifest_path, line, column, message, root=root)
+
     if manifest.get("version") != 1:
-        raise ValueError("cases/manifest.json: version must be 1")
-    raw_cases = _as_list(manifest.get("cases"), "cases/manifest.json: cases")
+        raise fault("version must be 1", ("version",))
+    raw_cases = manifest.get("cases")
+    if not isinstance(raw_cases, list):
+        raise fault("cases must be a list", ("cases",))
 
     identifiers: set[str] = set()
     listed: set[Path] = set()
-    for index, raw_case in enumerate(raw_cases, start=1):
-        case = _as_object(raw_case, f"case {index}")
-        case_id = case.get("id")
-        stage = case.get("stage")
-        kind = case.get("kind")
-        relative_file = case.get("file")
-        if not isinstance(case_id, str) or not case_id:
-            raise ValueError(f"case {index}: id must be a non-empty string")
-        if case_id in identifiers:
-            raise ValueError(f"case {case_id}: duplicate id")
-        identifiers.add(case_id)
-        if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
-            raise ValueError(f"case {case_id}: stage must be a positive integer")
-        if kind not in CASE_KINDS:
-            raise ValueError(f"case {case_id}: unsupported kind {kind!r}")
-        if not isinstance(relative_file, str) or not relative_file:
-            raise ValueError(f"case {case_id}: file must be a relative path")
+    published_cases: list[dict[str, object]] = []
+    for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
+        published_cases.append(
+            _validate_case(
+                root,
+                case_root,
+                raw_case,
+                index,
+                fault,
+                identifiers,
+                listed,
+            )
+        )
+    pair_cases = _load_pair_manifest(root, case_root, identifiers, listed)
+    manifest["cases"] = [*published_cases, *pair_cases]
 
-        case_path = (root / relative_file).resolve()
-        try:
-            case_path.relative_to(case_root.resolve())
-        except ValueError as error:
-            raise ValueError(f"case {case_id}: file must be inside cases/") from error
-        if not case_path.is_file():
-            raise ValueError(f"case {case_id}: case file is missing: {relative_file}")
-        allowed_suffixes = {
-            "output": {".json", ".sql", ".sh"},
-            "schema": {".erd", ".md"},
-            "reject": {".sql"},
-            "state": {".json"},
-            "race": {".json"},
-            "query": {".sql"},
-        }
-        if case_path.suffix not in allowed_suffixes[str(kind)]:
-            raise ValueError(f"case {case_id}: {kind} needs a supported case-file type")
-        listed.add(case_path)
-        expected_path = case_path.with_suffix(".expected")
-        if not expected_path.is_file():
-            raise ValueError(f"case {case_id}: .expected sidecar is missing")
-        expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
-        if kind != "reject":
-            columns = expected.get("columns")
-            rows = expected.get("rows")
-            if not isinstance(columns, list):
-                raise ValueError(f"case {case_id} .expected: columns must be a list")
-            if not isinstance(rows, list):
-                raise ValueError(f"case {case_id} .expected: rows must be a list")
-        elif expected.get("sqlstate") is not None and not isinstance(
-            expected.get("sqlstate"), str
-        ):
-            raise ValueError(f"case {case_id} .expected: sqlstate must be a string")
-        exit_path = case_path.with_suffix(".exit")
-        if exit_path.exists():
-            try:
-                expected_exit = int(exit_path.read_text(encoding="utf-8").strip())
-            except (ValueError, UnicodeDecodeError) as error:
-                raise ValueError(f"case {case_id}: .exit must contain one integer") from error
-            if expected_exit < 0:
-                raise ValueError(f"case {case_id}: .exit must be zero or greater")
-
+    manifest_paths = {
+        manifest_path.resolve(),
+        (case_root / "pair" / "manifest.json").resolve(),
+    }
     unlisted_cases = sorted(
         path.resolve()
         for path in case_root.rglob("*")
         if path.is_file()
         and path.suffix in CASE_SUFFIXES
-        and path.name != "manifest.json"
+        and path.resolve() not in manifest_paths
         and path.resolve() not in listed
     )
     if unlisted_cases:
         relative = unlisted_cases[0].relative_to(root).as_posix()
-        raise ValueError(f"unlisted case file: {relative}")
+        raise fault(f"unlisted case file: {relative}", ("cases",))
     unlisted_sidecars = sorted(
         path.resolve()
         for path in case_root.rglob("*")
@@ -353,36 +561,55 @@ def _load_manifest(root: Path) -> dict[str, object]:
     )
     if unlisted_sidecars:
         relative = unlisted_sidecars[0].relative_to(root).as_posix()
-        raise ValueError(f"unlisted case sidecar: {relative}")
+        raise fault(f"unlisted case sidecar: {relative}", ("cases",))
+
     raw_invariants = manifest.get("invariants", [])
     if not isinstance(raw_invariants, list):
-        raise ValueError("cases/manifest.json: invariants must be a list")
+        raise fault("invariants must be a list", ("invariants",))
     for index, raw_invariant in enumerate(cast(list[object], raw_invariants), start=1):
-        invariant = _as_object(raw_invariant, f"invariant {index}")
+        location = ("invariants", index - 1)
+        try:
+            invariant = _as_object(raw_invariant, f"invariant {index}")
+        except ValueError as error:
+            raise fault(str(error), location) from error
         invariant_stage = invariant.get("stage")
-        if not isinstance(invariant_stage, int) or isinstance(invariant_stage, bool) or invariant_stage < 1:
-            raise ValueError(f"invariant {index}: stage must be a positive integer")
+        if (
+            not isinstance(invariant_stage, int)
+            or isinstance(invariant_stage, bool)
+            or invariant_stage < 1
+        ):
+            raise fault(
+                f"invariant {index}: stage must be a positive integer",
+                (*location, "stage"),
+            )
+        kind = invariant.get("kind")
+        if kind not in INVARIANT_KINDS:
+            raise fault(
+                f"invariant {index}: unsupported kind {kind!r}",
+                (*location, "kind"),
+            )
+        _validate_invariant_fields(invariant, str(kind), index, fault, location)
     skips = manifest.get("skips", [])
     if not isinstance(skips, list):
-        raise ValueError("cases/manifest.json: skips must be a list")
+        raise fault("skips must be a list", ("skips",))
     for index, raw_skip in enumerate(cast(list[object], skips), start=1):
-        skip = _as_object(raw_skip, f"skip {index}")
+        location = ("skips", index - 1)
+        try:
+            skip = _as_object(raw_skip, f"skip {index}")
+        except ValueError as error:
+            raise fault(str(error), location) from error
         skip_stage = skip.get("stage", 1)
         if not isinstance(skip_stage, int) or isinstance(skip_stage, bool) or skip_stage < 1:
-            raise ValueError(f"skip {index}: stage must be a positive integer")
+            raise fault(
+                f"skip {index}: stage must be a positive integer",
+                (*location, "stage"),
+            )
     return manifest
 
 
 def load_manifest(root: Path) -> dict[str, object]:
     """Load the manifest and add a source location to each form fault."""
-    root = root.resolve()
-    try:
-        return _load_manifest(root)
-    except ValueError as error:
-        message = str(error)
-        if re.search(r"line \d+, column \d+", message):
-            raise
-        raise ValueError(_form_fault_location(root, message)) from error
+    return _load_manifest(root.resolve())
 
 
 def select_cases(manifest: Mapping[str, object], stage: int) -> list[dict[str, object]]:
@@ -547,18 +774,59 @@ def _execute(
 
 
 def _extract_erd(text: str) -> str:
-    match = re.search(r"```(?:mermaid)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    return match.group(1) if match is not None else text
+    blocks: list[tuple[str, str]] = []
+    lines = text.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        opening = re.match(
+            r"^[ \t]*(`{3,}|~{3,})(.*)$", lines[index].rstrip("\r\n")
+        )
+        if opening is None:
+            index += 1
+            continue
+        fence = opening.group(1)
+        info = opening.group(2).strip()
+        block_lines: list[str] = []
+        index += 1
+        while index < len(lines):
+            closing = re.match(
+                r"^[ \t]*(`{3,}|~{3,})\s*$", lines[index].rstrip("\r\n")
+            )
+            if (
+                closing is not None
+                and closing.group(1)[0] == fence[0]
+                and len(closing.group(1)) >= len(fence)
+            ):
+                index += 1
+                break
+            block_lines.append(lines[index])
+            index += 1
+        blocks.append((info, "".join(block_lines)))
+    for block_info, block_body in blocks:
+        if "erDiagram" in block_body and "mermaid" in block_info.lower():
+            return block_body
+    for _, block_body in blocks:
+        if "erDiagram" in block_body:
+            return block_body
+    return text
 
 
 def _bash_executable() -> str:
     if os.name == "nt":
+        candidates: list[Path] = []
         git_executable = shutil.which("git")
         if git_executable is not None:
-            git_root = Path(git_executable).resolve().parent.parent
-            git_bash = git_root / "bin" / "bash.exe"
-            if git_bash.is_file():
-                return str(git_bash)
+            candidates.append(
+                Path(git_executable).resolve().parent.parent / "bin" / "bash.exe"
+            )
+        for root in (
+            Path(r"C:\Program Files\Git"),
+            Path(r"C:\Program Files (x86)\Git"),
+        ):
+            candidates.append(root / "bin" / "bash.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
     return "bash"
 
 
@@ -807,6 +1075,24 @@ def _unique_keys(
     return {frozenset(cast(list[str], row[0])) for row in rows}
 
 
+def _table_columns(connection: _DbConnection, table: str) -> set[str] | None:
+    with connection.cursor() as cursor:
+        _execute(cursor, "SELECT to_regclass(%s)", (table,))
+        row = cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        _execute(
+            cursor,
+            """SELECT attribute.attname
+               FROM pg_attribute AS attribute
+               WHERE attribute.attrelid = to_regclass(%s)
+                 AND attribute.attnum > 0
+                 AND NOT attribute.attisdropped""",
+            (table,),
+        )
+        return {str(record[0]) for record in cursor.fetchall()}
+
+
 def _check_normal_form(
     connection: _DbConnection, config: Mapping[str, object]
 ) -> list[str]:
@@ -816,6 +1102,37 @@ def _check_normal_form(
         return ["normal_form needs mapping and rules"]
     columns = _as_object(cast(object, mapping), "normal_form mapping")
     errors: list[str] = []
+    targets: dict[str, tuple[str, str]] = {}
+    catalog: dict[str, set[str] | None] = {}
+    if not columns:
+        errors.append("normal_form mapping is empty")
+    for source_name, target_value in columns.items():
+        if not isinstance(target_value, dict):
+            errors.append(f"mapping for {source_name} must be an object")
+            continue
+        target_object = _as_object(
+            cast(object, target_value), f"mapping for {source_name}"
+        )
+        table = target_object.get("table")
+        column = target_object.get("column")
+        if not isinstance(table, str) or not isinstance(column, str):
+            errors.append(f"mapping for {source_name} needs table and column")
+            continue
+        if table not in catalog:
+            catalog[table] = _table_columns(connection, table)
+        table_columns = catalog[table]
+        if table_columns is None:
+            errors.append(
+                f"mapping for {source_name} names a table that does not exist: {table}"
+            )
+            continue
+        if column not in table_columns:
+            errors.append(
+                f"mapping for {source_name} names a column that does not exist: "
+                f"{table}.{column}"
+            )
+            continue
+        targets[source_name] = (table, column)
     for raw_rule in cast(list[object], rules):
         rule = _as_object(raw_rule, "normal_form rule")
         rule_id = str(rule.get("id", "rule"))
@@ -832,37 +1149,21 @@ def _check_normal_form(
                 errors.append(f"{rule_id}: source column {source_name!r} has no mapping")
                 valid = False
                 continue
-            target_value = columns[source_name]
-            if not isinstance(target_value, dict):
-                errors.append(f"{rule_id}: mapping for {source_name} must be an object")
+            target = targets.get(source_name)
+            if target is None:
                 valid = False
                 continue
-            target_object = _as_object(cast(object, target_value), f"mapping for {source_name}")
-            table = target_object.get("table")
-            column = target_object.get("column")
-            if not isinstance(table, str) or not isinstance(column, str):
-                errors.append(f"{rule_id}: mapping for {source_name} needs table and column")
-                valid = False
-                continue
-            determinant.append((table, column))
+            determinant.append(target)
         for source_name in cast(list[object], dependent_names):
             if not isinstance(source_name, str) or source_name not in columns:
                 errors.append(f"{rule_id}: source column {source_name!r} has no mapping")
                 valid = False
                 continue
-            target_value = columns[source_name]
-            if not isinstance(target_value, dict):
-                errors.append(f"{rule_id}: mapping for {source_name} must be an object")
+            target = targets.get(source_name)
+            if target is None:
                 valid = False
                 continue
-            target_object = _as_object(cast(object, target_value), f"mapping for {source_name}")
-            table = target_object.get("table")
-            column = target_object.get("column")
-            if not isinstance(table, str) or not isinstance(column, str):
-                errors.append(f"{rule_id}: mapping for {source_name} needs table and column")
-                valid = False
-                continue
-            dependents.append((table, column))
+            dependents.append(target)
         if not valid or not determinant:
             continue
         determinant_tables = {table for table, _ in determinant}
@@ -915,10 +1216,79 @@ def _check_feature(
     return errors
 
 
+def _catalog_indexes(connection: _DbConnection) -> set[tuple[str, str]]:
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            """SELECT namespace_entry.nspname, class_entry.relname
+               FROM pg_class AS class_entry
+               JOIN pg_namespace AS namespace_entry
+                 ON namespace_entry.oid = class_entry.relnamespace
+               WHERE class_entry.relkind = 'i'""",
+        )
+        return {(str(row[0]), str(row[1])) for row in cursor.fetchall()}
+
+
+def _resolve_index(connection: _DbConnection, name: str) -> tuple[str, str] | None:
+    if "." in name:
+        schema, _, index_name = name.partition(".")
+        with connection.cursor() as cursor:
+            _execute(cursor, "SELECT to_regclass(%s)", (name,))
+            row = cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return schema, index_name
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            """SELECT namespace_entry.nspname, class_entry.relname
+               FROM pg_class AS class_entry
+               JOIN pg_namespace AS namespace_entry
+                 ON namespace_entry.oid = class_entry.relnamespace
+               WHERE class_entry.relkind = 'i'
+                 AND class_entry.relname = %s""",
+            (name,),
+        )
+        identities = {(str(row[0]), str(row[1])) for row in cursor.fetchall()}
+    if len(identities) != 1:
+        return None
+    return next(iter(identities))
+
+
+def _plan_indexes(plan: object) -> set[tuple[str | None, str]]:
+    found: set[tuple[str | None, str]] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for child in cast(list[object], node):
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+        entry = cast(dict[str, object], node)
+        index_name = entry.get("Index Name")
+        schema = entry.get("Schema")
+        if isinstance(index_name, str):
+            found.add((schema if isinstance(schema, str) else None, index_name))
+        children = entry.get("Plans")
+        if isinstance(children, list):
+            for child in cast(list[object], children):
+                walk(child)
+        plan_child = entry.get("Plan")
+        if isinstance(plan_child, dict):
+            walk(cast(dict[str, object], plan_child))
+        elif isinstance(plan_child, list):
+            walk(cast(list[object], plan_child))
+
+    walk(plan)
+    return found
+
+
 def _check_index(
     root: Path,
     connection: _DbConnection,
     item: Mapping[str, object],
+    migration_indexes: set[tuple[str, str]],
 ) -> list[str]:
     file_name = item.get("file")
     index_name = item.get("index")
@@ -927,16 +1297,42 @@ def _check_index(
     query_path = root / file_name
     if not query_path.is_file() or query_path.suffix != ".sql":
         return [f"index query must be a SQL file: {file_name}"]
+    identity = _resolve_index(connection, index_name)
+    if identity is None:
+        return [f"index {index_name} does not exist in the catalog"]
+    if identity not in migration_indexes:
+        return [f"index {index_name} was not created by a migration"]
     query = query_path.read_text(encoding="utf-8")
     with connection.cursor() as cursor:
         try:
             _execute(cursor, "SET enable_seqscan = off")
-            _execute(cursor, "EXPLAIN (COSTS OFF) " + query)
-            plan = "\n".join(str(row[0]) for row in cursor.fetchall())
+            _execute(cursor, "EXPLAIN (FORMAT JSON, COSTS OFF) " + query)
+            row = cursor.fetchone()
         finally:
             _execute(cursor, "SET enable_seqscan = on")
-    if index_name not in plan:
-        return [f"query plan does not use index {index_name}: {plan}"]
+    if row is None:
+        return [f"query plan is missing for index {index_name}"]
+    plan_value = row[0]
+    if isinstance(plan_value, (str, bytes)):
+        try:
+            plan: object = json.loads(plan_value)
+        except json.JSONDecodeError:
+            return [f"query plan is not JSON for index {index_name}"]
+    else:
+        plan = plan_value
+    used_names = _plan_indexes(plan)
+    used: set[tuple[str, str]] = set()
+    for plan_schema, plan_name in used_names:
+        if plan_schema is not None:
+            used.add((plan_schema, plan_name))
+            continue
+        resolved = _resolve_index(connection, plan_name)
+        if resolved is not None:
+            used.add(resolved)
+    if identity not in used:
+        return [
+            f"query plan does not use index {index_name}: {sorted(used_names)!r}"
+        ]
     return []
 
 
@@ -1088,7 +1484,14 @@ def _backup_restore(
 
 def _contribution_table(root: Path) -> str:
     completed = subprocess.run(
-        ["git", "log", "--since=12 weeks ago", "--date=short", "--pretty=format:%ad%x09%an%x09%ae", "--numstat"],
+        [
+            "git",
+            "log",
+            "--since=12 weeks ago",
+            "--date=short",
+            "--pretty=format:%ad%x09%an",
+            "--numstat",
+        ],
         cwd=root,
         capture_output=True,
         text=True,
@@ -1097,24 +1500,167 @@ def _contribution_table(root: Path) -> str:
         check=False,
     )
     if completed.returncode != 0:
-        return "Contribution table: SKIP (Git history is not available)."
-    totals: Counter[tuple[str, str]] = Counter()
+        return (
+            "Contribution by member and week (information only): "
+            "SKIP (Git history is not available)."
+        )
+    commits: Counter[tuple[str, str]] = Counter()
+    lines: Counter[tuple[str, str]] = Counter()
     current_week = ""
     current_author = ""
     for line in completed.stdout.splitlines():
         fields = line.split("\t")
-        if len(fields) == 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", fields[0]):
+        if len(fields) == 2 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", fields[0]):
             parsed = date.fromisoformat(fields[0])
             current_week = parsed.strftime("%G-W%V")
             current_author = fields[1]
-        elif len(fields) == 3 and current_week and fields[0].isdigit() and fields[1].isdigit():
-            totals[(current_week, current_author)] += int(fields[0]) + int(fields[1])
-    rows = ["Contribution by week and Git author (changed lines, not a score):"]
-    rows.extend(
-        f"{week}\t{author}\t{lines}"
-        for (week, author), lines in sorted(totals.items())
-    )
+            commits[(current_week, current_author)] += 1
+        elif (
+            len(fields) == 3
+            and current_week
+            and fields[0].isdigit()
+            and fields[1].isdigit()
+        ):
+            lines[(current_week, current_author)] += int(fields[0]) + int(fields[1])
+    rows = [
+        "Contribution by member and week (information only, not a score):",
+        "Member\tWeek\tCommits\tChanged lines",
+    ]
+    for week, author in sorted(commits):
+        rows.append(
+            f"{author}\t{week}\t{commits[(week, author)]}\t{lines[(week, author)]}"
+        )
     return "\n".join(rows)
+
+
+PYRIGHT_IGNORE = re.compile(r"#\s*pyright:\s*ignore\b")
+PYRIGHT_REPAIR = (
+    "Pyright is not installed. Install Node.js and npm from "
+    "https://docs.npmjs.com/downloading-and-installing-node-js-and-npm, "
+    "then run npm install --global pyright@1.1.414."
+)
+PYRIGHT_SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
+PYRIGHT_STUB_RULES = {"reportMissingTypeStubs", "reportMissingModuleSource"}
+
+
+def _python_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in root.rglob("*.py"):
+        if any(part in PYRIGHT_SKIP_DIRS for part in path.relative_to(root).parts):
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def _pyright_ignores(root: Path) -> list[str]:
+    found: list[str] = []
+    for path in _python_files(root):
+        text = path.read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), start=1):
+            if PYRIGHT_IGNORE.search(line):
+                found.append(f"{path.relative_to(root).as_posix()}:{number}")
+    return found
+
+
+def _check_pyright(
+    root: Path, command: Sequence[str] | None = None
+) -> tuple[list[str], dict[str, object]]:
+    ignores = _pyright_ignores(root)
+    if ignores:
+        return (
+            [
+                f'student code must not use "# pyright: ignore": {item}'
+                for item in ignores
+            ],
+            {"errors": len(ignores), "status": "fail"},
+        )
+    config_path = root / "pyrightconfig.json"
+    if not config_path.is_file():
+        return (
+            ["pyrightconfig.json is missing; strict type checking needs it"],
+            {"errors": None, "status": "fail"},
+        )
+    try:
+        loaded_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return (
+            ["pyrightconfig.json is not valid JSON"],
+            {"errors": None, "status": "fail"},
+        )
+    if not isinstance(loaded_config, dict):
+        return (
+            ['pyrightconfig.json must set "typeCheckingMode" to "strict"'],
+            {"errors": None, "status": "fail"},
+        )
+    config = cast(dict[str, object], loaded_config)
+    if config.get("typeCheckingMode") != "strict":
+        return (
+            ['pyrightconfig.json must set "typeCheckingMode" to "strict"'],
+            {"errors": None, "status": "fail"},
+        )
+    if command is None:
+        executable = shutil.which("pyright")
+        if executable is None:
+            return ([PYRIGHT_REPAIR], {"errors": None, "status": "missing"})
+        command = [executable]
+    completed = subprocess.run(
+        [*command, "--outputjson"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300.0,
+        check=False,
+    )
+    try:
+        loaded = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        detail = (completed.stderr or completed.stdout).strip()
+        return (
+            [f"Pyright did not return JSON: {detail}"],
+            {"errors": None, "status": "fail"},
+        )
+    if not isinstance(loaded, dict):
+        return (["Pyright returned an unexpected report"], {"errors": None, "status": "fail"})
+    report = cast(dict[str, object], loaded)
+    diagnostics = report.get("generalDiagnostics")
+    if not isinstance(diagnostics, list):
+        return (["Pyright returned an unexpected report"], {"errors": None, "status": "fail"})
+    problems: list[str] = []
+    for raw in cast(list[object], diagnostics):
+        if not isinstance(raw, dict):
+            continue
+        diagnostic = cast(dict[str, object], raw)
+        if diagnostic.get("rule") in PYRIGHT_STUB_RULES:
+            continue
+        if diagnostic.get("severity") != "error":
+            continue
+        file_name = diagnostic.get("file")
+        message = diagnostic.get("message")
+        line = 1
+        column = 1
+        range_value = diagnostic.get("range")
+        if isinstance(range_value, dict):
+            start = cast(dict[str, object], range_value).get("start")
+            if isinstance(start, dict):
+                start_object = cast(dict[str, object], start)
+                if isinstance(start_object.get("line"), int):
+                    line = cast(int, start_object["line"]) + 1
+                if isinstance(start_object.get("character"), int):
+                    column = cast(int, start_object["character"]) + 1
+        display = "unknown file"
+        if isinstance(file_name, str):
+            try:
+                display = Path(file_name).relative_to(root).as_posix()
+            except ValueError:
+                display = Path(file_name).name
+        problems.append(f"{display}:{line}:{column}: {message}")
+    summary: dict[str, object] = {
+        "errors": len(problems),
+        "status": "pass" if not problems else "fail",
+    }
+    return problems, summary
 
 
 def _run_invariants(
@@ -1124,6 +1670,7 @@ def _run_invariants(
     database_url: str,
     runner_dir: Path,
     stage: int,
+    migration_indexes: set[tuple[str, str]],
 ) -> list[dict[str, object]]:
     raw_invariants = manifest.get("invariants", [])
     if not isinstance(raw_invariants, list):
@@ -1136,6 +1683,7 @@ def _run_invariants(
             continue
         invariant_id = str(item.get("id", f"invariant-{index}"))
         kind = item.get("kind")
+        summary: dict[str, object] = {}
         try:
             if kind == "work_sql":
                 files = item.get("files")
@@ -1164,7 +1712,7 @@ def _run_invariants(
             elif kind == "feature":
                 problems = _check_feature(connection, item)
             elif kind == "index":
-                problems = _check_index(root, connection, item)
+                problems = _check_index(root, connection, item, migration_indexes)
             elif kind == "backup_restore":
                 problems = _backup_restore(root, connection, database_url)
             elif kind == "protected":
@@ -1174,19 +1722,28 @@ def _run_invariants(
             elif kind == "contribution":
                 print(_contribution_table(root))
                 problems = []
+            elif kind == "pyright":
+                problems, summary = _check_pyright(root)
             else:
                 problems = [f"unsupported invariant kind {kind!r}"]
         except (OSError, ValueError, psycopg.Error, subprocess.SubprocessError) as error:
             problems = [str(error)]
+        status = (
+            "info"
+            if kind == "contribution"
+            else ("pass" if not problems else "fail")
+        )
+        actual: dict[str, object] = {"differences": problems}
+        actual.update(summary)
         results.append(
             {
                 "id": invariant_id,
                 "kind": str(kind),
                 "stage": invariant_stage,
                 "group": str(item.get("group", "invariants")),
-                "status": "pass" if not problems else "fail",
+                "status": status,
                 "expected": item,
-                "actual": {"differences": problems},
+                "actual": actual,
                 "differences": problems,
             }
         )
@@ -1204,10 +1761,15 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
     counts: Counter[str] = Counter()
     stage_counts: dict[int, Counter[str]] = {}
     groups: dict[str, Counter[str]] = {}
+    skipped = 0
     for result in results:
         status = str(result.get("status"))
         if status == "skip":
             print(f"SKIP {result.get('id')}: {result.get('reason', 'platform limit')}")
+            skipped += 1
+            continue
+        if status == "info":
+            print(f"INFO {result.get('id')}")
             continue
         counts[status] += 1
         group = str(result.get("group", "checks"))
@@ -1225,10 +1787,24 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
     for group, tally in sorted(groups.items()):
         print(f"Group {group}: {tally['pass']} passed, {tally['fail']} failed")
     total = counts["pass"] + counts["fail"]
+    pyright_line = ""
+    for result in results:
+        if result.get("kind") != "pyright":
+            continue
+        actual = result.get("actual")
+        errors: object = None
+        if isinstance(actual, dict):
+            errors = cast(dict[str, object], actual).get("errors")
+        pyright_line = (
+            f"; Pyright: {errors} errors"
+            if isinstance(errors, int)
+            else "; Pyright: unavailable"
+        )
+        break
     print("== result ==")
     print(
         f"{counts['pass']}/{total} checks passed, "
-        f"{counts['fail']} failed, {sum(1 for item in results if item.get('status') == 'skip')} skipped"
+        f"{counts['fail']} failed, {skipped} skipped{pyright_line}"
     )
     for stage_number in sorted(stage_counts):
         tally = stage_counts[stage_number]
@@ -1286,6 +1862,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", nargs="?", type=int, default=1)
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--runner-dir", type=Path, default=None)
+    parser.add_argument("--case", dest="case_id", default=None)
+    parser.add_argument("--form-lint", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.self_test:
@@ -1293,18 +1872,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.stage < 1:
         parser.error("stage must be a positive integer")
     root = arguments.root.resolve()
+    runner_dir = (
+        arguments.runner_dir.resolve()
+        if arguments.runner_dir is not None
+        else Path(__file__).resolve().parent
+    )
     try:
         manifest = load_manifest(root)
     except ValueError as error:
         print("== form fault ==")
         print(str(error))
         return 2
+    if arguments.form_lint:
+        print("Form is valid.")
+        return 0
     database_url = os.environ.get("CMSC127_DATABASE_URL")
     if not database_url:
         print("CMSC127_DATABASE_URL is not set. Set it to the local PostgreSQL connection URL.")
         return 2
 
     selected = select_cases(manifest, arguments.stage)
+    if arguments.case_id is not None:
+        selected = [
+            case for case in selected if str(case.get("id")) == arguments.case_id
+        ]
+        if not selected:
+            print(
+                f"No case is listed with id {arguments.case_id} for stage "
+                f"{arguments.stage} or an earlier stage."
+            )
+            return 2
     if not selected:
         print(f"No cases are listed for stage {arguments.stage} or an earlier stage.")
         return 1
@@ -1317,6 +1914,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         connection = cast(_DbConnection, psycopg.connect(scratch_url, autocommit=True))
         try:
             _apply_migrations(root, connection)
+            migration_indexes = _catalog_indexes(connection)
             setup = _run_pair(root, ["prepare"], scratch_url)
             if setup.returncode != 0:
                 results.append(
@@ -1348,16 +1946,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "differences": [str(error)],
                         }
                     results.append(case_result)
-                results.extend(
-                    _run_invariants(
-                        root,
-                        manifest,
-                        connection,
-                        scratch_url,
-                        Path(__file__).resolve().parent,
-                        arguments.stage,
+                if arguments.case_id is None:
+                    results.extend(
+                        _run_invariants(
+                            root,
+                            manifest,
+                            connection,
+                            scratch_url,
+                            runner_dir,
+                            arguments.stage,
+                            migration_indexes,
+                        )
                     )
-                )
         finally:
             connection.close()
     except (OSError, ValueError, psycopg.Error) as error:
@@ -1367,7 +1967,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if admin is not None and database_name:
             _drop_database(database_name, admin)
     skipped = manifest.get("skips", [])
-    if isinstance(skipped, list):
+    if arguments.case_id is None and isinstance(skipped, list):
         for index, raw_skip in enumerate(cast(list[object], skipped), start=1):
             if isinstance(raw_skip, dict):
                 skip = cast(dict[str, object], raw_skip)
@@ -1393,6 +1993,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "failed": sum(item.get("status") == "fail" for item in results),
         "skipped": sum(item.get("status") == "skip" for item in results),
     }
+    for result in results:
+        if result.get("kind") != "pyright":
+            continue
+        actual = result.get("actual")
+        if isinstance(actual, dict):
+            actual_object = cast(dict[str, object], actual)
+            result_document["pyright"] = {
+                "errors": actual_object.get("errors"),
+                "status": actual_object.get("status"),
+            }
+        break
     result_path = _save_result(root, result_document)
     print(f"Result file: {result_path.relative_to(root).as_posix()}")
     return _print_results(results, arguments.stage)
