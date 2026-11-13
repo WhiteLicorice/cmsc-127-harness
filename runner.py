@@ -281,7 +281,8 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
             step = _as_object(raw_step, "step")
         except ValueError as error:
             raise fault(str(error), ("steps", index)) from error
-        if step.get("session") not in {"a", "b"}:
+        session = step.get("session")
+        if not isinstance(session, str) or session not in {"a", "b"}:
             raise fault("session must be a or b", ("steps", index, "session"))
         if not isinstance(step.get("sql"), str):
             raise fault("sql must be a string", ("steps", index, "sql"))
@@ -345,7 +346,7 @@ def _validate_invariant_fields(
         require("view", str, "view string")
         features = require("features", list, "features list")
         for feature_index, feature in enumerate(cast(list[object], features)):
-            if feature not in FEATURE_PATTERNS:
+            if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
                 raise fault(
                     f"invariant {index}: unsupported SQL feature {feature!r}",
                     (*location, "features", feature_index),
@@ -393,7 +394,7 @@ def _validate_case(
             (*location, "stage"),
         )
     kind = case.get("kind")
-    if kind not in CASE_KINDS:
+    if not isinstance(kind, str) or kind not in CASE_KINDS:
         raise fault(f"case {case_id}: unsupported kind {kind!r}", (*location, "kind"))
     relative_file = case.get("file")
     if not isinstance(relative_file, str) or not relative_file:
@@ -583,7 +584,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
                 (*location, "stage"),
             )
         kind = invariant.get("kind")
-        if kind not in INVARIANT_KINDS:
+        if not isinstance(kind, str) or kind not in INVARIANT_KINDS:
             raise fault(
                 f"invariant {index}: unsupported kind {kind!r}",
                 (*location, "kind"),
@@ -977,7 +978,11 @@ def _run_case(
                 step = _as_object(raw_step, f"case {case_id} step {index}")
                 session = step.get("session")
                 statement = step.get("sql")
-                if session not in {"a", "b"} or not isinstance(statement, str):
+                if (
+                    not isinstance(session, str)
+                    or session not in {"a", "b"}
+                    or not isinstance(statement, str)
+                ):
                     raise ValueError(f"case {case_id}: each race step needs session a or b and SQL")
                 active = connection if session == "a" else second
                 with active.cursor() as cursor:
