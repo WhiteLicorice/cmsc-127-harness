@@ -2,5 +2,9 @@
 node_modules/
 dist/
 .vitest/
+smoke-artifacts/
+smoke-project/
+smoke-project-pair/
+smoke-project-pair/
 __pycache__/
 *.py[cod]
