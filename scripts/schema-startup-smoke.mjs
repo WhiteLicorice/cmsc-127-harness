@@ -96,6 +96,14 @@ try {
 
   await page.getByRole("button", { name: "Schema", exact: true }).click();
   await page.waitForTimeout(1_500);
+  await page.waitForFunction(
+    () => {
+      const nodes = [...document.querySelectorAll(".mermaid")];
+      return nodes.length === 2 && nodes.every((node) => node.querySelector("svg") !== null);
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
   const schemaNodes = await page.locator(".mermaid").evaluateAll((nodes) =>
     nodes.map((node) => ({
       svgs: node.querySelectorAll("svg").length,
