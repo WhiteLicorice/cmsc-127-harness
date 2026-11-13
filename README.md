@@ -1,15 +1,13 @@
 # CMSC 127 Harness
 
-The harness is the course's local toolchain. It has a read-only page that shows
-a PostgreSQL database, a comparator that checks an entity-relationship diagram
-(ERD) against the live schema, a runner that checks a pair's work, and doctor
-scripts that report missing tools. Python holds the parser and the comparator.
-The page uses Python and TypeScript.
+The harness is the course's local toolchain. Start with the page. The toolchain
+also checks your entity-relationship diagram (ERD) against the live schema, runs
+your pair's checks, and reports a missing tool.
 
 ## The Harness Page
 
-The harness page shows a PostgreSQL database while you work. It is the visual
-tool for the course. Keep it open beside your terminal.
+The page shows a PostgreSQL database while you work. Keep it open beside your
+terminal.
 
 ### Start the Page
 
@@ -77,22 +75,22 @@ appear in the feed.
 
 ### Limits
 
-The Windows firewall result is unverified. The server binds to `127.0.0.1`,
-so a prompt is unlikely. No test has confirmed that a prompt is absent.
+No test has checked the Windows firewall. The server binds to `127.0.0.1`,
+so it accepts connections from this computer only.
 
-A clean offline Windows start is unverified. The replay used a network-connected
-machine. The page loads its assets from the bundle and needs no network, but no
-test has confirmed a start with the network disconnected.
+The page loads its assets from the bundle and needs no network. No test has
+started it on Windows with the network disconnected.
 
-The default browser on macOS and Linux is unverified. The page ran in Edge on
-Windows. The GitHub workflow loads the page in Chromium without a visible
-window on Ubuntu, macOS, and Windows. That check does not prove that each
-system's default browser opens and draws the page.
+The page ran in Edge on Windows. The GitHub workflow loads it in Chromium
+without a visible window on Ubuntu, macOS, and Windows. The default browser on
+macOS and Linux remains unchecked. The workflow does not prove that the default
+browser opens and draws the page.
 
 ### Build the Bundle
 
 This section is for the harness developer. A student needs no Node.js and no
-compiler.
+compiler. Python holds the parser and the comparator. The page uses Python and
+TypeScript.
 
 The release bundle holds these files:
 
@@ -119,24 +117,20 @@ the assets into `dist/bundle`.
 
 The page project uses these tool versions:
 
-| Tool | Version |
-|---|---|
-| Node.js | 24.9.x |
-| npm | 11.6.0 |
-| TypeScript | 5.9.3 |
-| Vitest | 5.1.0 |
-| Vite | 6.4.6 |
-| Pyright | 1.1.414 |
-| Playwright | 1.64.1 |
-| Python | 3.15 or newer |
-| Mermaid | 12.3.0 |
+| Tool | Version | Selection reason |
+|---|---|---|
+| Node.js | 24.9.x | Pinned in `.nvmrc` and `package.json`. |
+| npm | 11.6.0 | No separate pin. |
+| TypeScript | 5.9.3 | Passed the strict type check. |
+| Vitest | 5.1.0 | Declares an engine range that includes Node 24. |
+| Vite | 6.4.6 | Satisfies the Vite 6 peer requirement of Vitest. |
+| Pyright | 1.1.414 | Runs the strict Python check. |
+| Playwright | 1.64.1 | Runs the headless browser smoke. |
+| Python | 3.15 or newer | The repository requires Python 3.15 or newer. |
+| Mermaid | 12.3.0 | Stored with its MIT license, so the page needs no network. |
 
-Node.js is pinned to 24.9.x in `.nvmrc` and `package.json`. TypeScript 5.9.3
-passed the strict type check. Vitest 5.1.0 declares an engine range that
-includes Node 24. Vite 6.4.6 satisfies the Vite 6 peer requirement of Vitest.
-Pyright 1.1.414 runs the strict Python check. Playwright 1.64.1 runs the
-headless browser smoke. Mermaid 12.3.0 is stored with its MIT license, so the
-page needs no network.
+The page uses TypeScript under the strict compiler setting and Vitest as its
+test runner.
 
 ## Compare an ERD
 
@@ -179,23 +173,22 @@ The message includes the schema identifier and asks whether your migrations
 
 ## Check Python Types
 
-The repository requires Python 3.15 or newer. Pyright 1.1.414 installs through
+The repository requires Python 3.15 or newer. Create `.venv`. Install the
+requirements first (see Install and Test). Pyright 1.1.414 installs through
 npm. Install Node.js and npm first, from the official guide at
 <https://docs.npmjs.com/downloading-and-installing-node-js-and-npm>. Then run
 `npm install --global pyright@1.1.414` and `pyright` from the repository root.
-Create `.venv` and install the requirements first. The command checks the
-application and test files in strict mode. Pyright excludes `.venv` and Python
-bytecode caches. There is no untyped test fixture.
+The command checks the application and test files in strict mode. Pyright
+excludes `.venv` and Python bytecode caches.
 
 The Pylance extension (`ms-python.vscode-pylance`) reads `.vscode/settings.json`
 and checks the whole workspace in strict mode.
 
 ## Run Staged Checks
 
-Each pair repository has one `./check.sh` entry point. The script fetches a
-fixed runner tag on the first run. It keeps that version in the local cache.
-Later runs need no network access. The script fetches the tag by its full Git
-reference. It does not fetch a branch.
+Each pair repository has one `./check.sh` entry point. The first run fetches a
+fixed runner tag by its full Git reference and keeps it in the local cache.
+Later runs use the cache and need no network access.
 
 Set `CMSC127_DATABASE_URL` in the shell before you run the checks. Use a local
 PostgreSQL role that can create and drop databases. The runner creates a new
@@ -228,31 +221,28 @@ The runner supports six case kinds. `output` calls the pair's `./run` command.
 `state` checks rows after an operation. `race` runs SQL steps on two sessions
 in the manifest order. `query` runs a SQL file directly.
 
-The invariant list runs after the cases. `work_sql` runs report files as SQL.
-Pair Python is not in the path. It cannot filter their rows. `normal_form`
-checks every mapped table and column against the catalog, then checks that a
-primary or unique key enforces the determinant. `feature` looks for a named SQL
-feature in a view definition from the PostgreSQL catalog. It can miss a feature
-that the query text hides. It can also accept a feature that does no useful
-work. `index` reads the structured plan from `EXPLAIN`. It compares the index
-identity with the catalog. It requires that a migration created the index. The
-check disables sequential scans, so the plan does not prove the optimizer's
-ordinary choice.
-`backup_restore` calls the pair's commands and compares table rows before and
-after restore. `protected` checks published file hashes. `written` checks that
-required headings have content. It does not judge the content. `contribution`
-prints commits and changed lines by member and week. The instructor reads that
-table. It does not set a score. `pyright` runs strict Pyright and rejects a
-student `# pyright: ignore` directive. When Pyright is absent, the check fails
-with the Node.js and npm repair.
+The invariant list runs after the cases. Each invariant checks one property.
+
+| Invariant | What it checks | Limit |
+|---|---|---|
+| `work_sql` | Runs report files as SQL. Pair Python is not in the path, so it cannot filter their rows. | |
+| `normal_form` | Checks every mapped table and column against the catalog, then checks that a primary or unique key enforces the determinant, the column or columns that the other columns depend on. | |
+| `feature` | Looks for a named SQL feature in a view definition from the PostgreSQL catalog. | It can miss a feature that the query text hides. It can accept a feature that does no useful work. |
+| `index` | Reads the structured plan from `EXPLAIN`, compares the index identity with the catalog, and requires that a migration created the index. | The check disables sequential scans, so the plan does not prove the optimizer's ordinary choice. |
+| `backup_restore` | Calls the pair's commands and compares table rows before and after restore. | |
+| `protected` | Checks published file hashes. | |
+| `written` | Checks that required headings have content. | It does not judge the content. |
+| `contribution` | Prints commits and changed lines by member and week. | The instructor reads the table. It does not set a score. |
+| `pyright` | Runs strict Pyright and rejects a student `# pyright: ignore` directive. | When Pyright is absent, the check fails with the Node.js and npm repair. |
 
 Each result line identifies a case or invariant. A failed group does not hide the
 other group results. A `SKIP` line gives a reason and does not count as a pass.
 An `INFO` line carries the contribution table and does not count. The final
-count follows `== result ==` and includes the Pyright result. The runner writes
-the last result to `.cmsc127/last-run.json` for the course page. A form fault
-stops the run before it creates a database and reports the file, line, and
-column.
+count follows `== result ==` and includes the Pyright result.
+
+The runner writes the last result to `.cmsc127/last-run.json` for the course
+page. A form fault stops the run before it creates a database and reports the
+file, line, and column.
 
 Run one case with `./check.sh --case CASE_ID`. Run the form check without a
 database with `./check.sh --form-lint`. Both commands exit 0 on success, 1 on a
@@ -276,7 +266,8 @@ schemas and tables. The tests drop the schemas
 
 Install Node.js 24.9.x and npm 11.6.0 first (see Build the Bundle). The Python
 tests read `dist/bundle`. Git leaves that directory out of the repository. Run
-`npm ci` and `npm run build` before the Python tests.
+`npm ci` and `npm run build` before the Python tests. The Python tests have no
+untyped fixture.
 
 In PowerShell on Windows, run:
 
