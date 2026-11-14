@@ -36,13 +36,8 @@ case "$(uname -s 2>/dev/null)" in
     Linux*)
         os=linux
         python_prefix=(python3)
+        python_expected='Python 3.15.2'
         postgres_expected='18.6'
-        if grep -qi microsoft /proc/version 2>/dev/null; then
-            python_expected='Python 3.12.3'
-            postgres_expected='16.15'
-        else
-            python_expected='Python 3.15.2'
-        fi
         ;;
     Darwin*)
         os=macos
@@ -83,7 +78,7 @@ case "$os" in
         postgres_fix='Run export PATH="/c/Program Files/PostgreSQL/18/bin:$PATH". Open a new Git Bash.'
         ;;
     linux)
-        postgres_fix='Run export PATH="/usr/lib/postgresql/16/bin:$PATH". On Ubuntu, install PostgreSQL with sudo apt install postgresql postgresql-client.'
+        postgres_fix='Run export PATH="/usr/lib/postgresql/18/bin:$PATH". On Ubuntu, install PostgreSQL 18 from the PGDG repository. Open a new terminal.'
         ;;
     macos)
         postgres_fix='Run brew install postgresql@18. Run export PATH="$(brew --prefix postgresql@18)/bin:$PATH".'
@@ -148,6 +143,7 @@ else
     printf '%s\n' 'Skipped the driver and connection checks because Python did not run.'
 fi
 
+postgres_major="${postgres_expected%%.*}"
 for tool in psql pg_dump pg_ctl; do
     if command -v "$tool" >/dev/null 2>&1; then
         tool_version=$($tool --version 2>&1 | head -n 1)
@@ -155,8 +151,8 @@ for tool in psql pg_dump pg_ctl; do
         if [ -z "$tool_version" ] || [ "$tool_exit" -ne 0 ]; then
             bad "$tool did not report a version." \
                 "$postgres_fix"
-        elif [[ "$tool_version" == *"$postgres_expected"* ]]; then
-            ok "$tool reports PostgreSQL $postgres_expected."
+        elif [[ "$tool_version" == *" ${postgres_major}."* ]]; then
+            ok "$tool reports PostgreSQL ${postgres_major}.x."
         else
             bad "$tool reports $tool_version." \
                 "$postgres_fix"
