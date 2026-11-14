@@ -65,7 +65,6 @@ py -3.15 -m venv .venv
 python -m pip install -r requirements.txt
 npm ci
 npm run build
-npm install --global pyright@1.1.414
 $env:CMSC127_DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
 $env:PGHOST = '127.0.0.1'
 $env:PGPORT = '55435'
@@ -87,7 +86,6 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 npm ci
 npm run build
-npm install --global pyright@1.1.414
 export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
 export PGHOST=127.0.0.1
 export PGPORT=55435

@@ -45,8 +45,9 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements.txt
           npm ci
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
-        run: npm exec -- pyright
+        run: pyright
       - name: Test and build
         run: |
           npm run typecheck
@@ -117,13 +118,15 @@ jobs:
         run: |
           .\.venv\Scripts\python.exe -m pip install -r requirements.txt
           npm ci
+          "$env:GITHUB_WORKSPACE\.venv\Scripts" >> $env:GITHUB_PATH
       - name: Install Python dependencies on Unix
         if: runner.os != 'Windows'
         run: |
           .venv/bin/python -m pip install -r requirements.txt
           npm ci
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
-        run: npm exec -- pyright
+        run: pyright
       - name: Test and build
         run: |
           npm run typecheck

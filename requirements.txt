@@ -1,2 +1,4 @@
 psycopg[binary]==3.3.9
 pg8000==1.31.6
+pyright[nodejs]==1.1.414
+nodejs-wheel-binaries==24.19.0

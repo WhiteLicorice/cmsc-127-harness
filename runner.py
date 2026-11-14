@@ -1540,9 +1540,7 @@ def _contribution_table(root: Path) -> str:
 
 PYRIGHT_IGNORE = re.compile(r"#\s*pyright:\s*ignore\b")
 PYRIGHT_REPAIR = (
-    "Pyright is not installed. Install Node.js 26.13.1 with the Windows MSI, "
-    "Homebrew, or the Linux tarball, then run "
-    "npm install --global pyright@1.1.414."
+    "Pyright is not installed. Run python -m pip install -r requirements.txt."
 )
 PYRIGHT_SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules"}
 PYRIGHT_STUB_RULES = {"reportMissingTypeStubs", "reportMissingModuleSource"}

@@ -4,7 +4,7 @@
     ".github/workflows/check.yml": "71b9bd2a08cf5bfea40f46903c834ee2a4f05f7a32fdcbab19675caf35063622",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "check.sh": "65f8d0f8388942d4a92fc3589d7d12479cb1402d2e8b2856c1e2259d2dd615d0",
+    "check.sh": "6f9e80ad1f242c1de259fd2e7093b3e7c00d71e2a6402f65264055f51b17c2f1",
     "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
     "cases/manifest.json": "c7307c27d1ec6f28f2403d6dba4964edf39a262378ff8ae41977c5ecb962891c",
     "cases/lab1/health.sql": "8bc0c5f99568e014de054f91776d9d603e2a09f860139fb00ecaf1899b49de67",
@@ -12,7 +12,7 @@
     "cases/lab2/health.sql": "ecebfa97286c641d8a4483da6b6dd74d2f2c8672380755559664e7b37d35a174",
     "cases/lab2/health.expected": "06992e7c7c6f675d2a588e29b4ef520dd178f28aeb404472954619f29a60026f",
     "pyrightconfig.json": "47e3011aebef04fa67814baa636f4b71d8d24d886e1218c0aa25ee562585b97a",
-    "requirements.txt": "5df51f23988cef5dc0636220a9445f132bcb060a67b05ab06015c57cec1377e6",
+    "requirements.txt": "cdf0d5949363a490f66e7eaa2ef2fc9d4b7d8ee5e8eb296cb8afa3868ce74641",
     "run": "1775f11b2881357985c82f37e7dde68e0955f8ac309439f946fcc791f0878314"
   },
   "allowed_paths": [

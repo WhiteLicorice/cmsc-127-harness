@@ -219,13 +219,11 @@ The message includes the schema identifier and asks whether your migrations
 
 The harness requires Python 3.15 or newer. Run the Quick Start first.
 
-Pyright is a type checker for Python. Pyright 1.1.414 installs through npm,
-which installs JavaScript packages. Install Node.js 26.13.1 first over the
-vendor route for your platform: the Windows MSI, Homebrew on macOS, or the Linux
-tarball. Node.js runs JavaScript outside a browser. Then run
-`npm install --global pyright@1.1.414` and `pyright` from the folder that holds
-`pyrightconfig.json`. The command checks the application and test files in
-strict mode. Pyright excludes `.venv` and Python bytecode caches.
+Pyright is a type checker for Python. Pyright 1.1.414 installs with the Python
+packages: run `python -m pip install -r requirements.txt`. Then run `pyright`
+from the folder that holds `pyrightconfig.json`. The command checks the
+application and test files in strict mode. Pyright excludes `.venv` and Python
+bytecode caches.
 
 The Pylance extension (`ms-python.vscode-pylance`) reads `.vscode/settings.json`
 and checks the whole workspace in strict mode.
@@ -282,7 +280,7 @@ list runs after the cases. Each invariant checks one property.
 | `protected` | Checks the hashes of the files that came with the folder. | |
 | `written` | Checks that required headings have content. | It does not judge the content. |
 | `contribution` | Prints commits and changed lines by member and week. | The table is information and does not enter the count. |
-| `pyright` | Runs strict Pyright and rejects a `# pyright: ignore` directive. | When Pyright is absent, the check fails with the Node.js and npm repair. |
+| `pyright` | Runs strict Pyright and rejects a `# pyright: ignore` directive. | When Pyright is absent, the check fails with the pip repair. |
 
 Each result line identifies a case or invariant. A failed group does not hide
 the other group results. A `SKIP` line gives a reason and does not count as a

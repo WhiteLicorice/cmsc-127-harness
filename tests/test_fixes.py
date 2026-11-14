@@ -681,9 +681,8 @@ class PyrightTests(unittest.TestCase):
                 problems, summary = check_pyright(root, None)
 
             self.assertTrue(
-                any("npm install --global pyright@1.1.414" in problem for problem in problems)
+                any("python -m pip install -r requirements.txt" in problem for problem in problems)
             )
-            self.assertTrue(any("Node.js" in problem for problem in problems))
             self.assertEqual("missing", summary["status"])
 
     def test_pyright_result_reaches_the_count_line_and_json(self: PyrightTests) -> None:
