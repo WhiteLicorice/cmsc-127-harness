@@ -40,5 +40,5 @@ export function renderChangeFeed(events: ChangeFeedEvent[]): string {
   const rows = orderFeed(events)
     .map((event) => `<tr><td>${escapeHtml(new Date(event.time).toLocaleTimeString())}</td><td>${escapeHtml(event.table)}</td><td>${escapeHtml(event.kind)}</td><td><code>${escapeHtml(event.key)}</code></td></tr>`)
     .join("");
-  return `<p>Changes come from the one-second table polls. The feed keeps the last 100 observations.</p><div class="table-scroll"><table><thead><tr><th>Time</th><th>Table</th><th>Change</th><th>Key</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<p>Changes come from the one-second table polls. The feed keeps the last 100 observations.</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Time</th><th>Table</th><th>Change</th><th>Key</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }

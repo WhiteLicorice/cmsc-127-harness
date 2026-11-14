@@ -3,6 +3,8 @@
   font-family: "Segoe UI", system-ui, sans-serif;
   color: #1f2937;
   background: #f4f6f9;
+  line-height: 1.5;
+  --focus: #086aa6;
 }
 
 * {
@@ -24,6 +26,33 @@ body {
 
 .page-header div {
   flex: 1;
+  min-width: 0;
+}
+
+#schema-select {
+  min-width: 0;
+  max-width: min(100%, 24rem);
+  min-height: 44px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #ccd4dd;
+  border-radius: 0.25rem;
+  font: inherit;
+  color: #1f2937;
+  background: white;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.page-header :focus-visible {
+  outline-color: #a6d9ff;
+}
+
+::selection {
+  color: #17324d;
+  background: #c8e5fa;
 }
 
 h1 {
@@ -62,6 +91,7 @@ main {
 }
 
 .panel-tabs button {
+  min-height: 44px;
   padding: 0.65rem 0.9rem;
   border: 1px solid transparent;
   border-bottom: 0;
@@ -70,6 +100,10 @@ main {
   background: transparent;
   font: inherit;
   cursor: pointer;
+}
+
+.panel-tabs button:hover {
+  background: #edf2f7;
 }
 
 .panel-tabs button[aria-pressed="true"] {
@@ -88,8 +122,27 @@ main {
   margin: 1.2rem 0 2rem;
 }
 
-.table-card h3 {
+.table-card h2 {
   margin: 0 0 0.35rem;
+}
+
+.panel-content h2 {
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.panel-content > section + section {
+  margin-top: 2rem;
+}
+
+.schema-diagrams {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+}
+
+.schema-diagrams > section {
+  min-width: 0;
 }
 
 .table-card p,
@@ -106,6 +159,7 @@ table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
 }
 
 th,
@@ -143,6 +197,7 @@ pre {
 
 .mermaid {
   text-align: center;
+  white-space: pre;
 }
 
 .error-message {
@@ -154,7 +209,7 @@ pre {
 
 dl {
   display: grid;
-  grid-template-columns: minmax(8rem, 0.3fr) 1fr;
+  grid-template-columns: minmax(8rem, 0.3fr) minmax(0, 1fr);
   gap: 0.5rem 1rem;
 }
 
@@ -164,11 +219,39 @@ dt {
 
 dd {
   margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .schema-diagrams {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 650px) {
   .page-header {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.5rem 0.75rem;
+    padding: 1rem;
+  }
+
+  .page-header div {
+    grid-column: 1 / -1;
+    margin-bottom: 0.5rem;
+  }
+
+  #schema-select {
+    width: 100%;
+  }
+
+  dl {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+
+  dd + dt {
+    margin-top: 0.75rem;
   }
 
   main {

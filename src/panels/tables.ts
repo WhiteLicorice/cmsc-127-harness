@@ -4,6 +4,7 @@ export type Row = Record<string, unknown>;
 
 export type TableSnapshot = {
   table: string;
+  kind?: string;
   primaryKey: string[];
   columns?: string[];
   rowCap?: number;
@@ -130,7 +131,10 @@ export function renderTableSnapshot(
     .map((change) => renderRow(change.row, columns, "delete"));
   const header = columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
   const cap = current.rowCap ?? 100;
-  return `<section class="table-card"><h3>${escapeHtml(current.table)}</h3><p>Showing up to ${cap} rows. Only these rows are polled.</p><div class="table-scroll"><table><thead><tr><th>Change</th>${header}</tr></thead><tbody>${currentRows.join("")}${removedRows.join("")}</tbody></table></div></section>`;
+  const emptyNote = (current.kind === "r" || current.kind === "p") && current.rows.length === 0 && removedRows.length === 0
+    ? " This table has no committed rows in the latest poll. Check that the table name and the committed data match what you expect."
+    : "";
+  return `<section class="table-card"><h2>${escapeHtml(current.table)}</h2><p>Showing up to ${cap} rows. Only these rows are polled.${emptyNote}</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Change</th>${header}</tr></thead><tbody>${currentRows.join("")}${removedRows.join("")}</tbody></table></div></section>`;
 }
 
 export function renderTables(current: TablesResponse, previous?: TablesResponse | null): string {

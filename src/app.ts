@@ -36,10 +36,23 @@ let statusData: StatusData | null = null;
 let pollInterval = 1000;
 let pollingTables = false;
 let pollingPanel = false;
+let renderedMarkup = "";
+const requestMessages = { tables: "", panel: "" };
 
-function showMessage(message: string): void {
-  connectionMessage.textContent = message;
-  connectionMessage.hidden = message.length === 0;
+function showMessage(message: string, source: "tables" | "panel" = "panel"): void {
+  requestMessages[source] = message;
+  const visibleMessage = requestMessages.panel || requestMessages.tables;
+  connectionMessage.textContent = visibleMessage;
+  connectionMessage.hidden = visibleMessage.length === 0;
+}
+
+const SERVER_UNREACHABLE = "The harness server cannot be reached. Run ./start.sh from the project directory in Git Bash.";
+
+function describeRequestError(error: unknown): string {
+  if (error instanceof TypeError) {
+    return SERVER_UNREACHABLE;
+  }
+  return error instanceof Error ? error.message : SERVER_UNREACHABLE;
 }
 
 async function requestJson(url: string): Promise<unknown> {
@@ -87,17 +100,38 @@ function renderCurrentPanel(): void {
     showMessage("The selected panel is not available.");
     return;
   }
+  let markup: string;
   if (activePanel === "tables" && currentTables) {
-    panelContent.innerHTML = panel.render(currentTables, previousTables);
+    markup = panel.render(currentTables, previousTables);
   } else if (activePanel === "changes") {
-    panelContent.innerHTML = panel.render(feed);
+    markup = panel.render(feed);
   } else if (activePanel === "status" && statusData) {
-    panelContent.innerHTML = panel.render(statusData);
+    markup = panel.render(statusData);
   } else if (panelData !== null) {
-    panelContent.innerHTML = panel.render(panelData);
+    markup = panel.render(panelData);
   } else {
-    panelContent.innerHTML = "<p>Loading…</p>";
+    markup = "<p>Loading…</p>";
   }
+  if (markup === renderedMarkup && panelContent.dataset["panel"] === activePanel) {
+    return;
+  }
+  const samePanel = panelContent.dataset["panel"] === activePanel;
+  const scrollState = samePanel
+    ? [...panelContent.querySelectorAll<HTMLElement>(".table-scroll")].map((node) => ({
+      left: node.scrollLeft, top: node.scrollTop, focused: node === document.activeElement,
+    }))
+    : [];
+  renderedMarkup = markup;
+  panelContent.dataset["panel"] = activePanel;
+  panelContent.innerHTML = markup;
+  panelContent.querySelectorAll<HTMLElement>(".table-scroll").forEach((node, index) => {
+    const saved = scrollState[index];
+    if (saved) {
+      node.scrollLeft = saved.left;
+      node.scrollTop = saved.top;
+      if (saved.focused) node.focus({ preventScroll: true });
+    }
+  });
   void drawMermaid();
 }
 
@@ -111,6 +145,7 @@ function buildPanelButtons(): void {
     button.addEventListener("click", () => {
       activePanel = panel.id;
       panelData = null;
+      showMessage("");
       panelButtons.querySelectorAll("button").forEach((item) => {
         item.setAttribute("aria-pressed", String(item.dataset["panel"] === activePanel));
       });
@@ -141,13 +176,13 @@ async function pollTables(): Promise<void> {
       feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now)].slice(-100);
     }
     pollSummary.textContent = `Last table poll: ${now}. Interval: ${pollInterval} ms.`;
-    showMessage(response.message ?? "");
+    showMessage(response.message ?? "", "tables");
     if (activePanel === "tables" || activePanel === "changes") {
       renderCurrentPanel();
     }
   } catch (error) {
     if (requestedSchema === selectedSchema) {
-      showMessage(error instanceof Error ? error.message : "The harness server is not available.");
+      showMessage(describeRequestError(error), "tables");
     }
   } finally {
     pollingTables = false;
@@ -179,7 +214,7 @@ async function refreshActivePanel(): Promise<void> {
   } catch (error) {
     if (selectionMatches(requestedPanel, activePanel, requestedSchema, selectedSchema)) {
       panelData = null;
-      showMessage(error instanceof Error ? error.message : "The harness server is not available.");
+      showMessage(describeRequestError(error));
     }
   } finally {
     pollingPanel = false;

@@ -17,5 +17,5 @@ export function renderRoles(entries: RolePrivilege[]): string {
   const rows = entries.map((entry) =>
     `<tr><td>${escapeHtml(entry.role)}</td><td>${escapeHtml(entry.table)}</td><td>${escapeHtml(describeRolePrivileges(entry))}</td></tr>`,
   ).join("");
-  return `<div class="table-scroll"><table><thead><tr><th>Role</th><th>Table</th><th>Privileges</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-scroll" tabindex="0"><table><thead><tr><th>Role</th><th>Table</th><th>Privileges</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
