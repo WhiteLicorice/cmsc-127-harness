@@ -12,7 +12,7 @@ terminal.
 ### Start the Page
 
 Start PostgreSQL first. Install the Python packages in `requirements.txt` and
-activate the Python environment (see Install and Test).
+activate the Python environment, as the first block of your course shows.
 
 Open Git Bash. Go to your project directory. This directory holds `start.sh`,
 your `README.md`, and the `.cmsc127` folder. The Schema panel reads the ERD from
@@ -59,6 +59,42 @@ schema for the Tables, Schema, and Roles panels.
 | Roles | Each database role, which is a user or a group of users, and its privileges on each table, such as `SELECT` or `INSERT`. |
 | Status | The server, the database, the connected role, and the time of the last poll. A plain message appears when the server is down or the password is wrong. |
 
+### What the Page Looks Like
+
+![The Tables panel listing the campus club tables and their rows](docs/screenshots/tables.png)
+
+The Tables panel lists the event, member, and signup tables, with their rows,
+in the campus club domain.
+
+![The Changes panel listing an update and an insert](docs/screenshots/changes.png)
+
+The Changes panel lists an update and an insert that the last two polls
+observed.
+
+![The Schema panel with the ERD beside the live schema](docs/screenshots/schema.png)
+
+The Schema panel shows the ERD from `README.md` beside the live schema. Both
+match, then the panel lists the relationships and the columns and constraints.
+
+![The Sessions panel listing an idle session in a transaction](docs/screenshots/sessions.png)
+
+The Sessions panel lists a second connection to the database, which holds an
+open transaction.
+
+![The Checks panel listing one failed case](docs/screenshots/checks.png)
+
+The Checks panel lists five cases, and shows the expected rows and the actual
+rows for the failed case.
+
+![The Roles panel listing a role and its privileges](docs/screenshots/roles.png)
+
+The Roles panel lists the role and its privileges on each table.
+
+![The Status panel reporting the server and the last poll](docs/screenshots/status.png)
+
+The Status panel reports the server, the database, the connected role, and the
+time of the last poll.
+
 ### What the Page Reads
 
 The page is read-only. It sends `SELECT` statements and reads PostgreSQL's
@@ -86,56 +122,11 @@ without a visible window on Ubuntu, macOS, and Windows. The default browser on
 macOS and Linux remains unchecked. The workflow does not prove that the default
 browser opens and draws the page.
 
-### Build the Bundle
-
-This section is for the harness developer. A student needs no Node.js and no
-compiler. Python holds the parser and the comparator. The page uses Python and
-TypeScript.
-
-The release bundle holds these files:
-
-- `server.py`, the Python server.
-- `comparator.py`, the ERD comparator.
-- `erd_parser.py`, the ERD parser.
-- `start.sh`, the start script.
-- `public/index.html` and `public/style.css`, the page shell and its style.
-- `public/app.js`, `public/panelRegistry.js`, `public/panelRequest.js`, and
-  `public/panels/*.js`, the compiled TypeScript modules.
-- `public/vendor/mermaid.min.js` and `public/vendor/MERMAID-LICENSE.txt`, the
-  diagram script and its license.
-
-The Python server uses the packages in `requirements.txt`. Build the bundle
-with Node.js 24.9.x and npm 11.6.0:
-
-```bash
-npm ci
-npm run build
-```
-
-`npm run build` runs the strict type check, compiles the TypeScript, and copies
-the assets into `dist/bundle`.
-
-The page project uses these tool versions:
-
-| Tool | Version | Selection reason |
-|---|---|---|
-| Node.js | 24.9.x | Pinned in `.nvmrc` and `package.json`. |
-| npm | 11.6.0 | No separate pin. |
-| TypeScript | 5.9.3 | Passed the strict type check. |
-| Vitest | 5.1.0 | Declares an engine range that includes Node 24. |
-| Vite | 6.4.6 | Satisfies the Vite 6 peer requirement of Vitest. |
-| Pyright | 1.1.414 | Runs the strict Python check. |
-| Playwright | 1.64.1 | Runs the headless browser smoke. |
-| Python | 3.15 or newer | The repository requires Python 3.15 or newer. |
-| Mermaid | 12.3.0 | Stored with its MIT license, so the page needs no network. |
-
-The page uses TypeScript under the strict compiler setting and Vitest as its
-test runner.
-
 ## Compare an ERD
 
 Set `CMSC127_DATABASE_URL` to a PostgreSQL database. Install the requirements
-first (see Install and Test). Run this example from the repository root.
+first, as the first block of your course shows. Run this example from the
+repository root.
 
 Pass a Psycopg or pg8000 connection, the lines inside a Mermaid fence, and an
 optional schema:
@@ -173,9 +164,9 @@ The message includes the schema identifier and asks whether your migrations
 
 ## Check Python Types
 
-The repository requires Python 3.15 or newer. Create `.venv`. Install the
-requirements first (see Install and Test). Pyright 1.1.414 installs through
-npm. Install Node.js and npm first, from the official guide at
+The repository requires Python 3.15 or newer. Create `.venv` and install the
+requirements first, as the first block of your course shows. Pyright 1.1.414
+installs through npm. Install Node.js and npm first, from the official guide at
 <https://docs.npmjs.com/downloading-and-installing-node-js-and-npm>. Then run
 `npm install --global pyright@1.1.414` and `pyright` from the repository root.
 The command checks the application and test files in strict mode. Pyright
@@ -247,80 +238,7 @@ file, line, and column.
 Run one case with `./check.sh --case CASE_ID`. Run the form check without a
 database with `./check.sh --form-lint`. Both commands exit 0 on success, 1 on a
 failed check, and 2 on a form fault or a usage error. The form check prints no
-expected answer. Set `CMSC127_RUNNER_DIR` to a local harness checkout to test
-the runner before a release.
-
-The harness self-tests use a separate scratch database. Run them with
-`./check.sh --self-test`. The GitHub workflow runs the self-tests and the same
-staged checks from a clean checkout on Ubuntu, macOS, and Windows.
-
-## Install and Test
-
-This section is for the harness developer. A student runs the prebuilt bundle
-from `start.sh` and needs no Node.js, npm, or compiler. See Start the Page.
-
-Start PostgreSQL first. Use a disposable database and a role that can create
-schemas and tables. The tests drop the schemas
-`t04_compare`, `t04_empty`, and `t04_search_first`. They also drop the table
-`public.t04_default`.
-
-Install Node.js 24.9.x and npm 11.6.0 first (see Build the Bundle). The Python
-tests read `dist/bundle`. Git leaves that directory out of the repository. Run
-`npm ci` and `npm run build` before the Python tests. The Python tests have no
-untyped fixture.
-
-In PowerShell on Windows, run:
-
-```powershell
-py -3.15 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-npm ci
-npm run build
-npm install --global pyright@1.1.414
-$env:CMSC127_DATABASE_URL = 'postgresql://postgres:password@127.0.0.1:55435/postgres'
-$env:PGHOST = '127.0.0.1'
-$env:PGPORT = '55435'
-$env:PGUSER = 'postgres'
-$env:PGPASSWORD = 'password'
-$env:PGDATABASE = 'postgres'
-python -m unittest discover --start-directory tests --top-level-directory . --verbose
-```
-
-Replace `password` with the password for the disposable database. Use
-`postgresql://postgres@127.0.0.1:55435/postgres` when local trust allows a
-connection without a password.
-
-In WSL, Linux, or macOS, install the drivers and set the connection variables:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-npm ci
-npm run build
-npm install --global pyright@1.1.414
-export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:55435/postgres'
-export PGHOST=127.0.0.1
-export PGPORT=55435
-export PGUSER=postgres
-export PGPASSWORD=password
-export PGDATABASE=postgres
-python -m unittest discover --start-directory tests --top-level-directory . --verbose
-```
-
-A student skips `npm ci` and `npm run build`. The release bundle already holds
-`dist/bundle`, and `./start.sh` runs it.
-
-The browser checks need a disposable database. `npm run smoke:browser` creates
-a `public.smoke_student` table, loads the page in Chromium without a window,
-and drops the table when it finishes. `npm run smoke:schema` needs
-`CMSC127_PAIR_DATABASE_URL`, a database whose only schema is `pair` with a
-`student` table. The workflow creates that database before the check.
-
-The WSL route uses Python 3.12.3 and PostgreSQL 16.15. The Windows and macOS
-routes use Python 3.15.2 and PostgreSQL 18.6.
-On WSL, add `/usr/lib/postgresql/16/bin` to `PATH` before you run the doctor.
+expected answer.
 
 ## Run a Doctor
 
@@ -351,3 +269,7 @@ It returns zero only when every step passes.
 
 The doctors read `CMSC127_DATABASE_URL`. They do not print its password.
 Keep the password out of screenshots and shared logs.
+
+## For Developers
+
+The build, install, test, and release steps are in [DEVELOPERS.md](DEVELOPERS.md).
