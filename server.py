@@ -218,7 +218,7 @@ def _connect_dict(context: AppContext) -> psycopg.Connection[Any]:
             context.database_url,
             connect_timeout=2,
             application_name="cmsc127-harness",
-            options="-c default_transaction_read_only=on",
+            options="-c default_transaction_read_only=on -c statement_timeout=2000",
             row_factory=cast(Any, dict_row),
         ),
     )
@@ -231,7 +231,7 @@ def _connect_tuple(context: AppContext) -> psycopg.Connection[Any]:
         context.database_url,
         connect_timeout=2,
         application_name="cmsc127-harness",
-        options="-c default_transaction_read_only=on",
+        options="-c default_transaction_read_only=on -c statement_timeout=2000",
         row_factory=tuple_row,
     )
 
@@ -520,6 +520,25 @@ def _roles_endpoint(
     return 200, {"schema": schema, "privileges": _json_value(data)}
 
 
+def _valid_check_document(data: dict[str, object]) -> bool:
+    results = data.get("results")
+    if not isinstance(results, list):
+        return False
+    for entry in cast(list[object], results):
+        if not isinstance(entry, dict):
+            return False
+        fields = cast(dict[str, object], entry)
+        if not isinstance(fields.get("id"), str) or not isinstance(fields.get("status"), str):
+            return False
+        if "kind" in fields and not isinstance(fields["kind"], str):
+            return False
+        if fields.get("stage") is not None and type(fields["stage"]) is not int:
+            return False
+    if "message" in data and not isinstance(data["message"], str):
+        return False
+    return all(field not in data or type(data[field]) is int for field in ("passed", "failed", "skipped"))
+
+
 def _checks_endpoint(
     server: HarnessHTTPServer, _query: dict[str, list[str]]
 ) -> tuple[int, object]:
@@ -551,7 +570,7 @@ def _checks_endpoint(
             "message": "The last check result file has an unsupported format.",
         }
     result_data = cast(dict[str, object], result)
-    if not isinstance(result_data.get("results"), list):
+    if not _valid_check_document(result_data):
         return 200, {
             "results": [],
             "passed": 0,
@@ -606,6 +625,12 @@ def _database_message(error: Exception) -> str:
 
 class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        port = cast(HarnessHTTPServer, self.server).server_port
+        if self.headers.get_all("Host", []) not in (
+            [f"127.0.0.1:{port}"], [f"localhost:{port}"],
+        ):
+            self._send_json(403, {"message": "The harness could not complete this request."})
+            return
         parts = urlsplit(self.path)
         endpoint = API_ENDPOINTS.get(parts.path)
         if endpoint is not None:

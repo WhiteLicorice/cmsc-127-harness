@@ -25,5 +25,5 @@ export function renderSessions(sessions: SessionRow[]): string {
     const wait = session.blockingPids.length > 0 ? session.blockingPids.join(", ") : "not waiting";
     return `<tr><td>${session.pid}</td><td>${escapeHtml(session.role)}</td><td>${escapeHtml(session.applicationName)}</td><td>${escapeHtml(session.state ?? "unknown")}</td><td>${session.openTransaction ? "yes" : "no"}</td><td>${escapeHtml(wait)}</td></tr>`;
   }).join("");
-  return `<div class="table-scroll"><table><thead><tr><th>PID</th><th>Role</th><th>Application</th><th>State</th><th>Open transaction</th><th>Waits for</th></tr></thead><tbody>${rows}</tbody></table></div><p>PostgreSQL limits which sessions a role can see.</p>`;
+  return `<div class="table-scroll" tabindex="0"><table><thead><tr><th>PID</th><th>Role</th><th>Application</th><th>State</th><th>Open transaction</th><th>Waits for</th></tr></thead><tbody>${rows}</tbody></table></div><p>PostgreSQL limits which sessions a role can see.</p>`;
 }
