@@ -1,10 +1,10 @@
 {
   "files": {
-    ".gitattributes": "ee1d32a246dc6c63e4ddacc3200e3d11ac394993f3d47b5266ff807f35edf087",
+    ".gitattributes": "6cba89925fd49122ba2dd48b3ec309676bea77482d9f52925c8e1939d23ee5d6",
     ".github/workflows/check.yml": "71b9bd2a08cf5bfea40f46903c834ee2a4f05f7a32fdcbab19675caf35063622",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "check.sh": "ccd92ad5cd3b1c08affb9a74265c72fba243d737697fa7144e0a5e4e2110f360",
+    "check.sh": "65f8d0f8388942d4a92fc3589d7d12479cb1402d2e8b2856c1e2259d2dd615d0",
     "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
     "cases/manifest.json": "c7307c27d1ec6f28f2403d6dba4964edf39a262378ff8ae41977c5ecb962891c",
     "cases/lab1/health.sql": "8bc0c5f99568e014de054f91776d9d603e2a09f860139fb00ecaf1899b49de67",
