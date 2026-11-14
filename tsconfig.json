@@ -5,7 +5,7 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "rootDir": "src",
-    "outDir": "dist/bundle/public",
+    "outDir": "public",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,

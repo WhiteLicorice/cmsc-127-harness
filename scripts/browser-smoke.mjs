@@ -8,7 +8,7 @@ const expectedPanels = ["Tables", "Changes", "Schema", "Sessions", "Checks", "Ro
 const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python");
 const projectRoot = resolve("smoke-project");
 const artifactRoot = resolve("smoke-artifacts");
-const serverScript = resolve("dist/bundle/server.py");
+const serverScript = resolve("server.py");
 
 if (!process.env["CMSC127_DATABASE_URL"]) {
   console.error("Set CMSC127_DATABASE_URL to a disposable database before the browser smoke.");

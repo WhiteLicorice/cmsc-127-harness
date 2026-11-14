@@ -28,7 +28,7 @@ from psycopg import sql
 
 DATABASE_URL = os.environ.get("CMSC127_DATABASE_URL")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-BUNDLE_ROOT = REPOSITORY_ROOT / "dist" / "bundle"
+ASSET_ROOT = REPOSITORY_ROOT / "public"
 
 
 @contextmanager
@@ -83,7 +83,7 @@ def test_schema() -> Generator[str, None, None]:
 def running_server(project_root: Path, database_url: str | None) -> Generator[str, None, None]:
     server_module = importlib.import_module("server")
     server = server_module.create_server(
-        project_root, BUNDLE_ROOT / "public", database_url, 0
+        project_root, ASSET_ROOT, database_url, 0
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -149,7 +149,7 @@ class HarnessPageTests(unittest.TestCase):
 
     def test_server_binds_only_to_loopback(self) -> None:
         server_module = self.load_server()
-        server = server_module.create_server(REPOSITORY_ROOT, BUNDLE_ROOT / "public", None, 0)
+        server = server_module.create_server(REPOSITORY_ROOT, ASSET_ROOT, None, 0)
         try:
             self.assertEqual("127.0.0.1", server.server_address[0])
         finally:
@@ -159,7 +159,7 @@ class HarnessPageTests(unittest.TestCase):
         server_module = self.load_server()
         with patch("socket.getfqdn", side_effect=AssertionError("reverse DNS lookup ran")):
             server = server_module.create_server(
-                REPOSITORY_ROOT, BUNDLE_ROOT / "public", None, 0
+                REPOSITORY_ROOT, ASSET_ROOT, None, 0
             )
         try:
             self.assertEqual("127.0.0.1", server.server_address[0])
@@ -247,9 +247,9 @@ class HarnessPageTests(unittest.TestCase):
             self.assertIn("/vendor/mermaid.min.js", page)
             self.assertNotIn("https://", page)
 
-    def test_release_bundle_contains_compiled_page_modules(self) -> None:
-        self.assertTrue((BUNDLE_ROOT / "public" / "app.js").is_file())
-        self.assertTrue((BUNDLE_ROOT / "public" / "panelRequest.js").is_file())
+    def test_page_assets_contain_compiled_modules(self) -> None:
+        self.assertTrue((ASSET_ROOT / "app.js").is_file())
+        self.assertTrue((ASSET_ROOT / "panelRequest.js").is_file())
 
     def test_status_returns_a_plain_message_when_database_is_stopped(self) -> None:
         self.load_server()
@@ -524,7 +524,7 @@ class HarnessPageTests(unittest.TestCase):
             with psycopg.connect(database_url) as cleanup:
                 cleanup.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
-    def test_release_bundle_runs_without_node_on_path(self) -> None:
+    def test_release_runs_without_node_on_path(self) -> None:
         self.load_server()
         if DATABASE_URL is None:
             raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
@@ -537,7 +537,7 @@ class HarnessPageTests(unittest.TestCase):
             entry for entry in environment.get("PATH", "").split(os.pathsep) if "node" not in entry.lower()
         )
         process = subprocess.Popen(
-            [sys.executable, str(BUNDLE_ROOT / "server.py"), "--no-browser"],
+            [sys.executable, str(REPOSITORY_ROOT / "server.py"), "--no-browser"],
             cwd=REPOSITORY_ROOT,
             env=environment,
             stdout=subprocess.PIPE,

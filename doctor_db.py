@@ -1,4 +1,4 @@
-"""Check an explicit PostgreSQL URL with each installed course driver."""
+"""Check an explicit PostgreSQL URL with each installed PostgreSQL driver."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
 
     if not installed:
         failures.append(
-            "FAIL  No course driver is installed. "
+            "FAIL  No PostgreSQL driver is installed. "
             "Install psycopg[binary] 3.3.9 or pg8000 1.31.6."
         )
     return installed, failures
@@ -114,7 +114,7 @@ def main() -> int:
     if not url:
         print(
             "FAIL  CMSC127_DATABASE_URL is not set. "
-            "Set it to the PostgreSQL database for this course."
+            "Set it to a PostgreSQL database that the installed driver can read."
         )
         return 1
 

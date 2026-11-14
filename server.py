@@ -722,12 +722,12 @@ def main() -> int:
     if preferred < 55440 or preferred > 55449 or preferred == 55445:
         preferred = 55440
 
-    bundle_root = Path(__file__).resolve().parent
+    asset_root = Path(__file__).resolve().parent
     project_root = Path.cwd().resolve()
     try:
         server = create_server(
             project_root,
-            bundle_root / "public",
+            asset_root / "public",
             os.environ.get("CMSC127_DATABASE_URL"),
             preferred,
         )
@@ -736,7 +736,7 @@ def main() -> int:
         try:
             server = create_server(
                 project_root,
-                bundle_root / "public",
+                asset_root / "public",
                 os.environ.get("CMSC127_DATABASE_URL"),
                 0,
             )

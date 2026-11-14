@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "npm run typecheck && tsc && node scripts/build.mjs",
+    "build": "npm run typecheck && tsc",
     "smoke:browser": "node scripts/browser-smoke.mjs",
     "smoke:schema": "node scripts/schema-startup-smoke.mjs"
   },

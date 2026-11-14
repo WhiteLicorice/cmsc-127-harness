@@ -79,8 +79,8 @@ if ($pythonOk) {
     }
     $driversOk = $LASTEXITCODE -eq 0
     $driverOutput | ForEach-Object { Write-Host $_ }
-    Report-Result $driversOk 'A pinned course database driver is installed.' `
-        'No pinned course database driver passed.' `
+    Report-Result $driversOk 'The pinned PostgreSQL driver is installed.' `
+        'No pinned PostgreSQL driver passed.' `
         'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from the harness folder.'
 } else {
     Write-Host 'Skipped the driver and connection checks because Python did not run.'
@@ -151,9 +151,9 @@ if ($pythonOk) {
     }
     $databaseOk = $LASTEXITCODE -eq 0
     $databaseOutput | ForEach-Object { Write-Host $_ }
-    Report-Result $databaseOk 'A course driver connects to the configured database.' `
-        'A course driver did not connect to the configured database.' `
-        'Set CMSC127_DATABASE_URL to the PostgreSQL database for this course. Check its password. Check the host and port. Check the server state.'
+    Report-Result $databaseOk 'The PostgreSQL driver connects to the configured database.' `
+        'The PostgreSQL driver did not connect to the configured database.' `
+        'Set CMSC127_DATABASE_URL to a PostgreSQL database that the installed driver can read. Check its password. Check the host and port. Check the server state.'
 }
 
 Write-Host "$script:passed of $script:total steps complete."

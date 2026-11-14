@@ -134,9 +134,9 @@ if [ "$python_ok" = true ]; then
         drivers_ok=true
     fi
     if [ "$drivers_ok" = true ]; then
-        ok 'A pinned course database driver is installed.'
+        ok 'The pinned PostgreSQL driver is installed.'
     else
-        bad 'No pinned course database driver passed.' \
+        bad 'No pinned PostgreSQL driver passed.' \
             'Run python -m pip install -r requirements.txt from the harness folder.'
     fi
 else
@@ -184,10 +184,10 @@ if [ "$python_ok" = true ]; then
         database_ok=true
     fi
     if [ "$database_ok" = true ]; then
-        ok 'A course driver connects to the configured database.'
+        ok 'The PostgreSQL driver connects to the configured database.'
     else
-        bad 'A course driver did not connect to the configured database.' \
-            'Set CMSC127_DATABASE_URL to the PostgreSQL database for this course. Check its password. Check the host and port. Check the server state.'
+        bad 'The PostgreSQL driver did not connect to the configured database.' \
+            'Set CMSC127_DATABASE_URL to a PostgreSQL database that the installed driver can read. Check its password. Check the host and port. Check the server state.'
     fi
 fi
 

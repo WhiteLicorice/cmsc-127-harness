@@ -15,7 +15,7 @@ if (!pairDatabaseUrl) {
 const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python");
 const projectRoot = resolve("smoke-project-pair");
 const artifactRoot = resolve("smoke-artifacts");
-const serverScript = resolve("dist/bundle/server.py");
+const serverScript = resolve("server.py");
 
 await mkdir(projectRoot, { recursive: true });
 await mkdir(artifactRoot, { recursive: true });
