@@ -21,7 +21,7 @@ The release bundle holds these files:
   diagram script and its license.
 
 The Python server uses the packages in `requirements.txt`. Build the bundle
-with Node.js 24.9.x and npm 11.6.0:
+with Node.js 26.13.1 and npm 11.20.0:
 
 ```bash
 npm ci
@@ -35,8 +35,8 @@ The page project uses these tool versions:
 
 | Tool | Version | Selection reason |
 |---|---|---|
-| Node.js | 24.9.x | Pinned in `.nvmrc` and `package.json`. |
-| npm | 11.6.0 | No separate pin. |
+| Node.js | 26.13.1 | Pinned in `.nvmrc` and `package.json`. |
+| npm | 11.20.0 | No separate pin. |
 | TypeScript | 5.9.3 | Passed the strict type check. |
 | Vitest | 5.1.0 | Declares an engine range that includes Node 24. |
 | Vite | 6.4.6 | Satisfies the Vite 6 peer requirement of Vitest. |
@@ -55,7 +55,7 @@ schemas and tables. The tests drop the schemas
 `t04_compare`, `t04_empty`, and `t04_search_first`. They also drop the table
 `public.t04_default`.
 
-Install Node.js 24.9.x and npm 11.6.0 first (see Build the Bundle). The Python
+Install Node.js 26.13.1 and npm 11.20.0 first (see Build the Bundle). The Python
 tests read `dist/bundle`. Git leaves that directory out of the repository. Run
 `npm ci` and `npm run build` before the Python tests. The Python tests have no
 untyped fixture.
