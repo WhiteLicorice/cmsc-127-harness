@@ -84,7 +84,9 @@ class _DbCursor(Protocol):
 class _DbConnection(Protocol):
     def cursor(self: _DbConnection) -> _DbCursor: ...
 
-    def transaction(self: _DbConnection) -> Any: ...
+    def transaction(
+        self: _DbConnection, *, force_rollback: bool = False
+    ) -> Any: ...
 
     def close(self: _DbConnection) -> None: ...
 
@@ -255,6 +257,191 @@ def _validate_expected(path: Path, expected: Mapping[str, object], kind: str) ->
             raise fault("sqlstate must be a string", ("sqlstate",))
         return
     _validate_dataset(expected, fault, ())
+
+
+_REJECT_LITERAL_WORDS = frozenset({"NULL", "TRUE", "FALSE"})
+
+# Longest type name a typed literal may carry: TIMESTAMP WITH TIME ZONE.
+_REJECT_TYPE_WORDS = 4
+
+
+def _reject_tokens(sql: str) -> list[tuple[str, str]] | None:
+    """Split a reject file into tokens, or None when it holds a body.
+
+    Comments are dropped. A quoted string becomes a ``string`` token and a
+    quoted identifier becomes an ``ident`` token. A dollar-quoted body, a
+    non-ASCII character, or an unterminated quote returns None.
+    """
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    length = len(sql)
+    while index < length:
+        character = sql[index]
+        if character.isspace():
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            end = sql.find("\n", index)
+            index = length if end < 0 else end + 1
+            continue
+        if sql.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if sql.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif sql.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                return None
+            continue
+        if character in "'\"":
+            quote = character
+            start = index
+            escaped = quote == "'" and index > 0 and sql[index - 1] in "Ee"
+            index += 1
+            while index < length:
+                if escaped and sql[index] == "\\":
+                    index += 2
+                elif sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2
+                    else:
+                        index += 1
+                        break
+                else:
+                    index += 1
+            else:
+                return None
+            kind = "string" if quote == "'" else "ident"
+            tokens.append((kind, sql[start:index]))
+            continue
+        if character == "$":
+            return None
+        if character.isdigit() or (
+            character == "." and index + 1 < length and sql[index + 1].isdigit()
+        ):
+            number = re.match(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", sql[index:])
+            if number is None:
+                return None
+            tokens.append(("number", number.group()))
+            index += len(number.group())
+            continue
+        word = re.match(r"[A-Za-z_][A-Za-z_0-9$]*", sql[index:])
+        if word is not None:
+            tokens.append(("word", word.group()))
+            index += len(word.group())
+            continue
+        if character in "(),;.-+":
+            tokens.append(("punct", character))
+            index += 1
+            continue
+        return None
+    return tokens
+
+
+def _reject_insert_target(sql: str) -> str | None:
+    """The target table when the file is one plain INSERT ... VALUES row.
+
+    The accepted shape is ``INSERT INTO <table> [(<columns>)] VALUES (<row>)``
+    with one row of literal values: numbers, quoted strings, ``NULL``,
+    ``TRUE``, ``FALSE``, and a typed literal such as ``DATE '2024-08-01'``.
+    A ``WITH``, a ``SELECT``, a function call, a subquery, or a second row
+    returns None, so the case fails its form check.
+    """
+    tokens = _reject_tokens(sql)
+    if tokens is None:
+        return None
+    position = 0
+
+    def take(kind: str, value: str | None = None) -> tuple[str, str] | None:
+        nonlocal position
+        if position >= len(tokens):
+            return None
+        token = tokens[position]
+        if token[0] != kind:
+            return None
+        if value is not None and token[1].upper() != value:
+            return None
+        position += 1
+        return token
+
+    def identifier() -> str | None:
+        token = take("word")
+        if token is None:
+            token = take("ident")
+        return None if token is None else token[1]
+
+    def literal() -> bool:
+        nonlocal position
+        start = position
+        if position < len(tokens) and tokens[position][0] == "punct":
+            if tokens[position][1] in ("+", "-"):
+                if position + 1 < len(tokens) and tokens[position + 1][0] == "number":
+                    position += 2
+                    return True
+                return False
+        if position < len(tokens) and tokens[position][0] in ("number", "string"):
+            position += 1
+            return True
+        if position < len(tokens) and tokens[position][0] == "word":
+            if tokens[position][1].upper() in _REJECT_LITERAL_WORDS:
+                position += 1
+                return True
+            words = 0
+            while (
+                position < len(tokens)
+                and tokens[position][0] == "word"
+                and words < _REJECT_TYPE_WORDS
+            ):
+                position += 1
+                words += 1
+            if position < len(tokens) and tokens[position][0] == "string":
+                position += 1
+                return True
+        position = start
+        return False
+
+    if take("word", "INSERT") is None or take("word", "INTO") is None:
+        return None
+    table = identifier()
+    if table is None:
+        return None
+    if take("punct", ".") is not None:
+        qualifier = identifier()
+        if qualifier is None:
+            return None
+        table = f"{table}.{qualifier}"
+    if take("punct", "(") is not None:
+        if identifier() is None:
+            return None
+        while take("punct", ",") is not None:
+            if identifier() is None:
+                return None
+        if take("punct", ")") is None:
+            return None
+    if take("word", "VALUES") is None:
+        return None
+    if take("punct", "(") is None or not literal():
+        return None
+    while take("punct", ",") is not None:
+        if not literal():
+            return None
+    if take("punct", ")") is None:
+        return None
+    if take("punct", ";") is not None and position != len(tokens):
+        return None
+    if position != len(tokens):
+        return None
+    return table
+
+
+def _is_single_insert_statement(sql: str) -> bool:
+    return _reject_insert_target(sql) is not None
 
 
 def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
@@ -435,6 +622,18 @@ def _validate_case(
         raise fault(
             f"case {case_id}: {kind} needs a supported case-file type",
             (*location, "file"),
+        )
+    if kind == "reject" and not _is_single_insert_statement(
+        case_path.read_text(encoding="utf-8")
+    ):
+        raise FormFault(
+            case_path,
+            1,
+            1,
+            "a reject case must be one plain `INSERT ... VALUES` row of "
+            "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
+            "second row",
+            root=root,
         )
     listed.add(case_path)
     expected_path = case_path.with_suffix(".expected")
@@ -907,14 +1106,227 @@ def _run_sql_file(
         return _dataset_from_cursor(cursor)
 
 
-def _sql_error(connection: _DbConnection, statement: str) -> str | None:
+def _sql_error(
+    connection: _DbConnection, statement: str
+) -> tuple[str, str | None, str | None, str | None, str | None] | None:
     try:
         with connection.transaction():
             with connection.cursor() as cursor:
                 _execute(cursor, statement)
     except psycopg.Error as error:
-        return error.sqlstate or error.__class__.__name__
+        return (
+            error.sqlstate or error.__class__.__name__,
+            error.diag.constraint_name,
+            error.diag.table_name,
+            error.diag.column_name,
+            error.diag.source_function,
+        )
     return None
+
+
+def _relation_tree(
+    connection: _DbConnection, target: str
+) -> list[tuple[str, str]]:
+    """The target's partition and inheritance tree, in both directions.
+
+    ``pg_inherits`` links a child to its parent. The walk climbs to every
+    ancestor and descends to every descendant, so a trigger or a constraint on
+    a partition or on an inherited child belongs to the insert's tree. The list
+    is empty when the target does not resolve.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            WITH RECURSIVE roots AS (
+                SELECT to_regclass(%s) AS relation_oid
+            ), ancestors AS (
+                SELECT relation_oid
+                FROM roots
+                WHERE relation_oid IS NOT NULL
+                UNION
+                SELECT link.inhparent
+                FROM pg_inherits AS link
+                JOIN ancestors ON link.inhrelid = ancestors.relation_oid
+            ), tree AS (
+                SELECT relation_oid FROM ancestors
+                UNION
+                SELECT link.inhrelid
+                FROM pg_inherits AS link
+                JOIN tree ON link.inhparent = tree.relation_oid
+            )
+            SELECT namespace_entry.nspname, class_entry.relname
+            FROM tree
+            JOIN pg_class AS class_entry ON class_entry.oid = tree.relation_oid
+            JOIN pg_namespace AS namespace_entry
+              ON namespace_entry.oid = class_entry.relnamespace
+            ORDER BY 1, 2
+            """,
+            (target,),
+        )
+        return [(str(row[0]), str(row[1])) for row in cursor.fetchall()]
+
+
+def _relation_in_tree(tree: Sequence[tuple[str, str]], table_name: str) -> bool:
+    """True when the error's table is any table in the insert's tree."""
+    wanted = table_name.strip('"').lower()
+    return any(relname.strip('"').lower() == wanted for _, relname in tree)
+
+
+def _tree_rule(
+    connection: _DbConnection, tree: Sequence[tuple[str, str]]
+) -> str | None:
+    """The first rewrite rule on the tree that is not a view's ``_RETURN``."""
+    if not tree:
+        return None
+    conditions = " OR ".join(
+        "(namespace_entry.nspname = %s AND class_entry.relname = %s)" for _ in tree
+    )
+    parameters = [value for pair in tree for value in pair]
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT class_entry.relname, rule_entry.rulename
+            FROM pg_rewrite AS rule_entry
+            JOIN pg_class AS class_entry ON class_entry.oid = rule_entry.ev_class
+            JOIN pg_namespace AS namespace_entry
+              ON namespace_entry.oid = class_entry.relnamespace
+            WHERE ({conditions})
+              AND rule_entry.rulename <> '_RETURN'
+            ORDER BY 1, 2
+            LIMIT 1
+            """,
+            parameters,
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return f"{row[0]}.{row[1]}"
+
+
+def _refused_without_user_triggers(
+    connection: _DbConnection,
+    statement: str,
+    target: str,
+    sqlstate: str,
+    constraint_name: str | None,
+    column_name: str | None,
+) -> bool:
+    """True when the same constraint refuses the insert with user triggers off.
+
+    The insert runs again in a transaction that is always rolled back, after
+    ``ALTER TABLE ... DISABLE TRIGGER USER`` on every table in the target's
+    partition and inheritance tree. ``SET CONSTRAINTS ALL IMMEDIATE`` makes a
+    deferrable constraint fire at the insert. Internal foreign-key triggers
+    stay on, so a foreign-key case still fires. A replay that succeeds, or that
+    fails on a different constraint, returns False.
+    """
+    tree = _relation_tree(connection, target)
+    try:
+        with connection.transaction(force_rollback=True):
+            with connection.cursor() as cursor:
+                for schema, relname in tree:
+                    cursor.execute(
+                        f"ALTER TABLE {_quote_identifier(schema)}."
+                        f"{_quote_identifier(relname)} DISABLE TRIGGER USER"
+                    )
+                cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                _execute(cursor, statement)
+    except psycopg.Error as error:
+        return (
+            (error.sqlstate or error.__class__.__name__) == sqlstate
+            and error.diag.constraint_name == constraint_name
+            and error.diag.column_name == column_name
+        )
+    return False
+
+
+_RAISE_SOURCE_FUNCTIONS = frozenset({"exec_stmt_raise", "exec_stmt_assert"})
+
+
+def _constraint_refused(
+    connection: _DbConnection,
+    sqlstate: str,
+    constraint_name: str | None,
+    table_name: str | None,
+    column_name: str | None,
+    source_function: str | None,
+) -> bool:
+    """True when PostgreSQL raised the error from a constraint, not a RAISE.
+
+    PostgreSQL fills ``diag.source_function`` from its own C source, so the
+    check does not depend on the translated error text. The PL/pgSQL ``RAISE``
+    handler is ``exec_stmt_raise`` and the ``ASSERT`` handler is
+    ``exec_stmt_assert``; an error from either fails, whatever constraint it
+    names and whatever ``lc_messages`` says. A constraint that fires inside a
+    trigger's own SQL statement reports the constraint's own function, so Rule
+    11's helper-table insert passes. The named constraint may be a table
+    constraint, a unique index, or a domain constraint. A ``NOT NULL``
+    violation (SQLSTATE 23502) carries no constraint name, so it passes when
+    the named column is a ``NOT NULL`` column of the named table.
+    """
+    if source_function in _RAISE_SOURCE_FUNCTIONS:
+        return False
+    if constraint_name is None:
+        if sqlstate != "23502" or column_name is None or table_name is None:
+            return False
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM pg_attribute AS attribute
+                JOIN pg_class AS class_entry
+                  ON class_entry.oid = attribute.attrelid
+                JOIN pg_namespace AS namespace_entry
+                  ON namespace_entry.oid = class_entry.relnamespace
+                WHERE class_entry.relname = %s
+                  AND namespace_entry.nspname = current_schema()
+                  AND attribute.attname = %s
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                  AND attribute.attnotnull
+                """,
+                (table_name, column_name),
+            )
+            return cursor.fetchone() is not None
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM pg_constraint AS constraint_entry
+            JOIN pg_namespace AS namespace_entry
+              ON namespace_entry.oid = constraint_entry.connamespace
+            WHERE constraint_entry.conname = %s
+              AND namespace_entry.nspname = current_schema()
+              AND (
+                    (constraint_entry.conrelid = 0
+                     AND constraint_entry.contypid <> 0)
+                 OR constraint_entry.conrelid = (
+                        SELECT class_entry.oid
+                        FROM pg_class AS class_entry
+                        JOIN pg_namespace AS class_namespace
+                          ON class_namespace.oid = class_entry.relnamespace
+                        WHERE class_entry.relname = %s
+                          AND class_namespace.nspname = current_schema()
+                    )
+              )
+            UNION ALL
+            SELECT 1
+            FROM pg_index AS index_entry
+            JOIN pg_class AS index_class ON index_class.oid = index_entry.indexrelid
+            JOIN pg_class AS table_class ON table_class.oid = index_entry.indrelid
+            JOIN pg_namespace AS namespace_entry
+              ON namespace_entry.oid = table_class.relnamespace
+            WHERE index_class.relname = %s
+              AND table_class.relname = %s
+              AND namespace_entry.nspname = current_schema()
+              AND index_entry.indisunique
+              AND index_entry.indisvalid
+              AND index_entry.indpred IS NULL
+              AND index_entry.indexprs IS NULL
+            """,
+            (constraint_name, table_name, constraint_name, table_name),
+        )
+        return cursor.fetchone() is not None
 
 
 def _run_case(
@@ -940,18 +1352,58 @@ def _run_case(
         actual = _run_sql_file(connection, case_path)
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "reject":
-        error_code = _sql_error(connection, case_path.read_text(encoding="utf-8"))
+        statement = case_path.read_text(encoding="utf-8")
+        target = _reject_insert_target(statement)
+        error = _sql_error(connection, statement)
         expected_code = expected.get("sqlstate")
-        if error_code is None:
+        if error is None:
             actual = {"sqlstate": None}
             problems = ["statement succeeded, but the case requires rejection"]
         else:
+            error_code, constraint_name, table_name, column_name, source_function = error
             actual = {"sqlstate": error_code}
-            problems = (
-                []
-                if expected_code is None or expected_code == error_code
-                else [f"SQLSTATE differs: expected {expected_code!r}, actual {error_code!r}"]
-            )
+            problems = []
+            if expected_code is not None and expected_code != error_code:
+                problems.append(
+                    f"SQLSTATE differs: expected {expected_code!r}, actual {error_code!r}"
+                )
+            if not _constraint_refused(
+                connection,
+                error_code,
+                constraint_name,
+                table_name,
+                column_name,
+                source_function,
+            ):
+                problems.append(
+                    "the error does not come from a named constraint; a RAISE, "
+                    "or an error with no constraint, does not test the schema"
+                )
+            elif target is not None:
+                tree = _relation_tree(connection, target)
+                rule = _tree_rule(connection, tree)
+                if rule is not None:
+                    problems.append(
+                        f"the insert target {target} carries the rewrite rule "
+                        f"{rule}; rewrite rules are outside this course, so the "
+                        "case cannot show that a constraint refuses the row"
+                    )
+                elif (
+                    table_name is not None
+                    and _relation_in_tree(tree, table_name)
+                    and not _refused_without_user_triggers(
+                        connection,
+                        statement,
+                        target,
+                        error_code,
+                        constraint_name,
+                        column_name,
+                    )
+                ):
+                    problems.append(
+                        "the constraint refuses the row only after a user trigger "
+                        "runs; it must refuse the same insert with user triggers off"
+                    )
     elif kind == "state":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         operation = body.get("operation")

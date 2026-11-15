@@ -177,6 +177,100 @@ class ManifestTests(unittest.TestCase):
             '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
         )
 
+    def test_reject_case_requires_one_actual_insert(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            manifest_path = root / "cases" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["cases"].append(
+                {
+                    "id": "lab1/reject",
+                    "stage": 1,
+                    "kind": "reject",
+                    "file": "cases/lab1/reject.sql",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reject_path = root / "cases" / "lab1" / "reject.sql"
+            reject_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"23505"}\n', encoding="utf-8"
+            )
+
+            for sql in (
+                "DO $$ BEGIN RAISE EXCEPTION 'fake' USING ERRCODE = '23505'; END $$;\n",
+                "INSERT INTO item VALUES (1, 'x'); DO $$ BEGIN RAISE EXCEPTION 'fake' USING ERRCODE = '23505'; END $$;\n",
+            ):
+                reject_path.write_text(sql, encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, r"cases/lab1/reject\.sql.*one plain"
+                ):
+                    load_manifest(root)
+
+            reject_path.write_text(
+                "-- A real constraint must reject this row.\n"
+                "INSERT INTO item (id, label) VALUES (1, 'x');\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                "lab1/reject", select_cases(load_manifest(root), 1)[-1].get("id")
+            )
+            reject_path.write_text(
+                "INSERT INTO item (id, label) VALUES (1, 'x;y');\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                "lab1/reject", select_cases(load_manifest(root), 1)[-1].get("id")
+            )
+
+    def test_reject_case_requires_one_plain_row(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            manifest_path = root / "cases" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["cases"].append(
+                {
+                    "id": "lab1/reject",
+                    "stage": 1,
+                    "kind": "reject",
+                    "file": "cases/lab1/reject.sql",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reject_path = root / "cases" / "lab1" / "reject.sql"
+            reject_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"23505"}\n', encoding="utf-8"
+            )
+
+            for sql in (
+                "WITH x AS (INSERT INTO item VALUES (1, 'x') RETURNING 1)\n"
+                "SELECT * FROM x;\n",
+                "INSERT INTO item (id) SELECT 1;\n",
+                "INSERT INTO item (id) VALUES (1), (2);\n",
+                "INSERT INTO item (id) VALUES (nextval('item_seq'));\n",
+                "INSERT INTO item (id) VALUES ((SELECT 1));\n",
+                "INSERT INTO item (id) VALUES (1);\n"
+                "INSERT INTO item (id) VALUES (2);\n",
+            ):
+                reject_path.write_text(sql, encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, r"cases/lab1/reject\.sql.*one plain"
+                ):
+                    load_manifest(root)
+
+            for sql in (
+                "-- A real constraint must reject this row.\n"
+                "INSERT INTO item (id, label) VALUES (1, 'x');\n",
+                "INSERT INTO item (id, label) VALUES (1, 'x;y');\n",
+                "INSERT INTO item (id, label, at) VALUES (1, 'x', DATE '2024-08-01');\n",
+                "INSERT INTO item (id, label) VALUES (-5, NULL);\n",
+                "INSERT INTO item VALUES (1, 'x');\n",
+            ):
+                reject_path.write_text(sql, encoding="utf-8")
+                self.assertEqual(
+                    "lab1/reject", select_cases(load_manifest(root), 1)[-1].get("id")
+                )
+
     def test_manifest_rejects_unlisted_case_files(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -420,7 +514,8 @@ class RunnerIntegrationTests(unittest.TestCase):
                 '{"columns":["difference"],"rows":[]}\n', encoding="utf-8"
             )
             (root / "cases" / "lab2" / "reject.sql").write_text(
-                "INSERT INTO item VALUES (1, 'duplicate');\n", encoding="utf-8"
+                "INSERT INTO item (id, label) VALUES (1, 'duplicate');\n",
+                encoding="utf-8",
             )
             (root / "cases" / "lab2" / "reject.expected").write_text(
                 '{"sqlstate":"23505"}\n', encoding="utf-8"
@@ -541,6 +636,474 @@ class RunnerIntegrationTests(unittest.TestCase):
                 {str(row["id"]) for row in case_entries if row["id"] != "lab1/query"},
                 failed_ids,
             )
+
+    def test_reject_case_requires_a_real_constraint(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        def make_root(root: Path, migration: str, load: str) -> None:
+            (root / "cases" / "lab1").mkdir(parents=True)
+            (root / "migrations").mkdir()
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/reject",
+                                "stage": 1,
+                                "kind": "reject",
+                                "file": "cases/lab1/reject.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "reject.sql").write_text(
+                "INSERT INTO item (id, label) VALUES (1, 'duplicate');\n",
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "reject.expected").write_text(
+                '{"sqlstate":"23505"}\n', encoding="utf-8"
+            )
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                migration, encoding="utf-8"
+            )
+            (root / "load.sql").write_text(load, encoding="utf-8")
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$1\" = prepare ]; then\n"
+                "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            real_root = Path(directory) / "real"
+            make_root(
+                real_root,
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                "INSERT INTO item VALUES (1, 'alpha');\n",
+            )
+            real_output = StringIO()
+            with redirect_stdout(real_output):
+                real_exit = main(["1", "--root", str(real_root)])
+            self.assertEqual(0, real_exit, real_output.getvalue())
+
+            fake_root = Path(directory) / "fake"
+            make_root(
+                fake_root,
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+                "CREATE FUNCTION refuse_item() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    RAISE EXCEPTION 'duplicate' USING ERRCODE = '23505';\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER refuse_item BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION refuse_item();\n",
+                "SELECT 1;\n",
+            )
+            fake_output = StringIO()
+            with redirect_stdout(fake_output):
+                fake_exit = main(["1", "--root", str(fake_root)])
+            self.assertEqual(1, fake_exit, fake_output.getvalue())
+            fake_result = json.loads(
+                (fake_root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
+            )
+            fake_rows = cast(list[dict[str, object]], fake_result["results"])
+            self.assertEqual("fail", fake_rows[0]["status"])
+
+    def _run_reject_root(
+        self: RunnerIntegrationTests,
+        root: Path,
+        migration: str,
+        load: str,
+        insert: str,
+        sqlstate: str = "23505",
+    ) -> tuple[int, list[dict[str, object]]]:
+        (root / "cases" / "lab1").mkdir(parents=True)
+        (root / "migrations").mkdir()
+        (root / "cases" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "cases": [
+                        {
+                            "id": "lab1/reject",
+                            "stage": 1,
+                            "kind": "reject",
+                            "file": "cases/lab1/reject.sql",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "cases" / "lab1" / "reject.sql").write_text(insert, encoding="utf-8")
+        (root / "cases" / "lab1" / "reject.expected").write_text(
+            json.dumps({"sqlstate": sqlstate}) + "\n", encoding="utf-8"
+        )
+        (root / "migrations" / "0001_create_item.sql").write_text(
+            migration, encoding="utf-8"
+        )
+        (root / "load.sql").write_text(load, encoding="utf-8")
+        (root / "run").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -eu\n"
+            "if [ \"$1\" = prepare ]; then\n"
+            "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["1", "--root", str(root)])
+        result = json.loads(
+            (root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
+        )
+        rows = cast(list[dict[str, object]], result["results"])
+        return exit_code, rows
+
+    def test_reject_case_rejects_a_trigger_that_names_a_real_constraint(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+            "CREATE FUNCTION fake_unique() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+            "BEGIN\n"
+            "    RAISE EXCEPTION USING\n"
+            "        ERRCODE = '23505',\n"
+            "        MESSAGE = 'duplicate key value violates unique constraint \"item_pkey\"',\n"
+            "        CONSTRAINT = 'item_pkey',\n"
+            "        TABLE = 'item',\n"
+            "        SCHEMA = 'public';\n"
+            "END;\n"
+            "$$;\n"
+            "CREATE TRIGGER item_fake BEFORE INSERT ON item\n"
+            "FOR EACH ROW EXECUTE FUNCTION fake_unique();\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, label) VALUES (2, 'valid');\n",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+
+    def test_reject_case_accepts_a_unique_index(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer NOT NULL, label text);\n"
+            "CREATE UNIQUE INDEX item_id_key ON item (id);\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "INSERT INTO item (id, label) VALUES (1, 'alpha');\n",
+                "INSERT INTO item (id, label) VALUES (1, 'duplicate');\n",
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", rows[0]["status"])
+
+    def test_reject_case_accepts_a_domain_constraint(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE DOMAIN positive_int AS integer CHECK (VALUE > 0);\n"
+            "CREATE TABLE item (id integer PRIMARY KEY, n positive_int);\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, n) VALUES (1, -5);\n",
+                "23514",
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", rows[0]["status"])
+
+    def test_reject_case_accepts_a_constraint_inside_a_trigger(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE helper (a integer, b integer, PRIMARY KEY (a, b));\n"
+            "CREATE TABLE item (id integer PRIMARY KEY, a integer, b integer);\n"
+            "CREATE FUNCTION sync_helper() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+            "BEGIN\n"
+            "    INSERT INTO helper (a, b) VALUES (NEW.a, NEW.b);\n"
+            "    RETURN NEW;\n"
+            "END;\n"
+            "$$;\n"
+            "CREATE TRIGGER item_sync BEFORE INSERT ON item\n"
+            "FOR EACH ROW EXECUTE FUNCTION sync_helper();\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "INSERT INTO item (id, a, b) VALUES (1, 1, 1);\n",
+                "INSERT INTO item (id, a, b) VALUES (2, 1, 1);\n",
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", rows[0]["status"])
+
+    def test_reject_case_rejects_a_trigger_that_changes_the_row(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        scenarios = (
+            (
+                "check",
+                "CREATE TABLE item (id integer PRIMARY KEY, n integer CHECK (n > 0));\n"
+                "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN NEW.n := -1; END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER item_corrupt BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION corrupt();\n",
+                "INSERT INTO item (id, n) VALUES (2, 5);\n",
+                "23514",
+            ),
+            (
+                "primary_key",
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+                "INSERT INTO item (id, label) VALUES (1, 'a');\n"
+                "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN NEW.id := 1; END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER item_corrupt BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION corrupt();\n",
+                "INSERT INTO item (id, label) VALUES (2, 'b');\n",
+                "23505",
+            ),
+            (
+                "unique",
+                "CREATE TABLE item (id integer PRIMARY KEY, code text UNIQUE);\n"
+                "INSERT INTO item (id, code) VALUES (1, 'a');\n"
+                "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN NEW.code := 'a'; END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER item_corrupt BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION corrupt();\n",
+                "INSERT INTO item (id, code) VALUES (2, 'b');\n",
+                "23505",
+            ),
+            (
+                "foreign_key",
+                "CREATE TABLE parent (id integer PRIMARY KEY);\n"
+                "INSERT INTO parent (id) VALUES (1);\n"
+                "CREATE TABLE child (id integer PRIMARY KEY, "
+                "parent_id integer REFERENCES parent (id));\n"
+                "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN NEW.parent_id := 99; END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER child_corrupt BEFORE INSERT ON child\n"
+                "FOR EACH ROW EXECUTE FUNCTION corrupt();\n",
+                "INSERT INTO child (id, parent_id) VALUES (2, 1);\n",
+                "23503",
+            ),
+            (
+                "not_null",
+                "CREATE TABLE item (id integer PRIMARY KEY, label text NOT NULL);\n"
+                "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN NEW.label := NULL; END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER item_corrupt BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION corrupt();\n",
+                "INSERT INTO item (id, label) VALUES (2, 'valid');\n",
+                "23502",
+            ),
+            (
+                "trigger_inserts_target",
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+                "INSERT INTO item (id, label) VALUES (1, 'a');\n"
+                "CREATE FUNCTION trip() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "BEGIN\n"
+                "    IF NEW.id = 2 THEN\n"
+                "        INSERT INTO item (id, label) VALUES (1, 'dup');\n"
+                "    END IF;\n"
+                "    RETURN NEW;\n"
+                "END;\n"
+                "$$;\n"
+                "CREATE TRIGGER item_trip BEFORE INSERT ON item\n"
+                "FOR EACH ROW EXECUTE FUNCTION trip();\n",
+                "INSERT INTO item (id, label) VALUES (2, 'valid');\n",
+                "23505",
+            ),
+        )
+        for name, migration, insert, sqlstate in scenarios:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                exit_code, rows = self._run_reject_root(
+                    Path(directory), migration, "SELECT 1;\n", insert, sqlstate
+                )
+                self.assertEqual(1, exit_code)
+                self.assertEqual("fail", rows[0]["status"])
+
+    def test_reject_case_rejects_a_raise_under_a_non_english_locale(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "SET lc_messages = 'French_France.1252';\n"
+            "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+            "CREATE FUNCTION fake_unique() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+            "BEGIN\n"
+            "    RAISE EXCEPTION USING\n"
+            "        ERRCODE = '23505',\n"
+            "        MESSAGE = 'duplicate key value violates unique constraint \"item_pkey\"',\n"
+            "        CONSTRAINT = 'item_pkey',\n"
+            "        TABLE = 'item',\n"
+            "        SCHEMA = 'public';\n"
+            "END;\n"
+            "$$;\n"
+            "CREATE TRIGGER item_fake BEFORE INSERT ON item\n"
+            "FOR EACH ROW EXECUTE FUNCTION fake_unique();\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, label) VALUES (2, 'valid');\n",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+
+    def test_reject_case_rejects_an_assert(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+            "CREATE FUNCTION assert_unique() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+            "BEGIN\n"
+            "    ASSERT FALSE, 'duplicate';\n"
+            "    RETURN NEW;\n"
+            "END;\n"
+            "$$;\n"
+            "CREATE TRIGGER item_assert BEFORE INSERT ON item\n"
+            "FOR EACH ROW EXECUTE FUNCTION assert_unique();\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, label) VALUES (2, 'valid');\n",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+
+    def test_reject_case_accepts_a_not_null_column(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, label text NOT NULL);\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, label) VALUES (1, NULL);\n",
+                "23502",
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", rows[0]["status"])
+
+    def test_reject_case_rejects_a_rewrite_rule_on_the_target(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, n integer CHECK (n > 0));\n"
+            "INSERT INTO item VALUES (1, 5);\n"
+            "CREATE RULE item_force AS ON INSERT TO item DO ALSO "
+            "UPDATE item SET n = -1 WHERE id = NEW.id;\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, n) VALUES (2, 5);\n",
+                "23514",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+        differences = cast(list[str], rows[0]["differences"])
+        self.assertTrue(
+            any("item_force" in difference for difference in differences),
+            differences,
+        )
+
+    def test_reject_case_rejects_a_trigger_on_a_partition(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, n integer CHECK (n > 0)) "
+            "PARTITION BY RANGE (id);\n"
+            "CREATE TABLE item_p1 PARTITION OF item FOR VALUES FROM (0) TO (100);\n"
+            "INSERT INTO item VALUES (1, 5);\n"
+            "CREATE FUNCTION corrupt() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+            "BEGIN\n"
+            "    IF NEW.id = 2 THEN NEW.n := -1; END IF;\n"
+            "    RETURN NEW;\n"
+            "END;\n"
+            "$$;\n"
+            "CREATE TRIGGER item_corrupt BEFORE INSERT ON item_p1 "
+            "FOR EACH ROW EXECUTE FUNCTION corrupt();\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, n) VALUES (2, 5);\n",
+                "23514",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+
+    def test_reject_case_accepts_a_deferred_unique_constraint(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, code text, "
+            "CONSTRAINT item_code_key UNIQUE (code) "
+            "DEFERRABLE INITIALLY DEFERRED);\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "INSERT INTO item VALUES (1, 'a');\n",
+                "INSERT INTO item (id, code) VALUES (2, 'a');\n",
+            )
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", rows[0]["status"])
 
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
