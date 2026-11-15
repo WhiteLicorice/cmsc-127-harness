@@ -70,6 +70,14 @@ check_written = cast(
     Callable[[Path, Mapping[str, object]], list[str]],
     getattr(runner, "_check_written"),
 )
+design_rows = cast(
+    Callable[[Path, Mapping[str, object], Sequence[str]], list[str]],
+    getattr(runner, "_design_rows"),
+)
+split_warnings = cast(
+    Callable[[Mapping[str, object]], tuple[dict[str, object], list[str]]],
+    getattr(runner, "_split_warnings"),
+)
 run_invariants = cast(
     Callable[
         [Path, Mapping[str, object], object, str, Path, int, set[tuple[str, str]]],
@@ -143,6 +151,84 @@ class ResultOutputTests(unittest.TestCase):
         self.assertIn("1/2 checks passed, 1 failed, 1 skipped", output.getvalue())
         self.assertIn("Stage 1: 1/1 passed", output.getvalue())
         self.assertIn("Stage 2: 0/1 passed", output.getvalue())
+
+    def test_a_warning_row_passes_and_counts_apart(
+        self: ResultOutputTests,
+    ) -> None:
+        results: list[dict[str, object]] = [
+            {
+                "id": "lab1/near-copy",
+                "status": "pass",
+                "stage": 1,
+                "group": "Lab 1",
+                "differences": [],
+                "warnings": [
+                    "warning: section.assistant_id agrees on 639 of 640 rows."
+                ],
+            }
+        ]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = print_results(results, 1)
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("PASS lab1/near-copy", output.getvalue())
+        self.assertIn(
+            "warning: section.assistant_id agrees on 639 of 640 rows.",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "1/1 checks passed, 0 failed, 0 skipped, 1 warning",
+            output.getvalue(),
+        )
+
+    def test_a_warning_beside_a_failure_still_fails(
+        self: ResultOutputTests,
+    ) -> None:
+        results: list[dict[str, object]] = [
+            {
+                "id": "lab1/bad",
+                "status": "fail",
+                "stage": 1,
+                "group": "Lab 1",
+                "expected": {"columns": ["row"], "rows": []},
+                "actual": {"columns": ["row"], "rows": [["boom"]]},
+                "differences": ["unexpected row: ['boom']"],
+                "warnings": ["warning: student.home_program agrees on 9 of 10 rows."],
+            }
+        ]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = print_results(results, 1)
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("FAIL lab1/bad", output.getvalue())
+        self.assertIn(
+            "0/1 checks passed, 1 failed, 0 skipped, 1 warning",
+            output.getvalue(),
+        )
+
+    def test_warning_rows_are_split_from_the_result(
+        self: ResultOutputTests,
+    ) -> None:
+        dataset, warnings = split_warnings(
+            {
+                "columns": ["row"],
+                "rows": [
+                    ["warning: section.assistant_id agrees on 639 of 640 rows."],
+                    ["section.room_id differs."],
+                ],
+            }
+        )
+
+        self.assertEqual(
+            {"columns": ["row"], "rows": [["section.room_id differs."]]}, dataset
+        )
+        self.assertEqual(
+            ["warning: section.assistant_id agrees on 639 of 640 rows."], warnings
+        )
 
 
 class ManifestTests(unittest.TestCase):
@@ -343,6 +429,202 @@ class ManifestTests(unittest.TestCase):
                 load_manifest(root)
 
 
+class DesignRecordTests(unittest.TestCase):
+    CONFIG: dict[str, object] = {
+        "file": "DESIGN.md",
+        "headings": ["Tables", "Keys and Links", "Checker Warnings"],
+        "placeholders": {
+            "Tables": "Write one bullet per table.",
+            "Keys and Links": "Describe how the tables connect.",
+            "Checker Warnings": "Write one entry for each warning.",
+        },
+    }
+
+    def write(self: DesignRecordTests, root: Path, text: str) -> None:
+        (root / "DESIGN.md").write_text(text, encoding="utf-8")
+
+    def test_a_complete_record_passes(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student holds a name.\n\n"
+                "## Keys and Links\n\n- charge links to student.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            self.assertEqual([], design_rows(root, self.CONFIG, []))
+
+    def test_a_missing_file_is_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rows = design_rows(Path(directory), self.CONFIG, [])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn("DESIGN.md is missing", rows[0])
+
+    def test_a_missing_heading_is_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, [])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn('missing the heading "## Keys and Links"', rows[0])
+
+    def test_out_of_order_headings_are_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Keys and Links\n\n- charge.\n\n"
+                "## Tables\n\n- student.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, [])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn("out of order", rows[0])
+
+    def test_an_empty_section_is_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, [])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn('nothing under "## Tables"', rows[0])
+
+    def test_a_placeholder_line_is_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- Write one bullet per table.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, [])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn('placeholder line under "## Tables"', rows[0])
+
+    def test_an_unexplained_warning_is_named(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, ["section.assistant_id"])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn('"### section.assistant_id"', rows[0])
+
+    def test_an_explained_warning_passes(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "### section.assistant_id\n\n"
+                "It is a separate fact: the assistant is a second instructor.\n",
+            )
+
+            self.assertEqual(
+                [], design_rows(root, self.CONFIG, ["section.assistant_id"])
+            )
+
+    def test_a_trailing_annotation_on_the_entry_heading_passes(
+        self: DesignRecordTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "### section.assistant_id (copy)\n\n"
+                "It is a copy.\n",
+            )
+
+            self.assertEqual(
+                [], design_rows(root, self.CONFIG, ["section.assistant_id"])
+            )
+
+    def test_bold_marks_around_the_entry_heading_pass(
+        self: DesignRecordTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "### **section.assistant_id**\n\n"
+                "It is a copy.\n",
+            )
+
+            self.assertEqual(
+                [], design_rows(root, self.CONFIG, ["section.assistant_id"])
+            )
+
+    def test_backticks_around_the_entry_heading_pass(
+        self: DesignRecordTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "### `section.assistant_id`\n\n"
+                "It is a copy.\n",
+            )
+
+            self.assertEqual(
+                [], design_rows(root, self.CONFIG, ["section.assistant_id"])
+            )
+
+    def test_a_level_four_entry_heading_names_the_level(
+        self: DesignRecordTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "#### section.assistant_id\n\n"
+                "It is a copy.\n",
+            )
+
+            rows = design_rows(root, self.CONFIG, ["section.assistant_id"])
+
+            self.assertEqual(1, len(rows))
+            self.assertIn("heading level 4", rows[0])
+
+
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class RunnerIntegrationTests(unittest.TestCase):
     def test_each_run_uses_a_scratch_database_and_repeats_the_result(
@@ -436,6 +718,70 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
             defect_rows = cast(list[dict[str, object]], defect_result["results"])
             self.assertEqual("fail", defect_rows[1]["status"])
+
+    def test_a_query_case_warning_passes_and_is_recorded(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases" / "lab1").mkdir(parents=True)
+            (root / "migrations").mkdir()
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/warn",
+                                "stage": 1,
+                                "kind": "query",
+                                "file": "cases/lab1/warn.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "warn.sql").write_text(
+                "SELECT 'warning: item.label agrees on 2 of 2 rows.' AS row;\n",
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "warn.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1, 'alpha'), (2, 'alpha');\n",
+                encoding="utf-8",
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$1\" = prepare ]; then\n"
+                "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+
+            self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("PASS lab1/warn", output.getvalue())
+            self.assertIn("warning: item.label agrees on 2 of 2 rows.", output.getvalue())
+            self.assertIn("1 warning", output.getvalue())
+            result = json.loads(
+                (root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, result["warnings"])
+            self.assertEqual("pass", result["results"][0]["status"])
 
     def test_all_case_kinds_pass_and_each_defect_fails(
         self: RunnerIntegrationTests,

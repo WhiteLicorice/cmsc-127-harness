@@ -262,10 +262,15 @@ uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
 unless the manifest sets `ordered` to `false`. The runner compares duplicate
 rows. A failed comparison prints the expected rows and the actual rows.
 
-The runner supports six case kinds. `output` calls the pair's `./run` command.
+The runner supports seven case kinds. `output` calls the pair's `./run` command.
 `schema` compares ERD text with PostgreSQL. `reject` checks that SQL fails.
 `state` checks rows after an operation. `race` runs SQL steps on two sessions
-in the manifest order. `query` runs a SQL file directly.
+in the manifest order. `query` runs a SQL file directly. `document` checks the
+structure of a Markdown file and the entries for each warning row.
+
+A row whose first cell starts with `warning:` is a warning, not a failure. The
+runner prints it under its case and counts it on the count line, so a case with
+only warnings passes.
 
 An invariant is a rule that must hold for every correct database. The invariant
 list runs after the cases. Each invariant checks one property.

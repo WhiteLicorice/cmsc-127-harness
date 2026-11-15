@@ -7,6 +7,7 @@ export type CheckResult = {
   status: string;
   expected?: unknown;
   actual?: unknown;
+  warnings?: string[];
 };
 
 export type RunnerResult = {
@@ -14,6 +15,7 @@ export type RunnerResult = {
   passed?: number;
   failed?: number;
   skipped?: number;
+  warnings?: number;
   stage?: number;
   message?: string;
 };
@@ -28,6 +30,7 @@ export type CheckView = {
   status: string;
   expected?: unknown;
   actual?: unknown;
+  warnings: string[];
 };
 
 export function describeChecks(result: RunnerResult): CheckView[] {
@@ -39,6 +42,7 @@ export function describeChecks(result: RunnerResult): CheckView[] {
     ...(entry.status === "fail"
       ? { expected: entry.expected ?? null, actual: entry.actual ?? null }
       : {}),
+    warnings: entry.warnings ?? [],
   }));
 }
 
@@ -52,9 +56,14 @@ export function renderChecks(result: RunnerResult): string {
   }
   const rows = entries.map((entry) => {
     const expected = entry.status === "fail" ? codeBlock(entry.expected) : "";
-    const actual = entry.status === "fail" ? codeBlock(entry.actual) : "";
+    const actual =
+      entry.status === "fail"
+        ? codeBlock(entry.actual)
+        : entry.warnings.length > 0
+          ? `<pre>${escapeHtml(entry.warnings.join("\n"))}</pre>`
+          : "";
     return `<tr><td>${escapeHtml(entry.id)}</td><td>${escapeHtml(entry.kind)}</td><td>${entry.stage ?? ""}</td><td>${escapeHtml(entry.status)}</td><td>${expected}</td><td>${actual}</td></tr>`;
   }).join("");
-  const summary = `${result.passed ?? 0} passed, ${result.failed ?? 0} failed, ${result.skipped ?? 0} skipped`;
+  const summary = `${result.passed ?? 0} passed, ${result.failed ?? 0} failed, ${result.skipped ?? 0} skipped, ${result.warnings ?? 0} warnings`;
   return `<p>${escapeHtml(summary)}</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Case</th><th>Kind</th><th>Stage</th><th>Result</th><th>Expected</th><th>Actual</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }

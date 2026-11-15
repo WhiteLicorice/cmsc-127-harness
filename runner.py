@@ -28,7 +28,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from comparator import compare_erd
 
 
-CASE_KINDS = {"output", "schema", "reject", "state", "race", "query"}
+CASE_KINDS = {"output", "schema", "reject", "state", "race", "query", "document"}
+WARNING_LABEL = "warning:"
 INVARIANT_KINDS = {
     "work_sql",
     "normal_form",
@@ -460,6 +461,24 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
         if not isinstance(body.get("check_sql"), str):
             raise fault("check_sql must be a string", ("check_sql",))
         return
+    if kind == "document":
+        if not isinstance(body.get("file"), str):
+            raise fault("file must be a string", ("file",))
+        headings = body.get("headings")
+        if not isinstance(headings, list) or not all(
+            isinstance(heading, str) for heading in cast(list[object], headings)
+        ):
+            raise fault("headings must be a list of strings", ("headings",))
+        placeholders = body.get("placeholders")
+        if not isinstance(placeholders, dict) or not all(
+            isinstance(value, str)
+            for value in cast(dict[object, object], placeholders).values()
+        ):
+            raise fault("placeholders must be an object of strings", ("placeholders",))
+        warning_sql = body.get("warning_sql")
+        if warning_sql is not None and not isinstance(warning_sql, str):
+            raise fault("warning_sql must be a string", ("warning_sql",))
+        return
     steps = body.get("steps")
     if not isinstance(steps, list):
         raise fault("steps must be a list", ("steps",))
@@ -617,6 +636,7 @@ def _validate_case(
         "state": {".json"},
         "race": {".json"},
         "query": {".sql"},
+        "document": {".json"},
     }
     if case_path.suffix not in allowed_suffixes[str(kind)]:
         raise fault(
@@ -652,7 +672,7 @@ def _validate_case(
             raise FormFault(exit_path, 1, 1, "must contain one integer", root=root) from error
         if expected_exit < 0:
             raise FormFault(exit_path, 1, 1, "must be zero or greater", root=root)
-    if kind in {"state", "race"}:
+    if kind in {"state", "race", "document"}:
         _validate_case_body(case_path, str(kind), case_id)
     return case
 
@@ -1329,6 +1349,159 @@ def _constraint_refused(
         return cursor.fetchone() is not None
 
 
+def _split_warnings(
+    dataset: Mapping[str, object],
+) -> tuple[dict[str, object], list[str]]:
+    """Split warning-labelled rows out of a case result.
+
+    A row is a warning when its first cell is a string that starts with
+    ``warning:``. The runner prints those rows and counts them apart from
+    failures, so a case that prints only warnings passes.
+    """
+    rows_value = dataset.get("rows")
+    if not isinstance(rows_value, list):
+        return dict(dataset), []
+    rows = cast(list[object], rows_value)
+    kept: list[object] = []
+    warnings: list[str] = []
+    for row in rows:
+        cells = cast(list[object], row) if isinstance(row, list) else None
+        first = cells[0] if cells else None
+        if isinstance(first, str) and first.lower().startswith(WARNING_LABEL):
+            warnings.append(first)
+        else:
+            kept.append(cast(object, row))
+    return {**dataset, "rows": kept}, warnings
+
+
+def _warning_columns(rows: Sequence[str]) -> list[str]:
+    """The ``table.column`` named at the start of each warning row."""
+    columns: list[str] = []
+    for row in rows:
+        if not row.lower().startswith(WARNING_LABEL):
+            continue
+        rest = row[len(WARNING_LABEL) :].strip()
+        column = rest.split()[0].rstrip(".,;:") if rest else ""
+        if column and column not in columns:
+            columns.append(column)
+    return columns
+
+
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+_HEADING_MARKS = "*_`"
+
+
+def _heading_first_word(title: str) -> str:
+    """The first word of a heading, without Markdown emphasis marks."""
+    words = title.split()
+    if not words:
+        return ""
+    return words[0].strip(_HEADING_MARKS)
+
+
+def _document_sections(text: str) -> list[tuple[int, str, str]]:
+    """The level, title, and body of every Markdown heading."""
+    lines = text.splitlines()
+    headings: list[tuple[int, int, str]] = []
+    for number, line in enumerate(lines):
+        match = _HEADING.match(line)
+        if match is not None:
+            headings.append((number, len(match.group(1)), match.group(2)))
+    sections: list[tuple[int, str, str]] = []
+    for index, (number, level, title) in enumerate(headings):
+        end = len(lines)
+        for later_number, later_level, _ in headings[index + 1 :]:
+            if later_level <= level:
+                end = later_number
+                break
+        sections.append((level, title, "\n".join(lines[number + 1 : end])))
+    return sections
+
+
+def _normalized_line(line: str) -> str:
+    stripped = line.strip().lstrip("-*+ ").strip()
+    return re.sub(r"\s+", " ", stripped).lower()
+
+
+def _design_rows(
+    root: Path,
+    config: Mapping[str, object],
+    warning_columns: Sequence[str],
+) -> list[str]:
+    """The structural faults in a student's design record."""
+    file_name = config.get("file")
+    headings = config.get("headings")
+    placeholders = config.get("placeholders")
+    if (
+        not isinstance(file_name, str)
+        or not isinstance(headings, list)
+        or not isinstance(placeholders, dict)
+    ):
+        return ["the design case needs file, headings, and placeholders"]
+    path = root / file_name
+    if not path.is_file():
+        return [f"{file_name} is missing, so the design record cannot be checked."]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return [f"{file_name} is not UTF-8 text, so the design record cannot be read."]
+    placeholder_text = cast(dict[str, object], placeholders)
+    level_two = [
+        (title, body) for level, title, body in _document_sections(text) if level == 2
+    ]
+    titles = [title for title, _ in level_two]
+    bodies = dict(level_two)
+    expected_titles = [str(heading) for heading in cast(list[object], headings)]
+    rows: list[str] = []
+    for title in expected_titles:
+        if title not in titles:
+            rows.append(f'{file_name} is missing the heading "## {title}".')
+    present = [title for title in titles if title in expected_titles]
+    if present != [title for title in expected_titles if title in present]:
+        rows.append(
+            f"{file_name} puts the headings out of order: it reads "
+            + ", ".join(f'"{title}"' for title in present)
+            + "."
+        )
+    for title in expected_titles:
+        body = bodies.get(title)
+        if body is None:
+            continue
+        if not body.strip():
+            rows.append(f'{file_name} has nothing under "## {title}".')
+            continue
+        placeholder = placeholder_text.get(title)
+        if isinstance(placeholder, str):
+            wanted = _normalized_line(placeholder)
+            if wanted and any(
+                _normalized_line(line) == wanted for line in body.splitlines()
+            ):
+                rows.append(
+                    f'{file_name} still holds the placeholder line under "## {title}".'
+                )
+    warning_body = bodies.get("Checker Warnings", "")
+    entries: list[tuple[int, str]] = []
+    for line in warning_body.splitlines():
+        heading = _HEADING.match(line)
+        if heading is not None:
+            entries.append(
+                (len(heading.group(1)), _heading_first_word(heading.group(2)))
+            )
+    for column in warning_columns:
+        levels = [level for level, word in entries if word == column]
+        if not levels:
+            rows.append(
+                f'{file_name} has no "### {column}" entry under "## Checker Warnings", '
+                "so the checker warning is not explained."
+            )
+        elif 3 not in levels:
+            rows.append(
+                f'{file_name} puts the "{column}" entry at heading level {levels[0]}, '
+                f'but a Checker Warnings entry is a level-3 heading ("### {column}").'
+            )
+    return rows
+
+
 def _run_case(
     root: Path,
     case: Mapping[str, object],
@@ -1340,6 +1513,7 @@ def _run_case(
     expected = _read_expected(case_path)
     kind = str(case["kind"])
     ordered = case.get("ordered", True) is not False
+    warnings: list[str] = []
     if kind == "schema":
         erd_text = _extract_erd(case_path.read_text(encoding="utf-8"))
         differences = compare_erd(connection, erd_text)
@@ -1350,6 +1524,23 @@ def _run_case(
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "query":
         actual = _run_sql_file(connection, case_path)
+        actual, warnings = _split_warnings(actual)
+        problems = compare_dataset(expected, actual, ordered=ordered)
+    elif kind == "document":
+        body = _as_object(_read_json(case_path), f"case {case_id}")
+        warning_columns: list[str] = []
+        warning_sql = body.get("warning_sql")
+        if isinstance(warning_sql, str):
+            warning_rows = _run_sql_file(connection, root / warning_sql).get("rows")
+            if isinstance(warning_rows, list):
+                texts: list[str] = []
+                for row in cast(list[object], warning_rows):
+                    cells = cast(list[object], row) if isinstance(row, list) else []
+                    if cells:
+                        texts.append(str(cells[0]))
+                warning_columns = _warning_columns(texts)
+        rows = _design_rows(root, body, warning_columns)
+        actual = {"columns": ["row"], "rows": [[row] for row in rows]}
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "reject":
         statement = case_path.read_text(encoding="utf-8")
@@ -1415,6 +1606,7 @@ def _run_case(
         with connection.cursor() as cursor:
             _execute(cursor, check_sql)
             actual = _dataset_from_cursor(cursor)
+        actual, warnings = _split_warnings(actual)
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "race":
         body = _as_object(_read_json(case_path), f"case {case_id}")
@@ -1504,6 +1696,7 @@ def _run_case(
         "expected": expected,
         "actual": actual,
         "differences": problems,
+        "warnings": warnings,
     }
 
 
@@ -2217,6 +2410,7 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
     stage_counts: dict[int, Counter[str]] = {}
     groups: dict[str, Counter[str]] = {}
     skipped = 0
+    warnings = 0
     for result in results:
         status = str(result.get("status"))
         if status == "skip":
@@ -2239,6 +2433,9 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
                 print(f"  {difference}")
             print(f"  expected: {_json_text(result.get('expected'))}")
             print(f"  actual:   {_json_text(result.get('actual'))}")
+        for warning in cast(list[object], result.get("warnings", [])):
+            print(f"  {warning}")
+            warnings += 1
     for group, tally in sorted(groups.items()):
         print(f"Group {group}: {tally['pass']} passed, {tally['fail']} failed")
     total = counts["pass"] + counts["fail"]
@@ -2256,10 +2453,12 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
             else "; Pyright: unavailable"
         )
         break
+    warning_word = "warning" if warnings == 1 else "warnings"
     print("== result ==")
     print(
         f"{counts['pass']}/{total} checks passed, "
-        f"{counts['fail']} failed, {skipped} skipped{pyright_line}"
+        f"{counts['fail']} failed, {skipped} skipped, "
+        f"{warnings} {warning_word}{pyright_line}"
     )
     for stage_number in sorted(stage_counts):
         tally = stage_counts[stage_number]
@@ -2447,6 +2646,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "passed": sum(item.get("status") == "pass" for item in results),
         "failed": sum(item.get("status") == "fail" for item in results),
         "skipped": sum(item.get("status") == "skip" for item in results),
+        "warnings": sum(
+            len(cast(list[object], item.get("warnings", []))) for item in results
+        ),
     }
     for result in results:
         if result.get("kind") != "pyright":
