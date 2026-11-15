@@ -28,7 +28,17 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from comparator import compare_erd
 
 
-CASE_KINDS = {"output", "schema", "reject", "state", "race", "query", "document"}
+CASE_KINDS = {
+    "output",
+    "schema",
+    "reject",
+    "state",
+    "race",
+    "query",
+    "document",
+    "report",
+    "view",
+}
 WARNING_LABEL = "warning:"
 INVARIANT_KINDS = {
     "work_sql",
@@ -50,6 +60,24 @@ FEATURE_PATTERNS = {
     "union": re.compile(r"\bUNION(?:\s+ALL)?\b", re.IGNORECASE),
     "intersect": re.compile(r"\bINTERSECT\b", re.IGNORECASE),
     "except": re.compile(r"\bEXCEPT\b", re.IGNORECASE),
+    "self_join": re.compile(
+        r"\bFROM\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)"
+        r"\s+(?:AS\s+)?(?P<first>[A-Za-z_][A-Za-z0-9_]*)\b"
+        r"[\s\S]*?\bJOIN\s+(?P=table)"
+        r"\s+(?:AS\s+)?(?P<second>[A-Za-z_][A-Za-z0-9_]*)\b",
+        re.IGNORECASE,
+    ),
+    "having": re.compile(r"\bHAVING\b", re.IGNORECASE),
+    "where_subquery": re.compile(
+        r"\bWHERE\b[\s\S]*?\(\s*SELECT\b", re.IGNORECASE
+    ),
+    "correlated_subquery": re.compile(
+        r"\(\s*SELECT\b[\s\S]*?\bWHERE\b[\s\S]*?"
+        r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*",
+        re.IGNORECASE,
+    ),
+    "coalesce": re.compile(r"\bCOALESCE\s*\(", re.IGNORECASE),
 }
 
 
@@ -479,6 +507,12 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
         if warning_sql is not None and not isinstance(warning_sql, str):
             raise fault("warning_sql must be a string", ("warning_sql",))
         return
+    if kind in {"report", "view"}:
+        if not isinstance(body.get("report"), str):
+            raise fault("report must be a string", ("report",))
+        if kind == "view" and not isinstance(body.get("view"), str):
+            raise fault("view must be a string", ("view",))
+        return
     steps = body.get("steps")
     if not isinstance(steps, list):
         raise fault("steps must be a list", ("steps",))
@@ -548,8 +582,6 @@ def _validate_invariant_fields(
                         (*location, "rules", rule_index, field),
                     )
     elif kind == "feature":
-        require("schema", str, "schema string")
-        require("view", str, "view string")
         features = require("features", list, "features list")
         for feature_index, feature in enumerate(cast(list[object], features)):
             if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
@@ -557,9 +589,25 @@ def _validate_invariant_fields(
                     f"invariant {index}: unsupported SQL feature {feature!r}",
                     (*location, "features", feature_index),
                 )
+        file_name = invariant.get("file")
+        if file_name is not None:
+            if not isinstance(file_name, str):
+                raise fault(
+                    f"invariant {index}: feature file must be a string",
+                    (*location, "file"),
+                )
+        else:
+            require("schema", str, "schema string")
+            require("view", str, "view string")
     elif kind == "index":
         require("file", str, "file string")
         require("index", str, "index string")
+        key_column = invariant.get("key_column")
+        if key_column is not None and not isinstance(key_column, str):
+            raise fault(
+                f"invariant {index}: key_column must be a string",
+                (*location, "key_column"),
+            )
     elif kind == "written":
         require("file", str, "file string")
         sections = require("sections", list, "sections list")
@@ -637,6 +685,8 @@ def _validate_case(
         "race": {".json"},
         "query": {".sql"},
         "document": {".json"},
+        "report": {".json"},
+        "view": {".json"},
     }
     if case_path.suffix not in allowed_suffixes[str(kind)]:
         raise fault(
@@ -672,7 +722,7 @@ def _validate_case(
             raise FormFault(exit_path, 1, 1, "must contain one integer", root=root) from error
         if expected_exit < 0:
             raise FormFault(exit_path, 1, 1, "must be zero or greater", root=root)
-    if kind in {"state", "race", "document"}:
+    if kind in {"state", "race", "document", "report", "view"}:
         _validate_case_body(case_path, str(kind), case_id)
     return case
 
@@ -1124,6 +1174,56 @@ def _run_sql_file(
     with connection.cursor() as cursor:
         _execute(cursor, path.read_text(encoding="utf-8"))
         return _dataset_from_cursor(cursor)
+
+
+def _report_path(root: Path, report_name: str, case_id: str) -> Path | None:
+    report_path = (root / report_name).resolve()
+    try:
+        report_path.relative_to(root.resolve())
+    except ValueError as error:
+        raise ValueError(
+            f"case {case_id}: the report must stay inside the repository"
+        ) from error
+    if report_path.suffix != ".sql" or not report_path.is_file():
+        return None
+    return report_path
+
+
+def _view_bypass_rows(
+    connection: _DbConnection, report_path: Path, view_name: str
+) -> list[list[object]]:
+    query = report_path.read_text(encoding="utf-8")
+    probe = f"cmsc127_probe_{uuid4().hex[:12]}"
+    relations: list[str] = []
+    with connection.cursor() as cursor:
+        try:
+            _execute(cursor, f'CREATE TEMP VIEW "{probe}" AS ' + query)
+            _execute(
+                cursor,
+                """SELECT DISTINCT referenced.relname::text AS relation
+                   FROM pg_rewrite AS rewrite
+                   JOIN pg_class AS view_class ON view_class.oid = rewrite.ev_class
+                   JOIN pg_depend AS dependency
+                     ON dependency.classid = 'pg_rewrite'::regclass
+                    AND dependency.objid = rewrite.oid
+                    AND dependency.refclassid = 'pg_class'::regclass
+                   JOIN pg_class AS referenced ON referenced.oid = dependency.refobjid
+                   WHERE view_class.oid = %s::regclass
+                     AND referenced.oid <> view_class.oid
+                   ORDER BY relation""",
+                (f"pg_temp.{probe}",),
+            )
+            relations = [str(row[0]) for row in cursor.fetchall()]
+        finally:
+            _execute(cursor, f'DROP VIEW IF EXISTS pg_temp."{probe}"')
+    if view_name in relations:
+        return []
+    if not relations:
+        return [[view_name, f"the report does not read the {view_name} view"]]
+    return [
+        [relation, f"the report reads {relation} instead of the {view_name} view"]
+        for relation in relations
+    ]
 
 
 def _sql_error(
@@ -1659,6 +1759,36 @@ def _run_case(
             second.close()
         actual["steps"] = step_results
         problems.extend(compare_dataset(expected, actual, ordered=ordered))
+    elif kind == "report":
+        body = _as_object(_read_json(case_path), f"case {case_id}")
+        report_name = body.get("report")
+        if not isinstance(report_name, str):
+            raise ValueError(f"case {case_id}: report file needs a report string")
+        report_path = _report_path(root, report_name, case_id)
+        if report_path is None:
+            actual = {"columns": [], "rows": []}
+            problems = [f"report SQL file is missing: {report_name}"]
+        else:
+            actual = _run_sql_file(connection, report_path)
+            actual, warnings = _split_warnings(actual)
+            problems = compare_dataset(expected, actual, ordered=ordered)
+    elif kind == "view":
+        body = _as_object(_read_json(case_path), f"case {case_id}")
+        report_name = body.get("report")
+        view_name = body.get("view")
+        if not isinstance(report_name, str) or not isinstance(view_name, str):
+            raise ValueError(f"case {case_id}: view file needs report and view strings")
+        report_path = _report_path(root, report_name, case_id)
+        view_rows: list[list[object]]
+        if report_path is None:
+            view_rows = cast(
+                list[list[object]],
+                [[view_name, f"the report SQL file is missing: {report_name}"]],
+            )
+        else:
+            view_rows = _view_bypass_rows(connection, report_path, view_name)
+        actual = {"columns": ["relation", "problem"], "rows": view_rows}
+        problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "output":
         raw_args = case.get("args")
         arguments = (
@@ -1835,12 +1965,37 @@ def _check_normal_form(
 
 
 def _check_feature(
-    connection: _DbConnection, item: Mapping[str, object]
+    connection: _DbConnection,
+    item: Mapping[str, object],
+    root: Path | None = None,
 ) -> list[str]:
+    features = item.get("features")
+    if not isinstance(features, list):
+        return ["feature invariant needs a features list"]
+    file_name = item.get("file")
+    if isinstance(file_name, str):
+        if root is None:
+            return ["feature invariant needs the repository root for a file check"]
+        path = (root / file_name).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            return [f"feature file must stay inside the repository: {file_name}"]
+        if not path.is_file():
+            return [f"feature file is missing: {file_name}"]
+        text = path.read_text(encoding="utf-8")
+        errors: list[str] = []
+        for feature in cast(list[object], features):
+            if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
+                errors.append(f"unsupported SQL feature {feature!r}")
+            elif FEATURE_PATTERNS[feature].search(text) is None:
+                errors.append(
+                    f"file {file_name} does not show required feature {feature}"
+                )
+        return errors
     view = item.get("view")
     schema = item.get("schema", "public")
-    features = item.get("features")
-    if not isinstance(view, str) or not isinstance(schema, str) or not isinstance(features, list):
+    if not isinstance(view, str) or not isinstance(schema, str):
         return ["feature invariant needs a schema, view, and features list"]
     with connection.cursor() as cursor:
         _execute(
@@ -1857,7 +2012,7 @@ def _check_feature(
     if row is None or not isinstance(row[0], str):
         return [f"required view {view} does not exist"]
     definition = row[0]
-    errors: list[str] = []
+    errors = []
     for feature in cast(list[object], features):
         if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
             errors.append(f"unsupported SQL feature {feature!r}")
@@ -1934,6 +2089,62 @@ def _plan_indexes(plan: object) -> set[tuple[str | None, str]]:
     return found
 
 
+def _plan_index_conditions(plan: object) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for child in cast(list[object], node):
+                walk(child)
+            return
+        if not isinstance(node, dict):
+            return
+        entry = cast(dict[str, object], node)
+        index_name = entry.get("Index Name")
+        condition = entry.get("Index Cond")
+        if isinstance(index_name, str) and isinstance(condition, str):
+            found.append((index_name, condition))
+        children = entry.get("Plans")
+        if isinstance(children, list):
+            for child in cast(list[object], children):
+                walk(child)
+        plan_child = entry.get("Plan")
+        if isinstance(plan_child, dict):
+            walk(cast(dict[str, object], plan_child))
+        elif isinstance(plan_child, list):
+            walk(cast(list[object], plan_child))
+
+    walk(plan)
+    return found
+
+
+def _index_key_columns(
+    connection: _DbConnection, identity: tuple[str, str]
+) -> list[str]:
+    schema, name = identity
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            """SELECT attribute.attname::text
+               FROM pg_index AS index_entry
+               JOIN pg_class AS index_class
+                 ON index_class.oid = index_entry.indexrelid
+               JOIN pg_namespace AS index_namespace
+                 ON index_namespace.oid = index_class.relnamespace
+               CROSS JOIN LATERAL unnest(index_entry.indkey) WITH ORDINALITY
+                    AS key_column(attnum, ordinality)
+               JOIN pg_attribute AS attribute
+                 ON attribute.attrelid = index_entry.indrelid
+                AND attribute.attnum = key_column.attnum
+               WHERE index_namespace.nspname = %s
+                 AND index_class.relname = %s
+                 AND key_column.ordinality <= index_entry.indnkeyatts
+               ORDER BY key_column.ordinality""",
+            (schema, name),
+        )
+        return [str(row[0]) for row in cursor.fetchall()]
+
+
 def _check_index(
     root: Path,
     connection: _DbConnection,
@@ -1942,8 +2153,11 @@ def _check_index(
 ) -> list[str]:
     file_name = item.get("file")
     index_name = item.get("index")
+    key_column = item.get("key_column")
     if not isinstance(file_name, str) or not isinstance(index_name, str):
         return ["index invariant needs file and index"]
+    if key_column is not None and not isinstance(key_column, str):
+        return ["index key_column must be a string"]
     query_path = root / file_name
     if not query_path.is_file() or query_path.suffix != ".sql":
         return [f"index query must be a SQL file: {file_name}"]
@@ -1952,6 +2166,15 @@ def _check_index(
         return [f"index {index_name} does not exist in the catalog"]
     if identity not in migration_indexes:
         return [f"index {index_name} was not created by a migration"]
+    if isinstance(key_column, str):
+        key_columns = _index_key_columns(connection, identity)
+        if not key_columns:
+            return [f"index {index_name} has no key column in the catalog"]
+        if key_columns[0] != key_column:
+            return [
+                f"index {index_name} leads with {key_columns[0]}, not {key_column}: "
+                f"{key_columns!r}"
+            ]
     query = query_path.read_text(encoding="utf-8")
     with connection.cursor() as cursor:
         try:
@@ -1983,6 +2206,18 @@ def _check_index(
         return [
             f"query plan does not use index {index_name}: {sorted(used_names)!r}"
         ]
+    if isinstance(key_column, str):
+        conditions = [
+            condition
+            for condition_name, condition in _plan_index_conditions(plan)
+            if condition_name == index_name
+        ]
+        pattern = re.compile(rf"\b{re.escape(key_column)}\b")
+        if not any(pattern.search(condition) for condition in conditions):
+            return [
+                f"query plan does not filter index {index_name} on {key_column}: "
+                f"{conditions!r}"
+            ]
     return []
 
 
@@ -2358,7 +2593,7 @@ def _run_invariants(
             elif kind == "normal_form":
                 problems = _check_normal_form(connection, item)
             elif kind == "feature":
-                problems = _check_feature(connection, item)
+                problems = _check_feature(connection, item, root)
             elif kind == "index":
                 problems = _check_index(root, connection, item, migration_indexes)
             elif kind == "backup_restore":

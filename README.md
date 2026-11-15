@@ -262,11 +262,13 @@ uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
 unless the manifest sets `ordered` to `false`. The runner compares duplicate
 rows. A failed comparison prints the expected rows and the actual rows.
 
-The runner supports seven case kinds. `output` calls the pair's `./run` command.
+The runner supports nine case kinds. `output` calls the pair's `./run` command.
 `schema` compares ERD text with PostgreSQL. `reject` checks that SQL fails.
 `state` checks rows after an operation. `race` runs SQL steps on two sessions
 in the manifest order. `query` runs a SQL file directly. `document` checks the
-structure of a Markdown file and the entries for each warning row.
+structure of a Markdown file and the entries for each warning row. `report` runs
+a report SQL file named in a JSON body. `view` reads the catalog to prove that a
+report reads a required view.
 
 A row whose first cell starts with `warning:` is a warning, not a failure. The
 runner prints it under its case and counts it on the count line, so a case with
@@ -279,8 +281,8 @@ list runs after the cases. Each invariant checks one property.
 |---|---|---|
 | `work_sql` | Runs report files as SQL. Pair Python is not in the path, so it cannot filter their rows. | |
 | `normal_form` | Checks every mapped table and column against the catalog, then checks that a primary or unique key enforces the determinant, the column or columns that the other columns depend on. | |
-| `feature` | Looks for a named SQL feature in a view definition from the PostgreSQL catalog. | It can miss a feature that the query text hides. It can accept a feature that does no useful work. |
-| `index` | Reads the structured plan from `EXPLAIN`, compares the index identity with the catalog, and requires that a migration created the index. | The check disables sequential scans, so the plan does not prove the optimizer's ordinary choice. |
+| `feature` | Looks for a named SQL feature in a view definition from the PostgreSQL catalog, or in a report SQL file. | It can miss a feature that the query text hides. It can accept a feature that does no useful work. |
+| `index` | Reads the index's key columns from `pg_index` and `pg_attribute`, then reads the structured plan from `EXPLAIN`. It compares the index identity with the catalog, requires that a migration created the index, requires the stated leading key column, and requires the plan's `Index Cond` to name that column. | The check disables sequential scans, so the plan does not prove the optimizer's ordinary choice. |
 | `backup_restore` | Calls the pair's commands and compares table rows before and after restore. | |
 | `protected` | Checks the hashes of the files that came with the folder. | |
 | `written` | Checks that required headings have content. | It does not judge the content. |

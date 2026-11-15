@@ -48,7 +48,7 @@ class _TestConnection(Protocol):
 
 
 check_feature = cast(
-    Callable[[object, Mapping[str, object]], list[str]],
+    Callable[[object, Mapping[str, object], Path | None], list[str]],
     getattr(runner, "_check_feature"),
 )
 check_index = cast(
@@ -85,6 +85,7 @@ run_invariants = cast(
     ],
     getattr(runner, "_run_invariants"),
 )
+
 
 
 class DatasetComparisonTests(unittest.TestCase):
@@ -426,6 +427,36 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError, r"list.expected: line 3, column 11"
             ):
+                load_manifest(root)
+
+    def test_report_case_needs_a_report_string(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases").mkdir()
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab2/report",
+                                "stage": 2,
+                                "kind": "report",
+                                "file": "cases/report.json",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "report.json").write_text(
+                json.dumps({"report": 1}), encoding="utf-8"
+            )
+            (root / "cases" / "report.expected").write_text(
+                '{"columns":[],"rows":[]}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, r"report must be a string"):
                 load_manifest(root)
 
 
@@ -983,6 +1014,120 @@ class RunnerIntegrationTests(unittest.TestCase):
                 failed_ids,
             )
 
+    def test_report_and_view_cases_run_the_named_files(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases" / "pair").mkdir(parents=True)
+            (root / "reports").mkdir()
+            (root / "migrations").mkdir()
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+                "CREATE VIEW item_roster AS SELECT id, label FROM item;\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1, 'alpha'), (2, 'beta');\n",
+                encoding="utf-8",
+            )
+            (root / "reports" / "list.sql").write_text(
+                "SELECT id, label FROM item ORDER BY id;\n", encoding="utf-8"
+            )
+            (root / "reports" / "roster.sql").write_text(
+                "SELECT id, label FROM item_roster ORDER BY id;\n", encoding="utf-8"
+            )
+            (root / "reports" / "base.sql").write_text(
+                "SELECT id, label FROM item ORDER BY id;\n", encoding="utf-8"
+            )
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps({"version": 1, "cases": []}), encoding="utf-8"
+            )
+            (root / "cases" / "pair" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab2/list",
+                                "stage": 2,
+                                "group": "Query Correctness",
+                                "kind": "report",
+                                "file": "cases/pair/list.json",
+                            },
+                            {
+                                "id": "lab2/view-bypass",
+                                "stage": 2,
+                                "group": "SQL Craft",
+                                "kind": "view",
+                                "file": "cases/pair/view.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "pair" / "list.json").write_text(
+                json.dumps({"report": "reports/list.sql"}), encoding="utf-8"
+            )
+            (root / "cases" / "pair" / "list.expected").write_text(
+                '{"columns":["id","label"],"rows":[[1,"alpha"],[2,"beta"]]}\n',
+                encoding="utf-8",
+            )
+            (root / "cases" / "pair" / "view.json").write_text(
+                json.dumps(
+                    {"report": "reports/roster.sql", "view": "item_roster"}
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "pair" / "view.expected").write_text(
+                '{"columns":["relation","problem"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$1\" = prepare ]; then\n"
+                "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            passing_output = StringIO()
+            with redirect_stdout(passing_output):
+                pass_exit = main(["2", "--root", str(root)])
+            self.assertEqual(0, pass_exit, passing_output.getvalue())
+
+            (root / "cases" / "pair" / "view.json").write_text(
+                json.dumps({"report": "reports/base.sql", "view": "item_roster"}),
+                encoding="utf-8",
+            )
+            defect_output = StringIO()
+            with redirect_stdout(defect_output):
+                defect_exit = main(["2", "--root", str(root)])
+            self.assertEqual(1, defect_exit, defect_output.getvalue())
+            defect_result = json.loads(
+                (root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
+            )
+            defect_rows = cast(list[dict[str, object]], defect_result["results"])
+            failed_ids = {
+                str(row["id"]) for row in defect_rows if row["status"] == "fail"
+            }
+            self.assertEqual({"lab2/view-bypass"}, failed_ids)
+            bypass_row = next(
+                row for row in defect_rows if row["id"] == "lab2/view-bypass"
+            )
+            actual = cast(dict[str, object], bypass_row["actual"])
+            actual_rows = cast(list[list[object]], actual["rows"])
+            self.assertTrue(
+                any(
+                    "instead of" in str(cell)
+                    for row in actual_rows
+                    for cell in row
+                ),
+                actual_rows,
+            )
+
     def test_reject_case_requires_a_real_constraint(
         self: RunnerIntegrationTests,
     ) -> None:
@@ -1516,9 +1661,9 @@ class InvariantTests(unittest.TestCase):
             )
         item = {"schema": self.schema, "view": view, "features": ["left_join"]}
 
-        self.assertEqual([], check_feature(self.connection, item))
+        self.assertEqual([], check_feature(self.connection, item, None))
         errors = check_feature(
-            self.connection, {"schema": self.schema, "view": view, "features": ["union"]}
+            self.connection, {"schema": self.schema, "view": view, "features": ["union"]}, None
         )
         self.assertTrue(any("does not show required feature union" in error for error in errors))
 
@@ -1557,6 +1702,78 @@ class InvariantTests(unittest.TestCase):
                 {(self.schema, index)},
             )
             self.assertTrue(any("does not exist" in error for error in errors))
+
+    def test_index_check_requires_the_leading_key_column(
+        self: InvariantTests,
+    ) -> None:
+        index = f"t13_index_{uuid4().hex[:8]}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "report.sql").write_text(
+                f"SELECT id FROM \"{self.schema}\".item WHERE label = 'alpha';\n",
+                encoding="utf-8",
+            )
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    f'CREATE TABLE "{self.schema}".item '
+                    "(id integer, label text)"
+                )
+                cursor.execute(
+                    f'CREATE INDEX "{index}" ON "{self.schema}".item (label)'
+                )
+                cursor.execute(
+                    f'INSERT INTO "{self.schema}".item VALUES (1, \'alpha\')'
+                )
+            errors = check_index(
+                root,
+                self.connection,
+                {"file": "report.sql", "index": index, "key_column": "id"},
+                {(self.schema, index)},
+            )
+            self.assertTrue(
+                any("leads with label, not id" in error for error in errors),
+                errors,
+            )
+            with self.connection.cursor() as cursor:
+                cursor.execute(f'DROP INDEX "{self.schema}"."{index}"')
+                cursor.execute(
+                    f'CREATE INDEX "{index}" ON "{self.schema}".item (id, label)'
+                )
+            errors = check_index(
+                root,
+                self.connection,
+                {"file": "report.sql", "index": index, "key_column": "id"},
+                {(self.schema, index)},
+            )
+            self.assertTrue(
+                any("does not filter index" in error for error in errors),
+                errors,
+            )
+
+    def test_feature_check_reads_a_report_file(self: InvariantTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "outer.sql").write_text(
+                "SELECT a.id FROM item AS a LEFT JOIN other AS b ON b.id = a.id;\n",
+                encoding="utf-8",
+            )
+            item = {
+                "file": "reports/outer.sql",
+                "features": ["left_join"],
+            }
+
+            self.assertEqual([], check_feature(self.connection, item, root))
+            errors = check_feature(
+                self.connection,
+                {"file": "reports/outer.sql", "features": ["intersect"]},
+                root,
+            )
+            self.assertTrue(
+                any("does not show required feature intersect" in error for error in errors),
+                errors,
+            )
 
     def test_protected_files_allow_pair_cases_and_reject_changes(
         self: InvariantTests,
