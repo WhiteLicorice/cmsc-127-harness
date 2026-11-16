@@ -53,6 +53,7 @@ INVARIANT_KINDS = {
 }
 CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
+ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 FEATURE_PATTERNS = {
     "left_join": re.compile(
         r"\b(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE
@@ -819,6 +820,14 @@ def _validate_case(
         )
     expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
     _validate_expected(expected_path, expected, str(kind))
+    if "role" in case:
+        role = case.get("role")
+        if kind != "reject":
+            raise fault(f"case {case_id}: role is only valid for a reject case", (*location, "role"))
+        if not isinstance(role, str) or ROLE_NAME.fullmatch(role) is None:
+            raise fault(f"case {case_id}: role must be a lowercase PostgreSQL role name", (*location, "role"))
+        if expected.get("sqlstate") != "42501":
+            raise fault(f"case {case_id}: role reject cases must expect SQLSTATE 42501", (*location, "role"))
     exit_path = case_path.with_suffix(".exit")
     if exit_path.exists():
         try:
@@ -1236,7 +1245,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _create_database(base_url: str) -> tuple[str, _DbConnection]:
-    name = f"cmsc127_{uuid4().hex}"
+    name = f"c127_t10p2_{uuid4().hex}"
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
         with admin.cursor() as cursor:
@@ -1366,22 +1375,58 @@ def _referenced_view_definitions(
                 _execute(cursor, f'DROP VIEW IF EXISTS pg_temp."{probe}"')
 
 
+class _RollbackRoleProbe(Exception):
+    pass
+
+
 def _sql_error(
-    connection: _DbConnection, statement: str
+    connection: _DbConnection,
+    statement: str,
+    role: str | None = None,
 ) -> tuple[str, str | None, str | None, str | None, str | None] | None:
+    if role is None:
+        try:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    _execute(cursor, statement)
+        except psycopg.Error as error:
+            return (
+                error.sqlstate or error.__class__.__name__,
+                error.diag.constraint_name,
+                error.diag.table_name,
+                error.diag.column_name,
+                error.diag.source_function,
+            )
+        return None
+
+    probe_role = f"c127_t10p2_{uuid4().hex}_probe"
+    probe_error: tuple[str, str | None, str | None, str | None, str | None] | None = None
     try:
-        with connection.transaction():
-            with connection.cursor() as cursor:
-                _execute(cursor, statement)
-    except psycopg.Error as error:
-        return (
-            error.sqlstate or error.__class__.__name__,
-            error.diag.constraint_name,
-            error.diag.table_name,
-            error.diag.column_name,
-            error.diag.source_function,
-        )
-    return None
+        try:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    _execute(cursor, f'CREATE ROLE "{probe_role}" NOLOGIN')
+                    _execute(cursor, f'GRANT "{role}" TO "{probe_role}"')
+                try:
+                    with connection.transaction():
+                        with connection.cursor() as cursor:
+                            _execute(cursor, f'SET ROLE "{probe_role}"')
+                            _execute(cursor, statement)
+                except psycopg.Error as error:
+                    probe_error = (
+                        error.sqlstate or error.__class__.__name__,
+                        error.diag.constraint_name,
+                        error.diag.table_name,
+                        error.diag.column_name,
+                        error.diag.source_function,
+                    )
+                raise _RollbackRoleProbe()
+        except _RollbackRoleProbe:
+            pass
+    finally:
+        with connection.cursor() as cursor:
+            _execute(cursor, f'DROP ROLE IF EXISTS "{probe_role}"')
+    return probe_error
 
 
 def _relation_tree(
@@ -1791,7 +1836,12 @@ def _run_case(
     elif kind == "reject":
         statement = case_path.read_text(encoding="utf-8")
         target = _reject_insert_target(statement)
-        error = _sql_error(connection, statement)
+        role = case.get("role")
+        error = _sql_error(
+            connection,
+            statement,
+            role if isinstance(role, str) else None,
+        )
         expected_code = expected.get("sqlstate")
         if error is None:
             actual = {"sqlstate": None}
@@ -1804,7 +1854,10 @@ def _run_case(
                 problems.append(
                     f"SQLSTATE differs: expected {expected_code!r}, actual {error_code!r}"
                 )
-            if not _constraint_refused(
+            if role is not None:
+                if error_code != "42501" or source_function in _RAISE_SOURCE_FUNCTIONS:
+                    problems.append("the error does not come from the restricted role's privileges")
+            elif not _constraint_refused(
                 connection,
                 error_code,
                 constraint_name,
@@ -1847,13 +1900,19 @@ def _run_case(
         check_sql = body.get("check_sql")
         if not isinstance(operation, str) or not isinstance(check_sql, str):
             raise ValueError(f"case {case_id}: state file needs operation and check_sql strings")
-        with connection.cursor() as cursor:
-            _execute(cursor, operation)
-        with connection.cursor() as cursor:
-            _execute(cursor, check_sql)
-            actual = _dataset_from_cursor(cursor)
-        actual, warnings = _split_warnings(actual)
-        problems = compare_dataset(expected, actual, ordered=ordered)
+        restore_problems = _backup_restore(root, connection, database_url) if operation == "restore" else []
+        if operation != "restore":
+            with connection.cursor() as cursor:
+                _execute(cursor, operation)
+        if restore_problems:
+            actual = {"columns": [], "rows": []}
+            problems = restore_problems
+        else:
+            with connection.cursor() as cursor:
+                _execute(cursor, check_sql)
+                actual = _dataset_from_cursor(cursor)
+            actual, warnings = _split_warnings(actual)
+            problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "race":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         steps = body.get("steps")

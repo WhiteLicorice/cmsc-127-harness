@@ -12,9 +12,11 @@ import hashlib
 from io import StringIO
 from types import TracebackType
 from typing import Callable, Protocol, cast
+from unittest.mock import patch
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql as psycopg_sql
 import runner
 
 from runner import compare_dataset, load_manifest, main, select_cases
@@ -320,6 +322,33 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(
                 "lab1/reject", select_cases(load_manifest(root), 1)[-1].get("id")
             )
+
+    def test_reject_role_case_requires_privilege_sqlstate(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            manifest_path = root / "cases" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["cases"].append(
+                {
+                    "id": "lab1/role-reject",
+                    "stage": 1,
+                    "kind": "reject",
+                    "file": "cases/lab1/reject.sql",
+                    "role": "cashier",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            reject_path = root / "cases" / "lab1" / "reject.sql"
+            reject_path.write_text(
+                "INSERT INTO item (id) VALUES (1);\n", encoding="utf-8"
+            )
+            reject_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"23505"}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "role.*42501"):
+                load_manifest(root)
 
     def test_reject_case_requires_one_plain_row(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -686,6 +715,159 @@ class DesignRecordTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class RunnerIntegrationTests(unittest.TestCase):
+    def test_role_reject_uses_a_temporary_probe_role(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        group_role = f"c127_t10p2_group_{uuid4().hex}"
+        database_url = os.environ["CMSC127_DATABASE_URL"]
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        psycopg_sql.Identifier(group_role)
+                    )
+                )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "cases" / "lab1").mkdir(parents=True)
+                (root / "migrations").mkdir()
+                (root / "cases" / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "cases": [
+                                {
+                                    "id": "lab1/role-reject",
+                                    "stage": 1,
+                                    "kind": "reject",
+                                    "file": "cases/lab1/role-reject.sql",
+                                    "role": group_role,
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                reject_path = root / "cases" / "lab1" / "role-reject.sql"
+                reject_path.write_text(
+                    "INSERT INTO item (id, label) VALUES (1, 'allowed');\n",
+                    encoding="utf-8",
+                )
+                reject_path.with_suffix(".expected").write_text(
+                    '{"sqlstate":"42501"}\n', encoding="utf-8"
+                )
+                (root / "migrations" / "0001_create_item.sql").write_text(
+                    "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                    encoding="utf-8",
+                )
+                (root / "load.sql").write_text("", encoding="utf-8")
+                (root / "run").write_text(
+                    "#!/usr/bin/env bash\n"
+                    "set -eu\n"
+                    'if [ "$1" = prepare ]; then\n'
+                    '  psql "$CMSC127_DATABASE_URL" --set ON_ERROR_STOP=1 --file load.sql\n'
+                    "fi\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(["1", "--root", str(root)])
+
+                self.assertEqual(0, exit_code, output.getvalue())
+                (root / "migrations" / "0001_create_item.sql").write_text(
+                    "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+                    f'GRANT INSERT ON item TO "{group_role}";\n',
+                    encoding="utf-8",
+                )
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(["1", "--root", str(root)])
+
+                self.assertEqual(1, exit_code, output.getvalue())
+                result = json.loads(
+                    (root / ".cmsc127" / "last-run.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                rows = cast(list[dict[str, object]], result["results"])
+                self.assertEqual("fail", rows[0]["status"])
+        finally:
+            with psycopg.connect(database_url, autocommit=True) as admin:
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
+                            psycopg_sql.Identifier(group_role)
+                        )
+                    )
+
+    def test_state_case_restores_before_checking_rows(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases" / "lab1").mkdir(parents=True)
+            (root / "migrations").mkdir()
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/restore-state",
+                                "stage": 1,
+                                "kind": "state",
+                                "file": "cases/lab1/restore-state.json",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "restore-state.json").write_text(
+                json.dumps(
+                    {
+                        "operation": "restore",
+                        "check_sql": "SELECT count(*) AS total FROM item",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "restore-state.expected").write_text(
+                '{"columns":["total"],"rows":[[2]]}\n', encoding="utf-8"
+            )
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1, 'one'), (2, 'two');\n",
+                encoding="utf-8",
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'if [ "$1" = prepare ]; then\n'
+                '  psql "$CMSC127_DATABASE_URL" --set ON_ERROR_STOP=1 --file load.sql\n'
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            output = StringIO()
+            with (
+                redirect_stdout(output),
+                patch.object(runner, "_backup_restore", return_value=[]) as restore,
+            ):
+                exit_code = main(["1", "--root", str(root)])
+
+            self.assertEqual(0, exit_code, output.getvalue())
+            restore.assert_called_once()
+
     def test_each_run_uses_a_scratch_database_and_repeats_the_result(
         self: RunnerIntegrationTests,
     ) -> None:

@@ -270,6 +270,16 @@ structure of a Markdown file and the entries for each warning row. `report` runs
 a report SQL file named in a JSON body. `view` reads the catalog to prove that a
 report reads a required view.
 
+For a restricted-role check, add a lowercase `role` field to a `reject` case
+and set its expected SQLSTATE to `42501`. The runner creates a temporary probe
+role, grants it membership in the named role, and runs the insert as that probe.
+It removes the probe role after the check. The named role must exist in the
+database created by the pair's migrations.
+
+A `state` body can set `operation` to `restore`. The runner calls the pair's
+backup and restore commands, then compares `check_sql` rows with the expected
+rows. Other `state` operations still run as SQL.
+
 A row whose first cell starts with `warning:` is a warning, not a failure. The
 runner prints it under its case and counts it on the count line, so a case with
 only warnings passes.
