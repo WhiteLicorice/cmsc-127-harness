@@ -119,3 +119,15 @@ a release.
 The harness self-tests use a separate scratch database. Run them with
 `./check.sh --self-test`. The GitHub workflow runs the self-tests and the same
 staged checks from a clean checkout on Ubuntu, macOS, and Windows.
+
+## Release History and Order
+
+Harness tags `v1.15` and `v1.16` have incorrect protected-file hashes. Treat
+both tags as superseded. Use `v1.17` or a later tag.
+
+Harness tags `v1.9` to `v1.12` fail their self-tests on Ubuntu and macOS. No
+fork pins those tags.
+
+For a release, first commit and push the starter `check.sh` with the new runner
+tag. Then compute the hashes for `check.sh` and `.github/workflows/check.yml`.
+Commit those hashes in `protected.json`. Then create the harness tag.

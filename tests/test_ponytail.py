@@ -40,7 +40,11 @@ class PonytailBoundaryTests(unittest.TestCase):
                 request = urllib.request.Request(address + "/api/checks", headers={"Host": "attacker.invalid"})
                 with self.assertRaises(urllib.error.HTTPError) as failure:
                     urllib.request.urlopen(request, timeout=3)
-                self.assertEqual(403, failure.exception.code)
+                error = failure.exception
+                try:
+                    self.assertEqual(403, error.code)
+                finally:
+                    error.close()
                 self.assertEqual([], get_json(address + "/api/checks")["results"])
 
     @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
@@ -54,8 +58,12 @@ class PonytailBoundaryTests(unittest.TestCase):
                     try:
                         with self.assertRaises(urllib.error.HTTPError) as failure:
                             urllib.request.urlopen(address + "/api/tables?schema=" + schema, timeout=5)
-                        self.assertEqual(503, failure.exception.code)
-                        self.assertLess(time.monotonic() - started, 4)
+                        error = failure.exception
+                        try:
+                            self.assertEqual(503, error.code)
+                            self.assertLess(time.monotonic() - started, 4)
+                        finally:
+                            error.close()
                     finally:
                         locker.rollback()
                     self.assertEqual(schema, get_json(address + "/api/tables?schema=" + schema)["schema"])

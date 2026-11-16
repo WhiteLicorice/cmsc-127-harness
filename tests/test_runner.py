@@ -57,6 +57,7 @@ run_case = cast(
     Callable[[Path, Mapping[str, object], object, str], dict[str, object]],
     getattr(runner, "_run_case"),
 )
+sql_error = cast(Callable[[object, str], object], getattr(runner, "_sql_error"))
 check_index = cast(
     Callable[[Path, object, Mapping[str, object], set[tuple[str, str]]], list[str]],
     getattr(runner, "_check_index"),
@@ -336,6 +337,7 @@ class ManifestTests(unittest.TestCase):
                     "kind": "reject",
                     "file": "cases/lab1/reject.sql",
                     "role": "cashier",
+                    "role_env": "CMSC127_ROLE_CASHIER",
                 }
             )
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -349,6 +351,12 @@ class ManifestTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "role.*42501"):
                 load_manifest(root)
+
+            expected_path = reject_path.with_suffix(".expected")
+            expected_path.write_text('{"sqlstate":"42501"}\n', encoding="utf-8")
+            case = select_cases(load_manifest(root), 1)[-1]
+            with patch.dict(os.environ, {"CMSC127_ROLE_CASHIER": "c127_verify_cashier"}):
+                self.assertEqual("c127_verify_cashier", runner._case_role(case))  # pyright: ignore[reportPrivateUsage]
 
     def test_reject_case_requires_one_plain_row(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -409,6 +417,125 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unlisted case file.*extra.sql"):
                 load_manifest(root)
 
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            cases = root / "cases"
+            pair = cases / "pair"
+            pair.mkdir()
+            lab1 = cases / "published" / "lab1"
+            lab2 = cases / "published" / "lab2"
+            lab1.mkdir(parents=True)
+            lab2.mkdir(parents=True)
+            (pair / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "pair/later",
+                                "stage": 3,
+                                "kind": "query",
+                                "file": "cases/pair/later.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (lab1 / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/erd",
+                                "stage": 1,
+                                "kind": "schema",
+                                "file": "cases/pair/erd.md",
+                                "alternate_file": "cases/pair/erd-alt.md",
+                                "expected_file": "cases/published/lab1/erd.expected",
+                                "alternate_expected_file": "cases/published/lab1/erd-alt.expected",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (lab2 / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab2/published",
+                                "stage": 2,
+                                "kind": "query",
+                                "file": "cases/published/lab2/report.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pair / "erd.md").write_text("```mermaid\nerDiagram\n```\n", encoding="utf-8")
+            (pair / "erd-alt.md").write_text("```mermaid\nerDiagram\n    class ||--o{ registration : has\n```\n", encoding="utf-8")
+            (lab1 / "erd.expected").write_text(
+                '{"columns":["difference"],"rows":[]}\n', encoding="utf-8"
+            )
+            (lab1 / "erd-alt.expected").write_text(
+                '{"columns":["difference"],"rows":[]}\n', encoding="utf-8"
+            )
+            (lab2 / "report.sql").write_text("SELECT 2;\n", encoding="utf-8")
+            (lab2 / "report.expected").write_text(
+                '{"columns":["?column?"],"rows":[[2]]}\n', encoding="utf-8"
+            )
+            (pair / "later.sql").write_text("SELECT 3;\n", encoding="utf-8")
+            (pair / "later.expected").write_text(
+                '{"columns":["?column?"],"rows":[[3]]}\n', encoding="utf-8"
+            )
+
+            manifest = load_manifest(root)
+            erd_case = next(
+                case
+                for case in cast(list[dict[str, object]], manifest["cases"])
+                if case["id"] == "lab1/erd"
+            )
+            self.assertEqual(
+                root / "cases/pair/erd.md",
+                runner._case_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
+            )
+            self.assertEqual(
+                lab1 / "erd.expected",
+                runner._case_expected_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
+            )
+            with patch.dict(os.environ, {"CMSC127_SCHEMA": "alt"}):
+                self.assertEqual(
+                    root / "cases/pair/erd-alt.md",
+                    runner._case_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
+                )
+                self.assertEqual(
+                    lab1 / "erd-alt.expected",
+                    runner._case_expected_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
+                )
+            self.assertTrue(
+                {"lab1/erd", "lab2/published", "pair/later"}
+                <= {str(case["id"]) for case in cast(list[dict[str, object]], manifest["cases"])}
+            )
+            selected_ids = {
+                str(case["id"])
+                for case in select_cases(manifest, 3)
+            }
+            self.assertTrue(
+                {"lab1/erd", "lab2/published", "pair/later"} <= selected_ids
+            )
+
+            pair_manifest = json.loads((pair / "manifest.json").read_text(encoding="utf-8"))
+            pair_manifest["cases"][0]["id"] = "lab2/published"
+            (pair / "manifest.json").write_text(json.dumps(pair_manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r"lab2/published: duplicate id"):
+                load_manifest(root)
+
     def test_manifest_rejects_orphan_expected_sidecars(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -432,6 +559,86 @@ class ManifestTests(unittest.TestCase):
                 [case["id"] for case in select_cases(manifest, 2)],
             )
             self.assertEqual(["lab1/list"], [case["id"] for case in select_cases(manifest, 1)])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            cases = root / "cases"
+            lab1 = cases / "published" / "lab1"
+            lab3 = cases / "published" / "lab3"
+            pair = cases / "pair"
+            lab1.mkdir(parents=True)
+            lab3.mkdir(parents=True)
+            pair.mkdir()
+            for folder, case_id, stage in (
+                (lab1, "lab1/design", 1),
+                (lab3, "lab3/design", 3),
+            ):
+                case_file = f"cases/published/{folder.name}/{case_id.split('/')[-1]}.sql"
+                case: dict[str, object] = {
+                    "id": case_id,
+                    "stage": stage,
+                    "kind": "query",
+                    "file": case_file,
+                }
+                if stage == 3:
+                    case["replaces"] = "lab1/design"
+                (folder / "manifest.json").write_text(
+                    json.dumps({"version": 1, "cases": [case]}), encoding="utf-8"
+                )
+                (folder / f"{case_id.split('/')[-1]}.sql").write_text(
+                    "SELECT 1;\n", encoding="utf-8"
+                )
+                (folder / f"{case_id.split('/')[-1]}.expected").write_text(
+                    '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
+                )
+            (pair / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "pair/future",
+                                "stage": 4,
+                                "kind": "query",
+                                "file": "cases/pair/future.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pair / "future.sql").write_text("SELECT 4;\n", encoding="utf-8")
+            (pair / "future.expected").write_text(
+                '{"columns":["?column?"],"rows":[[4]]}\n', encoding="utf-8"
+            )
+
+            manifest = load_manifest(root)
+            stage_two_ids = {
+                str(case["id"]) for case in select_cases(manifest, 2)
+            }
+            stage_three_ids = {
+                str(case["id"]) for case in select_cases(manifest, 3)
+            }
+            self.assertIn("lab1/design", stage_two_ids)
+            self.assertNotIn("lab3/design", stage_two_ids)
+            self.assertNotIn("lab1/design", stage_three_ids)
+            self.assertIn("lab3/design", stage_three_ids)
+            self.assertNotIn("pair/future", stage_three_ids)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(root)])
+            self.assertEqual(0, exit_code)
+            self.assertEqual("3\n", output.getvalue())
+
+            empty_root = root / "empty"
+            empty_root.mkdir()
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(empty_root)])
+            self.assertEqual(0, exit_code)
+            self.assertEqual("1\n", output.getvalue())
 
     def test_bad_json_reports_line_and_column(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1708,7 +1915,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertEqual("fail", rows[0]["status"])
 
-    def test_reject_case_accepts_a_unique_index(
+    def test_reject_case_accepts_a_unique_index_and_rolls_back_success(
         self: RunnerIntegrationTests,
     ) -> None:
         migration = (
@@ -1724,6 +1931,18 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(0, exit_code)
         self.assertEqual("pass", rows[0]["status"])
+        with psycopg.connect(os.environ["CMSC127_DATABASE_URL"], autocommit=True) as connection:
+            connection.execute("CREATE TEMP TABLE reject_probe (id integer)")
+            self.assertIsNone(
+                sql_error(
+                    connection,
+                    "INSERT INTO reject_probe VALUES (1)",
+                )
+            )
+            self.assertEqual(
+                (0,),
+                connection.execute("SELECT count(*) FROM reject_probe").fetchone(),
+            )
 
     def test_reject_case_accepts_a_domain_constraint(
         self: RunnerIntegrationTests,
@@ -2359,10 +2578,16 @@ class InvariantTests(unittest.TestCase):
             runner_dir.mkdir()
             (root / "check.sh").write_bytes(b"published\n")
             expected_hash = hashlib.sha256(b"published\n").hexdigest()
+            published_path = "cases/published/lab1/list.sql"
+            published_hash = hashlib.sha256(b"SELECT 1;\n").hexdigest()
             (runner_dir / "protected.json").write_text(
                 json.dumps(
                     {
-                        "files": {"check.sh": expected_hash},
+                        "files": {
+                            "check.sh": expected_hash,
+                            published_path: published_hash,
+                        },
+                        "optional_files": [published_path],
                         "allowed_paths": ["cases/pair", "migrations", "load.sql"],
                     }
                 ),
@@ -2375,6 +2600,18 @@ class InvariantTests(unittest.TestCase):
             (pair_cases / "new.sql").write_text("SELECT 1;\n", encoding="utf-8")
 
             self.assertEqual([], check_protected(root, runner_dir))
+
+            published_case = root / published_path
+            published_case.parent.mkdir(parents=True)
+            published_case.write_text("SELECT 1;\n", encoding="utf-8")
+            self.assertEqual([], check_protected(root, runner_dir))
+
+            published_case.write_text("SELECT 2;\n", encoding="utf-8")
+            errors = check_protected(root, runner_dir)
+            self.assertTrue(
+                any(f"protected file changed: {published_path}" in error for error in errors)
+            )
+            published_case.write_text("SELECT 1;\n", encoding="utf-8")
 
             (root / "check.sh").write_bytes(b"published\r\n")
             self.assertEqual([], check_protected(root, runner_dir))

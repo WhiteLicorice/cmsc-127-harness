@@ -247,14 +247,16 @@ does not use this form. Keep schema changes in these committed SQL files. Keep
 the loader in `load.sql`.
 
 A stage is one group of checks, one for each lab. The runner reads
-`cases/manifest.json`. Each listed case has an `.expected` JSON sidecar, a file
-beside it with the same name, and may have an `.exit` sidecar. A case file that
-the manifest does not list fails before the runner creates a database. The
-runner reads all cases up to the requested stage. Stage 2 includes stage 1.
+`cases/manifest.json`, each `cases/published/<lab>/manifest.json`, and
+`cases/pair/manifest.json`. Each listed case has an `.expected` JSON sidecar
+and may have an `.exit` sidecar. An unlisted case file fails before the runner
+creates a database. The runner reads all cases up to the requested stage.
+Stage 2 includes stage 1.
 
 A pair adds its own cases in `cases/pair/manifest.json`. The pair manifest uses
-the same fields. Its files stay inside `cases/pair/`. The manifest that came
-with the folder stays unchanged, so the protected-file check still passes.
+the same fields. Its files stay inside `cases/pair/`. A lab bundle installs
+published files under `cases/published/<lab>/`. Those folders are protected,
+and a bundle does not replace the pair manifest.
 
 Result data uses a JSON object with `columns` and `rows` fields. SQL `NULL`
 uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and

@@ -744,6 +744,13 @@ def _validate_case(
     case_id = case.get("id")
     if not isinstance(case_id, str) or not case_id:
         raise fault(f"case {index}: id must be a non-empty string", (*location, "id"))
+    replacement = case.get("replaces")
+    if replacement is not None:
+        if pair or not isinstance(replacement, str) or not replacement:
+            raise fault(
+                f"case {case_id}: replaces must name one published case",
+                (*location, "replaces"),
+            )
     if case_id in identifiers:
         raise fault(f"case {case_id}: duplicate id", (*location, "id"))
     identifiers.add(case_id)
@@ -799,6 +806,33 @@ def _validate_case(
             f"case {case_id}: {kind} needs a supported case-file type",
             (*location, "file"),
         )
+    alternate_file = case.get("alternate_file")
+    alternate_case_path: Path | None = None
+    if alternate_file is not None:
+        if not isinstance(alternate_file, str) or not alternate_file:
+            raise fault(
+                f"case {case_id}: alternate_file must be a relative path",
+                (*location, "alternate_file"),
+            )
+        alternate_case_path = (root / alternate_file).resolve()
+        try:
+            alternate_case_path.relative_to(case_root.resolve())
+        except ValueError as error:
+            raise fault(
+                f"case {case_id}: alternate_file must be inside cases/",
+                (*location, "alternate_file"),
+            ) from error
+        if alternate_case_path.suffix not in allowed_suffixes[str(kind)]:
+            raise fault(
+                f"case {case_id}: alternate_file has an unsupported type for {kind}",
+                (*location, "alternate_file"),
+            )
+        if not alternate_case_path.is_file():
+            raise fault(
+                f"case {case_id}: alternate case file is missing: {alternate_file}",
+                (*location, "alternate_file"),
+            )
+        listed.add(alternate_case_path)
     if kind == "reject" and not _is_single_insert_statement(
         case_path.read_text(encoding="utf-8")
     ):
@@ -811,8 +845,42 @@ def _validate_case(
             "second row",
             root=root,
         )
+    if kind == "reject" and alternate_case_path is not None and not _is_single_insert_statement(
+        alternate_case_path.read_text(encoding="utf-8")
+    ):
+        raise FormFault(
+            alternate_case_path,
+            1,
+            1,
+            "a reject case must be one plain `INSERT ... VALUES` row of "
+            "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
+            "second row",
+            root=root,
+        )
     listed.add(case_path)
-    expected_path = case_path.with_suffix(".expected")
+    expected_file = case.get("expected_file")
+    if expected_file is None:
+        expected_path = case_path.with_suffix(".expected")
+    else:
+        if not isinstance(expected_file, str) or not expected_file:
+            raise fault(
+                f"case {case_id}: expected_file must be a relative path",
+                (*location, "expected_file"),
+            )
+        expected_path = (root / expected_file).resolve()
+        try:
+            expected_path.relative_to(case_root.resolve())
+        except ValueError as error:
+            raise fault(
+                f"case {case_id}: expected_file must be inside cases/",
+                (*location, "expected_file"),
+            ) from error
+        if expected_path.suffix != ".expected":
+            raise fault(
+                f"case {case_id}: expected_file must end in .expected",
+                (*location, "expected_file"),
+            )
+    listed.add(expected_path)
     if not expected_path.is_file():
         raise fault(
             f"case {case_id}: .expected sidecar is missing",
@@ -820,12 +888,53 @@ def _validate_case(
         )
     expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
     _validate_expected(expected_path, expected, str(kind))
-    if "role" in case:
+    alternate_expected_file = case.get("alternate_expected_file")
+    alternate_expected_path: Path | None = None
+    if alternate_expected_file is not None:
+        if not isinstance(alternate_expected_file, str) or not alternate_expected_file:
+            raise fault(
+                f"case {case_id}: alternate_expected_file must be a relative path",
+                (*location, "alternate_expected_file"),
+            )
+        alternate_expected_path = (root / alternate_expected_file).resolve()
+        try:
+            alternate_expected_path.relative_to(case_root.resolve())
+        except ValueError as error:
+            raise fault(
+                f"case {case_id}: alternate_expected_file must be inside cases/",
+                (*location, "alternate_expected_file"),
+            ) from error
+        if alternate_expected_path.suffix != ".expected":
+            raise fault(
+                f"case {case_id}: alternate_expected_file must end in .expected",
+                (*location, "alternate_expected_file"),
+            )
+        listed.add(alternate_expected_path)
+        if not alternate_expected_path.is_file():
+            raise fault(
+                f"case {case_id}: alternate .expected sidecar is missing",
+                (*location, "alternate_expected_file"),
+            )
+        alternate_expected = _as_object(
+            _read_json(alternate_expected_path),
+            f"case {case_id} alternate .expected",
+        )
+        _validate_expected(alternate_expected_path, alternate_expected, str(kind))
+    if "role" in case or "role_env" in case:
         role = case.get("role")
         if kind != "reject":
             raise fault(f"case {case_id}: role is only valid for a reject case", (*location, "role"))
         if not isinstance(role, str) or ROLE_NAME.fullmatch(role) is None:
             raise fault(f"case {case_id}: role must be a lowercase PostgreSQL role name", (*location, "role"))
+        role_env = case.get("role_env")
+        if role_env is not None and (
+            not isinstance(role_env, str)
+            or re.fullmatch(r"[A-Z_][A-Z0-9_]*", role_env) is None
+        ):
+            raise fault(
+                f"case {case_id}: role_env must be an environment variable name",
+                (*location, "role_env"),
+            )
         if expected.get("sqlstate") != "42501":
             raise fault(f"case {case_id}: role reject cases must expect SQLSTATE 42501", (*location, "role"))
     exit_path = case_path.with_suffix(".exit")
@@ -838,7 +947,37 @@ def _validate_case(
             raise FormFault(exit_path, 1, 1, "must be zero or greater", root=root)
     if kind in {"state", "race", "document", "report", "view"}:
         _validate_case_body(case_path, str(kind), case_id)
+        if alternate_case_path is not None:
+            _validate_case_body(alternate_case_path, str(kind), case_id)
     return case
+
+
+def _case_file(root: Path, case: Mapping[str, object]) -> Path:
+    alternate_file = case.get("alternate_file")
+    if os.environ.get("CMSC127_SCHEMA") == "alt" and isinstance(alternate_file, str):
+        return root / alternate_file
+    return root / str(case["file"])
+
+
+def _case_expected_file(root: Path, case: Mapping[str, object]) -> Path:
+    alternate_expected_file = case.get("alternate_expected_file")
+    if (
+        os.environ.get("CMSC127_SCHEMA") == "alt"
+        and isinstance(alternate_expected_file, str)
+    ):
+        return root / alternate_expected_file
+    expected_file = case.get("expected_file")
+    if isinstance(expected_file, str):
+        return root / expected_file
+    return (root / str(case["file"])).with_suffix(".expected")
+
+
+def _case_role(case: Mapping[str, object]) -> object:
+    role = case.get("role")
+    role_env = case.get("role_env")
+    if isinstance(role_env, str):
+        return os.environ.get(role_env, role)
+    return role
 
 
 def _load_pair_manifest(
@@ -883,7 +1022,7 @@ def _load_pair_manifest(
 
 
 def _load_manifest(root: Path) -> dict[str, object]:
-    """Load and validate the published manifest and the pair manifest."""
+    """Load the core, published, and pair manifests."""
     case_root = root / "cases"
     manifest_path = case_root / "manifest.json"
     if not manifest_path.is_file():
@@ -904,9 +1043,9 @@ def _load_manifest(root: Path) -> dict[str, object]:
 
     identifiers: set[str] = set()
     listed: set[Path] = set()
-    published_cases: list[dict[str, object]] = []
+    core_cases: list[dict[str, object]] = []
     for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
-        published_cases.append(
+        core_cases.append(
             _validate_case(
                 root,
                 case_root,
@@ -917,12 +1056,77 @@ def _load_manifest(root: Path) -> dict[str, object]:
                 listed,
             )
         )
+    published_paths = sorted((case_root / "published").glob("*/manifest.json"))
+    published_cases: list[dict[str, object]] = []
+    for published_path in published_paths:
+        published_text = published_path.read_text(encoding="utf-8")
+        published_manifest = _as_object(
+            _read_json(published_path), published_path.relative_to(root).as_posix()
+        )
+        published_locations = _json_locations(published_text)
+
+        def published_fault(
+            message: str,
+            location: tuple[str | int, ...] = (),
+            *,
+            path: Path = published_path,
+            source_locations: dict[tuple[str | int, ...], tuple[int, int]] = published_locations,
+        ) -> FormFault:
+            line, column = source_locations.get(location, (1, 1))
+            return FormFault(path, line, column, message, root=root)
+
+        if published_manifest.get("version") != 1:
+            raise published_fault("version must be 1", ("version",))
+        if "invariants" in published_manifest or "skips" in published_manifest:
+            raise published_fault("a published lab manifest may list only cases", ())
+        published_raw_cases = published_manifest.get("cases")
+        if not isinstance(published_raw_cases, list):
+            raise published_fault("cases must be a list", ("cases",))
+        for index, raw_case in enumerate(
+            cast(list[object], published_raw_cases), start=1
+        ):
+            published_cases.append(
+                _validate_case(
+                    root,
+                    case_root,
+                    raw_case,
+                    index,
+                    published_fault,
+                    identifiers,
+                    listed,
+                )
+            )
     pair_cases = _load_pair_manifest(root, case_root, identifiers, listed)
-    manifest["cases"] = [*published_cases, *pair_cases]
+    all_cases = [*core_cases, *published_cases, *pair_cases]
+    cases_by_id = {str(case["id"]): case for case in all_cases}
+    for case in all_cases:
+        replacement = case.get("replaces")
+        if not isinstance(replacement, str):
+            continue
+        replaced = cases_by_id.get(replacement)
+        if replaced is None:
+            raise ValueError(
+                f"case {case['id']}: replaces unknown case {replacement}"
+            )
+        replaced_stage = replaced.get("stage")
+        replacement_stage = case.get("stage")
+        if (
+            not isinstance(replaced_stage, int)
+            or isinstance(replaced_stage, bool)
+            or not isinstance(replacement_stage, int)
+            or isinstance(replacement_stage, bool)
+        ):
+            raise ValueError(f"case {case['id']}: replacement stage is invalid")
+        if replaced_stage >= replacement_stage:
+            raise ValueError(
+                f"case {case['id']}: replacement stage must be later than {replacement}"
+            )
+    manifest["cases"] = all_cases
 
     manifest_paths = {
         manifest_path.resolve(),
         (case_root / "pair" / "manifest.json").resolve(),
+        *(path.resolve() for path in published_paths),
     }
     unlisted_cases = sorted(
         path.resolve()
@@ -996,17 +1200,56 @@ def load_manifest(root: Path) -> dict[str, object]:
     return _load_manifest(root.resolve())
 
 
+def published_stage(root: Path) -> int:
+    """Return the highest stage in the published lab manifests, or 1."""
+    published_root = root / "cases" / "published"
+    stages: list[int] = []
+    for path in sorted(published_root.glob("*/manifest.json")):
+        manifest = _as_object(_read_json(path), path.relative_to(root).as_posix())
+        raw_cases = manifest.get("cases")
+        if not isinstance(raw_cases, list):
+            raise ValueError(f"{path.relative_to(root).as_posix()}: cases must be a list")
+        for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
+            case = _as_object(raw_case, f"case {index}")
+            stage = case.get("stage")
+            if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
+                raise ValueError(
+                    f"{path.relative_to(root).as_posix()}: case {index}: "
+                    "stage must be a positive integer"
+                )
+            stages.append(stage)
+    return max(stages, default=1)
+
+
 def select_cases(manifest: Mapping[str, object], stage: int) -> list[dict[str, object]]:
     """Return all cases through the requested stage."""
     raw_cases_value = manifest.get("cases")
     if not isinstance(raw_cases_value, list):
         return []
+    replaced_ids: set[str] = set()
+    for raw_case in cast(list[object], raw_cases_value):
+        if not isinstance(raw_case, dict):
+            continue
+        case = cast(dict[str, object], raw_case)
+        case_stage = case.get("stage")
+        replacement = case.get("replaces")
+        if (
+            isinstance(case_stage, int)
+            and not isinstance(case_stage, bool)
+            and case_stage <= stage
+            and isinstance(replacement, str)
+        ):
+            replaced_ids.add(replacement)
     selected: list[dict[str, object]] = []
     for raw_case in cast(list[object], raw_cases_value):
         if isinstance(raw_case, dict):
             case = cast(dict[str, object], raw_case)
             case_stage = case.get("stage")
-            if isinstance(case_stage, int) and case_stage <= stage:
+            if (
+                isinstance(case_stage, int)
+                and case_stage <= stage
+                and str(case.get("id")) not in replaced_ids
+            ):
                 selected.append(case)
     return selected
 
@@ -1129,8 +1372,11 @@ def compare_dataset(
     return differences
 
 
-def _read_expected(case_path: Path) -> dict[str, object]:
-    value = _as_object(_read_json(case_path.with_suffix(".expected")), ".expected")
+def _read_expected(
+    case_path: Path, expected_path: Path | None = None
+) -> dict[str, object]:
+    path = expected_path if expected_path is not None else case_path.with_suffix(".expected")
+    value = _as_object(_read_json(path), ".expected")
     return value
 
 
@@ -1386,9 +1632,10 @@ def _sql_error(
 ) -> tuple[str, str | None, str | None, str | None, str | None] | None:
     if role is None:
         try:
-            with connection.transaction():
+            with connection.transaction(force_rollback=True):
                 with connection.cursor() as cursor:
                     _execute(cursor, statement)
+                    cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
         except psycopg.Error as error:
             return (
                 error.sqlstate or error.__class__.__name__,
@@ -1799,8 +2046,8 @@ def _run_case(
     feature_warning_subjects: Sequence[str] = (),
 ) -> dict[str, object]:
     case_id = str(case["id"])
-    case_path = root / str(case["file"])
-    expected = _read_expected(case_path)
+    case_path = _case_file(root, case)
+    expected = _read_expected(case_path, _case_expected_file(root, case))
     kind = str(case["kind"])
     ordered = case.get("ordered", True) is not False
     warnings: list[str] = []
@@ -1836,7 +2083,7 @@ def _run_case(
     elif kind == "reject":
         statement = case_path.read_text(encoding="utf-8")
         target = _reject_insert_target(statement)
-        role = case.get("role")
+        role = _case_role(case)
         error = _sql_error(
             connection,
             statement,
@@ -2499,9 +2746,17 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
     allowed_value = manifest.get("allowed_paths", [])
     if not isinstance(allowed_value, list):
         return ["pinned protected-file allowed_paths list is invalid"]
+    optional_value = manifest.get("optional_files", [])
+    if not isinstance(optional_value, list):
+        return ["pinned protected-file optional_files list is invalid"]
     allowed_paths = [
         value for value in cast(list[object], allowed_value) if isinstance(value, str)
     ]
+    optional_files = {
+        value for value in cast(list[object], optional_value) if isinstance(value, str)
+    }
+    if any(value not in protected_files for value in optional_files):
+        return ["pinned protected-file optional_files must name protected files"]
     errors: list[str] = []
     for relative, expected_hash in protected_files.items():
         if not isinstance(expected_hash, str):
@@ -2509,7 +2764,8 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
             continue
         path = root / relative
         if not path.is_file():
-            errors.append(f"protected file is missing: {relative}")
+            if relative not in optional_files:
+                errors.append(f"protected file is missing: {relative}")
         else:
             content = path.read_bytes().replace(b"\r\n", b"\n")
             actual_hash = hashlib.sha256(content).hexdigest()
@@ -3011,12 +3267,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--case", dest="case_id", default=None)
     parser.add_argument("--form-lint", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--select-stage", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.self_test:
         return _self_test()
+    root = arguments.root.resolve()
+    if arguments.select_stage:
+        try:
+            print(published_stage(root))
+        except ValueError as error:
+            print(str(error))
+            return 2
+        return 0
     if arguments.stage < 1:
         parser.error("stage must be a positive integer")
-    root = arguments.root.resolve()
     runner_dir = (
         arguments.runner_dir.resolve()
         if arguments.runner_dir is not None
