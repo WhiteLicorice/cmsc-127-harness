@@ -12,7 +12,7 @@ import hashlib
 from io import StringIO
 from types import TracebackType
 from typing import Callable, Protocol, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import psycopg
@@ -715,6 +715,36 @@ class DesignRecordTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class RunnerIntegrationTests(unittest.TestCase):
+    _NON_ENGLISH_LC_MESSAGES = (
+        "fr_FR.UTF-8",
+        "fr_FR.utf8",
+        "French_France.1252",
+        "de_DE.UTF-8",
+    )
+
+    def _probe_non_english_lc_messages(
+        self: RunnerIntegrationTests,
+    ) -> str:
+        rejected: list[str] = []
+        with psycopg.connect(
+            os.environ["CMSC127_DATABASE_URL"], autocommit=True
+        ) as connection:
+            with connection.cursor() as cursor:
+                for locale_name in self._NON_ENGLISH_LC_MESSAGES:
+                    try:
+                        cursor.execute(
+                            "SELECT set_config('lc_messages', %s, false)",
+                            (locale_name,),
+                        )
+                    except psycopg.errors.InvalidParameterValue:
+                        rejected.append(locale_name)
+                        continue
+                    return locale_name
+        raise AssertionError(
+            "No non-English lc_messages locale is available. PostgreSQL rejected: "
+            + ", ".join(rejected)
+        )
+
     def test_role_reject_uses_a_temporary_probe_role(
         self: RunnerIntegrationTests,
     ) -> None:
@@ -1650,11 +1680,74 @@ class RunnerIntegrationTests(unittest.TestCase):
         output = StringIO()
         with redirect_stdout(output):
             exit_code = main(["1", "--root", str(root)])
-        result = json.loads(
-            (root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
-        )
+        result_path = root / ".cmsc127" / "last-run.json"
+        if not result_path.is_file():
+            run_output = output.getvalue().strip() or "(no output)"
+            self.fail(
+                f"Runner exited {exit_code} without writing {result_path}.\n"
+                f"Run output:\n{run_output}"
+            )
+        result = json.loads(result_path.read_text(encoding="utf-8"))
         rows = cast(list[dict[str, object]], result["results"])
         return exit_code, rows
+
+    def test_reject_root_reports_output_when_last_run_is_missing(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        def fail_before_result(_arguments: list[str]) -> int:
+            print("run output: invalid locale")
+            return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("tests.test_runner.main", side_effect=fail_before_result):
+                with self.assertRaisesRegex(
+                    AssertionError, "run output: invalid locale"
+                ):
+                    self._run_reject_root(
+                        Path(directory),
+                        "CREATE TABLE item (id integer PRIMARY KEY);\n",
+                        "SELECT 1;\n",
+                        "INSERT INTO item VALUES (1);\n",
+                    )
+
+    def test_lc_messages_probe_uses_first_accepted_candidate(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.execute.side_effect = [
+            psycopg.errors.InvalidParameterValue("unsupported locale"),
+            None,
+        ]
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+
+        with patch("tests.test_runner.psycopg.connect", return_value=connection):
+            locale_name = self._probe_non_english_lc_messages()
+
+        self.assertEqual("fr_FR.utf8", locale_name)
+        self.assertEqual(2, cursor.execute.call_count)
+
+    def test_lc_messages_probe_fails_if_no_candidate_is_accepted(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        cursor = MagicMock()
+        cursor.__enter__.return_value = cursor
+        cursor.execute.side_effect = psycopg.errors.InvalidParameterValue(
+            "unsupported locale"
+        )
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.cursor.return_value = cursor
+
+        with patch("tests.test_runner.psycopg.connect", return_value=connection):
+            with self.assertRaisesRegex(
+                AssertionError, "No non-English lc_messages locale is available"
+            ):
+                self._probe_non_english_lc_messages()
+
+        self.assertEqual(4, cursor.execute.call_count)
 
     def test_reject_case_rejects_a_trigger_that_names_a_real_constraint(
         self: RunnerIntegrationTests,
@@ -1852,8 +1945,9 @@ class RunnerIntegrationTests(unittest.TestCase):
     def test_reject_case_rejects_a_raise_under_a_non_english_locale(
         self: RunnerIntegrationTests,
     ) -> None:
+        locale_name = self._probe_non_english_lc_messages()
         migration = (
-            "SET lc_messages = 'French_France.1252';\n"
+            f"SET lc_messages = '{locale_name}';\n"
             "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
             "CREATE FUNCTION fake_unique() RETURNS trigger LANGUAGE plpgsql AS $$\n"
             "BEGIN\n"
