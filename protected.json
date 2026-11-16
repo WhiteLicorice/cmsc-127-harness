@@ -71,7 +71,7 @@
     "cases/published/lab3/race-bypass.expected": "62acbd9a749279d2518fcbac4d54a02e2fb4581554af7d9f603daed1b3178114",
     "cases/published/lab3/race-bypass.sql": "0ac541bd3b2bd20e3d17fd9d6731118581417b8887e306035ad2bd557fe33fa0",
     "cases/published/lab3/race-driver.expected": "189a4da2fae7bc34a4e73196325cd23b3d81deb4d5cd69cf3048ef51dabd6eb3",
-    "cases/published/lab3/race-driver.sql": "2f5448bc71d7eebd93dc467bf09c35677d9d63282c519c591a4568e209b0b7ce",
+    "cases/published/lab3/race-driver.sql": "1433d33b82c13e2ffb1f64ce6114fcef734efa8a10b1710eefa2d04f5e542e49",
     "cases/published/lab3/receipt-format-alt.sql": "21d0d2d8dcd2d2fdf95cacdad4d5278d95e6a1c23f773d43b4ca5430bbe7e28b",
     "cases/published/lab3/receipt-format.expected": "56afa76c5892d5e76a546d2f67fdcea3e2c824b0b11fa3aa6a33c55693ab302e",
     "cases/published/lab3/receipt-format.sql": "d6e20f7e7f46b00d2668f95501fd3174b91aa2d35eccaaec94fe3667dc816560",
