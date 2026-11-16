@@ -731,8 +731,9 @@ def _validate_case(
     raw_case: object,
     index: int,
     fault: Callable[[str, tuple[str | int, ...]], FormFault],
-    identifiers: set[str],
+    identifiers: dict[str, str],
     listed: set[Path],
+    source_manifest: str,
     *,
     pair: bool = False,
 ) -> dict[str, object]:
@@ -751,9 +752,13 @@ def _validate_case(
                 f"case {case_id}: replaces must name one published case",
                 (*location, "replaces"),
             )
-    if case_id in identifiers:
-        raise fault(f"case {case_id}: duplicate id", (*location, "id"))
-    identifiers.add(case_id)
+    existing_manifest = identifiers.get(case_id)
+    if existing_manifest is not None:
+        raise fault(
+            f"case {case_id}: duplicate id, already defined in {existing_manifest}",
+            (*location, "id"),
+        )
+    identifiers[case_id] = source_manifest
     stage = case.get("stage")
     if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
         raise fault(
@@ -983,7 +988,7 @@ def _case_role(case: Mapping[str, object]) -> object:
 def _load_pair_manifest(
     root: Path,
     case_root: Path,
-    identifiers: set[str],
+    identifiers: dict[str, str],
     listed: set[Path],
 ) -> list[dict[str, object]]:
     pair_path = case_root / "pair" / "manifest.json"
@@ -1015,6 +1020,7 @@ def _load_pair_manifest(
                 fault,
                 identifiers,
                 listed,
+                source_manifest="cases/pair/manifest.json",
                 pair=True,
             )
         )
@@ -1041,7 +1047,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
     if not isinstance(raw_cases, list):
         raise fault("cases must be a list", ("cases",))
 
-    identifiers: set[str] = set()
+    identifiers: dict[str, str] = {}
     listed: set[Path] = set()
     core_cases: list[dict[str, object]] = []
     for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
@@ -1054,6 +1060,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
                 fault,
                 identifiers,
                 listed,
+                source_manifest="cases/manifest.json",
             )
         )
     published_paths = sorted((case_root / "published").glob("*/manifest.json"))
@@ -1094,6 +1101,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
                     published_fault,
                     identifiers,
                     listed,
+                    source_manifest=published_path.relative_to(root).as_posix(),
                 )
             )
     pair_cases = _load_pair_manifest(root, case_root, identifiers, listed)
@@ -3185,7 +3193,8 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
             warnings += 1
     for group, tally in sorted(groups.items()):
         print(f"Group {group}: {tally['pass']} passed, {tally['fail']} failed")
-    total = counts["pass"] + counts["fail"]
+    checked_total = counts["pass"] + counts["fail"]
+    total = checked_total + skipped
     pyright_line = ""
     for result in results:
         if result.get("kind") != "pyright":
@@ -3213,7 +3222,7 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
         print(f"Stage {stage_number}: {tally['pass']}/{denominator} passed")
     if not stage_counts:
         print(f"Stage {stage}: 0/0 passed")
-    return 0 if counts["fail"] == 0 and total > 0 else 1
+    return 0 if counts["fail"] == 0 and checked_total > 0 else 1
 
 
 def _self_test() -> int:

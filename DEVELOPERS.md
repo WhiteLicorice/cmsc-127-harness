@@ -128,6 +128,7 @@ both tags as superseded. Use `v1.17` or a later tag.
 Harness tags `v1.9` to `v1.12` fail their self-tests on Ubuntu and macOS. No
 fork pins those tags.
 
-For a release, first commit and push the starter `check.sh` with the new runner
-tag. Then compute the hashes for `check.sh` and `.github/workflows/check.yml`.
-Commit those hashes in `protected.json`. Then create the harness tag.
+For a release, first commit and push the starter `check.sh` and
+`.github/workflows/check.yml` with the new runner tag. Then compute both hashes
+from those committed files. Commit the hashes in `protected.json`. Then create
+the harness tag.

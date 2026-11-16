@@ -164,7 +164,7 @@ class ResultOutputTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertIn("Group Lab 1: 1 passed, 0 failed", output.getvalue())
         self.assertIn("Group Lab 2: 0 passed, 1 failed", output.getvalue())
-        self.assertIn("1/2 checks passed, 1 failed, 1 skipped", output.getvalue())
+        self.assertIn("1/3 checks passed, 1 failed, 1 skipped", output.getvalue())
         self.assertIn("Stage 1: 1/1 passed", output.getvalue())
         self.assertIn("Stage 2: 0/1 passed", output.getvalue())
 
@@ -417,6 +417,7 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unlisted case file.*extra.sql"):
                 load_manifest(root)
 
+    def test_published_and_pair_manifests_can_coexist(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_pair(root)
@@ -530,12 +531,6 @@ class ManifestTests(unittest.TestCase):
                 {"lab1/erd", "lab2/published", "pair/later"} <= selected_ids
             )
 
-            pair_manifest = json.loads((pair / "manifest.json").read_text(encoding="utf-8"))
-            pair_manifest["cases"][0]["id"] = "lab2/published"
-            (pair / "manifest.json").write_text(json.dumps(pair_manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, r"lab2/published: duplicate id"):
-                load_manifest(root)
-
     def test_manifest_rejects_orphan_expected_sidecars(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -545,6 +540,50 @@ class ManifestTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "unlisted case sidecar.*orphan.expected"):
+                load_manifest(root)
+
+    def test_duplicate_id_names_existing_manifest(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = root / "cases"
+            published = cases / "published" / "lab2"
+            pair = cases / "pair"
+            published.mkdir(parents=True)
+            pair.mkdir()
+            (cases / "manifest.json").write_text(
+                '{"version":1,"cases":[]}\n', encoding="utf-8"
+            )
+            case = {
+                "id": "lab2/health",
+                "stage": 2,
+                "kind": "query",
+                "file": "cases/published/lab2/health.sql",
+            }
+            (published / "manifest.json").write_text(
+                json.dumps({"version": 1, "cases": [case]}), encoding="utf-8"
+            )
+            (published / "health.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            (published / "health.expected").write_text(
+                '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
+            )
+            pair_case = {
+                **case,
+                "stage": 3,
+                "file": "cases/pair/health.sql",
+            }
+            (pair / "manifest.json").write_text(
+                json.dumps({"version": 1, "cases": [pair_case]}), encoding="utf-8"
+            )
+            (pair / "health.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            (pair / "health.expected").write_text(
+                '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"cases/pair/manifest\.json: line 1.*already defined in "
+                r"cases/published/lab2/manifest\.json",
+            ):
                 load_manifest(root)
 
     def test_stage_selection_keeps_earlier_stages(self: ManifestTests) -> None:
@@ -560,6 +599,48 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(["lab1/list"], [case["id"] for case in select_cases(manifest, 1)])
 
+    def test_published_stage_selector_uses_highest_stage(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            lab3 = root / "cases" / "published" / "lab3"
+            lab3.mkdir(parents=True)
+            (lab3 / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab3/design",
+                                "stage": 3,
+                                "kind": "query",
+                                "file": "cases/published/lab3/design.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (lab3 / "design.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            (lab3 / "design.expected").write_text(
+                '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(root)])
+            self.assertEqual(0, exit_code)
+            self.assertEqual("3\n", output.getvalue())
+
+            empty_root = root / "empty"
+            empty_root.mkdir()
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(empty_root)])
+            self.assertEqual(0, exit_code)
+            self.assertEqual("1\n", output.getvalue())
+
+    def test_later_published_case_replaces_earlier_case(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_pair(root)
@@ -614,31 +695,13 @@ class ManifestTests(unittest.TestCase):
             )
 
             manifest = load_manifest(root)
-            stage_two_ids = {
-                str(case["id"]) for case in select_cases(manifest, 2)
-            }
-            stage_three_ids = {
-                str(case["id"]) for case in select_cases(manifest, 3)
-            }
+            stage_two_ids = {str(case["id"]) for case in select_cases(manifest, 2)}
+            stage_three_ids = {str(case["id"]) for case in select_cases(manifest, 3)}
             self.assertIn("lab1/design", stage_two_ids)
             self.assertNotIn("lab3/design", stage_two_ids)
             self.assertNotIn("lab1/design", stage_three_ids)
             self.assertIn("lab3/design", stage_three_ids)
             self.assertNotIn("pair/future", stage_three_ids)
-
-            output = StringIO()
-            with redirect_stdout(output):
-                exit_code = main(["--select-stage", "--root", str(root)])
-            self.assertEqual(0, exit_code)
-            self.assertEqual("3\n", output.getvalue())
-
-            empty_root = root / "empty"
-            empty_root.mkdir()
-            output = StringIO()
-            with redirect_stdout(output):
-                exit_code = main(["--select-stage", "--root", str(empty_root)])
-            self.assertEqual(0, exit_code)
-            self.assertEqual("1\n", output.getvalue())
 
     def test_bad_json_reports_line_and_column(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
