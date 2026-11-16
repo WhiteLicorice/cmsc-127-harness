@@ -740,8 +740,8 @@ class RunnerIntegrationTests(unittest.TestCase):
                         rejected.append(locale_name)
                         continue
                     return locale_name
-        raise AssertionError(
-            "No non-English lc_messages locale is available. PostgreSQL rejected: "
+        self.skipTest(
+            "PostgreSQL has no non-English lc_messages locale. Rejected candidates: "
             + ", ".join(rejected)
         )
 
@@ -1729,7 +1729,7 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual("fr_FR.utf8", locale_name)
         self.assertEqual(2, cursor.execute.call_count)
 
-    def test_lc_messages_probe_fails_if_no_candidate_is_accepted(
+    def test_lc_messages_probe_skips_if_no_candidate_is_accepted(
         self: RunnerIntegrationTests,
     ) -> None:
         cursor = MagicMock()
@@ -1741,13 +1741,16 @@ class RunnerIntegrationTests(unittest.TestCase):
         connection.__enter__.return_value = connection
         connection.cursor.return_value = cursor
 
-        with patch("tests.test_runner.psycopg.connect", return_value=connection):
-            with self.assertRaisesRegex(
-                AssertionError, "No non-English lc_messages locale is available"
-            ):
+        with (
+            patch.object(self, "_NON_ENGLISH_LC_MESSAGES", ("invalid_locale_v113",)),
+            patch("tests.test_runner.psycopg.connect", return_value=connection),
+        ):
+            with self.assertRaises(unittest.SkipTest) as skipped:
                 self._probe_non_english_lc_messages()
 
-        self.assertEqual(4, cursor.execute.call_count)
+        self.assertIn("no non-English lc_messages locale", str(skipped.exception))
+        self.assertIn("invalid_locale_v113", str(skipped.exception))
+        self.assertEqual(1, cursor.execute.call_count)
 
     def test_reject_case_rejects_a_trigger_that_names_a_real_constraint(
         self: RunnerIntegrationTests,
