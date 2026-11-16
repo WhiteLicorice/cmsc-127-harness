@@ -1245,7 +1245,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _create_database(base_url: str) -> tuple[str, _DbConnection]:
-    name = f"c127_t10p2_{uuid4().hex}"
+    name = f"c127_race_{uuid4().hex}"
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
         with admin.cursor() as cursor:
@@ -1399,7 +1399,7 @@ def _sql_error(
             )
         return None
 
-    probe_role = f"c127_t10p2_{uuid4().hex}_probe"
+    probe_role = f"c127_race_{uuid4().hex}_probe"
     probe_error: tuple[str, str | None, str | None, str | None, str | None] | None = None
     try:
         try:

@@ -718,7 +718,7 @@ class RunnerIntegrationTests(unittest.TestCase):
     def test_role_reject_uses_a_temporary_probe_role(
         self: RunnerIntegrationTests,
     ) -> None:
-        group_role = f"c127_t10p2_group_{uuid4().hex}"
+        group_role = f"c127_race_group_{uuid4().hex}"
         database_url = os.environ["CMSC127_DATABASE_URL"]
         with psycopg.connect(database_url, autocommit=True) as admin:
             with admin.cursor() as cursor:
