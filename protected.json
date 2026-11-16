@@ -97,7 +97,8 @@
     "operations",
     "race",
     "variants",
-    "alt"
+    "alt",
+    ".stage"
   ],
   "optional_files": [
     "cases/published/lab1/business-rules.expected",

@@ -279,6 +279,14 @@ class ManifestTests(unittest.TestCase):
             '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
         )
 
+    def add_published_stage(self: ManifestTests, root: Path, stage: int) -> None:
+        published = root / "cases" / "published" / f"lab{stage}"
+        published.mkdir(parents=True)
+        (published / "manifest.json").write_text(
+            json.dumps({"version": 1, "cases": [{"stage": stage}]}),
+            encoding="utf-8",
+        )
+
     def test_reject_case_requires_one_actual_insert(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -599,7 +607,133 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(["lab1/list"], [case["id"] for case in select_cases(manifest, 1)])
 
-    def test_published_stage_selector_uses_highest_stage(self: ManifestTests) -> None:
+    def test_stage_selector_reads_stage_file(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            self.add_published_stage(root, 2)
+            (root / ".stage").write_text(" \t2 \r\n", encoding="utf-8")
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(root)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("2\n", output.getvalue())
+
+    def test_stage_selector_reports_form_faults(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            self.add_published_stage(root, 2)
+            for stage_text, expected in (
+                (None, "Form fault: .stage is missing."),
+                ("x\n", "Form fault: .stage must be a positive integer."),
+                ("0\n", "Form fault: .stage must be a positive integer."),
+                (
+                    "3\n",
+                    "Form fault: .stage must not exceed the highest published stage (2).",
+                ),
+            ):
+                with self.subTest(stage_text=stage_text):
+                    stage_path = root / ".stage"
+                    if stage_text is None:
+                        stage_path.unlink(missing_ok=True)
+                    else:
+                        stage_path.write_text(stage_text, encoding="utf-8")
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = main(["--select-stage", "--root", str(root)])
+
+                    self.assertEqual(2, exit_code)
+                    self.assertEqual(f"{expected}\n", output.getvalue())
+
+    def test_stage_file_is_an_allowed_student_path(self: ManifestTests) -> None:
+        protected_path = Path(__file__).resolve().parents[1] / "protected.json"
+        protected = json.loads(protected_path.read_text(encoding="utf-8"))
+
+        self.assertIn(".stage", protected["allowed_paths"])
+
+    def test_protected_paths_check_committed_and_untracked_files(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fork"
+            runner_dir = Path(directory) / "runner"
+            pair = root / "cases" / "pair"
+            pair.mkdir(parents=True)
+            runner_dir.mkdir()
+            (root / "check.sh").write_bytes(b"published\n")
+            (pair / "answer.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            (runner_dir / "protected.json").write_text(
+                json.dumps(
+                    {
+                        "files": {
+                            "check.sh": hashlib.sha256(b"published\n").hexdigest()
+                        },
+                        "allowed_paths": ["cases/pair"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "core.autocrlf", "false"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "clean fork",
+                ],
+                check=True,
+            )
+
+            self.assertEqual([], check_protected(root, runner_dir))
+
+            committed_path = root / "committed file.sql"
+            committed_path.write_text("SELECT 2;\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "outside file",
+                ],
+                check=True,
+            )
+
+            errors = check_protected(root, runner_dir)
+            self.assertIn(
+                "file is outside the published writable paths: committed file.sql",
+                errors,
+            )
+
+            untracked_path = root / "untracked file.sql"
+            untracked_path.write_text("SELECT 3;\n", encoding="utf-8")
+            errors = check_protected(root, runner_dir)
+            self.assertIn(
+                "file is outside the published writable paths: untracked file.sql",
+                errors,
+            )
+
+    def test_stage_selector_uses_stage_file_within_published_range(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_pair(root)
@@ -625,6 +759,7 @@ class ManifestTests(unittest.TestCase):
             (lab3 / "design.expected").write_text(
                 '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
             )
+            (root / ".stage").write_text("3\n", encoding="utf-8")
 
             output = StringIO()
             with redirect_stdout(output):
@@ -637,8 +772,8 @@ class ManifestTests(unittest.TestCase):
             output = StringIO()
             with redirect_stdout(output):
                 exit_code = main(["--select-stage", "--root", str(empty_root)])
-            self.assertEqual(0, exit_code)
-            self.assertEqual("1\n", output.getvalue())
+            self.assertEqual(2, exit_code)
+            self.assertEqual("Form fault: .stage is missing.\n", output.getvalue())
 
     def test_later_published_case_replaces_earlier_case(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2651,13 +2786,14 @@ class InvariantTests(unittest.TestCase):
                             published_path: published_hash,
                         },
                         "optional_files": [published_path],
-                        "allowed_paths": ["cases/pair", "migrations", "load.sql"],
+                        "allowed_paths": ["cases/pair", "migrations", "load.sql", ".stage"],
                     }
                 ),
                 encoding="utf-8",
             )
             (root / ".git").mkdir()
             subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".stage").write_text("1\n", encoding="utf-8")
             pair_cases = root / "cases" / "pair"
             pair_cases.mkdir(parents=True)
             (pair_cases / "new.sql").write_text("SELECT 1;\n", encoding="utf-8")

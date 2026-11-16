@@ -1229,6 +1229,25 @@ def published_stage(root: Path) -> int:
     return max(stages, default=1)
 
 
+def selected_published_stage(root: Path) -> int:
+    """Read the selected stage from the student's .stage file."""
+    try:
+        stage = int((root / ".stage").read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        raise ValueError("Form fault: .stage is missing.") from None
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("Form fault: .stage must be a positive integer.") from None
+    if stage < 1:
+        raise ValueError("Form fault: .stage must be a positive integer.")
+    highest_stage = published_stage(root)
+    if stage > highest_stage:
+        raise ValueError(
+            "Form fault: .stage must not exceed the highest published stage "
+            f"({highest_stage})."
+        )
+    return stage
+
+
 def select_cases(manifest: Mapping[str, object], stage: int) -> list[dict[str, object]]:
     """Return all cases through the requested stage."""
     raw_cases_value = manifest.get("cases")
@@ -1499,7 +1518,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _create_database(base_url: str) -> tuple[str, _DbConnection]:
-    name = f"c127_race_{uuid4().hex}"
+    name = f"c127_t18_race_{uuid4().hex}"
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
         with admin.cursor() as cursor:
@@ -2779,22 +2798,19 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
             actual_hash = hashlib.sha256(content).hexdigest()
             if actual_hash != expected_hash:
                 errors.append(f"protected file changed: {relative}")
-    status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+    paths = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=root,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         check=False,
     )
-    if status.returncode != 0:
-        errors.append("Git status could not check new or changed files")
+    if paths.returncode != 0:
+        errors.append("Git could not check tracked and untracked files")
     else:
-        for line in status.stdout.splitlines():
-            if len(line) < 4:
+        for raw_path in paths.stdout.split(b"\0"):
+            if not raw_path:
                 continue
-            relative = line[3:].replace("\\", "/").strip('"')
+            relative = os.fsdecode(raw_path).replace("\\", "/")
             if relative in protected_files:
                 continue
             if any(
@@ -3283,7 +3299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = arguments.root.resolve()
     if arguments.select_stage:
         try:
-            print(published_stage(root))
+            print(selected_published_stage(root))
         except ValueError as error:
             print(str(error))
             return 2
