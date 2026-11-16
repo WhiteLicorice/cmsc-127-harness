@@ -54,16 +54,19 @@ INVARIANT_KINDS = {
 CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 FEATURE_PATTERNS = {
-    "left_join": re.compile(r"\bLEFT(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE),
+    "left_join": re.compile(
+        r"\b(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE
+    ),
     "right_join": re.compile(r"\bRIGHT(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE),
     "full_join": re.compile(r"\bFULL(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE),
     "union": re.compile(r"\bUNION(?:\s+ALL)?\b", re.IGNORECASE),
     "intersect": re.compile(r"\bINTERSECT\b", re.IGNORECASE),
     "except": re.compile(r"\bEXCEPT\b", re.IGNORECASE),
     "self_join": re.compile(
-        r"\bFROM\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)"
+        r"\bFROM\s+(?P<table>(?:[A-Za-z_][A-Za-z0-9_]*\.)?"
+        r"[A-Za-z_][A-Za-z0-9_]*)"
         r"\s+(?:AS\s+)?(?P<first>[A-Za-z_][A-Za-z0-9_]*)\b"
-        r"[\s\S]*?\bJOIN\s+(?P=table)"
+        r"[\s\S]*?(?:\bJOIN\s+(?P=table)|,\s*(?P=table))"
         r"\s+(?:AS\s+)?(?P<second>[A-Za-z_][A-Za-z0-9_]*)\b",
         re.IGNORECASE,
     ),
@@ -77,8 +80,110 @@ FEATURE_PATTERNS = {
         r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*",
         re.IGNORECASE,
     ),
-    "coalesce": re.compile(r"\bCOALESCE\s*\(", re.IGNORECASE),
+    "coalesce": re.compile(
+        r"\b(?:COALESCE|NULLIF)\s*\(|\bIS\s+(?:NOT\s+)?NULL\b",
+        re.IGNORECASE,
+    ),
 }
+FEATURE_LABELS = {
+    "left_join": "outer join",
+    "right_join": "outer join",
+    "full_join": "outer join",
+    "coalesce": "NULL handling",
+    "self_join": "self join",
+    "union": "set operation",
+    "intersect": "set operation",
+    "except": "set operation",
+    "having": "HAVING clause",
+    "where_subquery": "subquery in WHERE",
+    "correlated_subquery": "correlated subquery",
+}
+_DOLLAR_QUOTE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _strip_sql_comments_and_strings(text: str, strip_identifiers: bool = False) -> str:
+    """Replace SQL comments and literals with spaces before text checks."""
+    output = list(text)
+
+    def blank(start: int, end: int) -> None:
+        for position in range(start, end):
+            if output[position] not in "\r\n":
+                output[position] = " "
+
+    index = 0
+    while index < len(text):
+        if text.startswith("--", index):
+            end = text.find("\n", index)
+            if end < 0:
+                end = len(text)
+            blank(index, end)
+            index = end
+            continue
+        if text.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            blank(start, index)
+            continue
+        if text[index] == "'":
+            escaped = (
+                index > 0
+                and text[index - 1] in "eE"
+                and (index == 1 or not (text[index - 2].isalnum() or text[index - 2] == "_"))
+            )
+            start = index - 1 if escaped else index
+            index += 1
+            while index < len(text):
+                if escaped and text[index] == "\\":
+                    index += 2
+                elif text[index] == "'":
+                    if index + 1 < len(text) and text[index + 1] == "'":
+                        index += 2
+                    else:
+                        index += 1
+                        break
+                else:
+                    index += 1
+            blank(start, index)
+            continue
+        if strip_identifiers and text[index] == '"':
+            start = index
+            index += 1
+            while index < len(text):
+                if text[index] == '"':
+                    if index + 1 < len(text) and text[index + 1] == '"':
+                        index += 2
+                    else:
+                        index += 1
+                        break
+                else:
+                    index += 1
+            blank(start, index)
+            continue
+        if text[index] == "$":
+            delimiter = _DOLLAR_QUOTE.match(text, index)
+            if delimiter is not None:
+                closing = text.find(delimiter.group(), delimiter.end())
+                end = len(text) if closing < 0 else closing + len(delimiter.group())
+                blank(index, end)
+                index = end
+                continue
+        index += 1
+    return "".join(output)
+
+
+def _sql_statement_count(text: str) -> int:
+    code = _strip_sql_comments_and_strings(text, strip_identifiers=True)
+    return sum(bool(statement.strip()) for statement in code.split(";"))
 
 
 class _Column(Protocol):
@@ -1226,6 +1331,41 @@ def _view_bypass_rows(
     ]
 
 
+def _referenced_view_definitions(
+    connection: _DbConnection, report_path: Path
+) -> list[str]:
+    query = report_path.read_text(encoding="utf-8")
+    probe = f"cmsc127_feature_{uuid4().hex[:12]}"
+    created = False
+    try:
+        with connection.cursor() as cursor:
+            try:
+                _execute(cursor, f'CREATE TEMP VIEW "{probe}" AS ' + query)
+                created = True
+                _execute(
+                    cursor,
+                    """SELECT DISTINCT pg_get_viewdef(referenced.oid, true)
+                       FROM pg_rewrite AS report_rewrite
+                       JOIN pg_depend AS dependency
+                         ON dependency.classid = 'pg_rewrite'::regclass
+                        AND dependency.objid = report_rewrite.oid
+                        AND dependency.refclassid = 'pg_class'::regclass
+                       JOIN pg_class AS referenced
+                         ON referenced.oid = dependency.refobjid
+                       WHERE report_rewrite.ev_class = %s::regclass
+                         AND referenced.relkind IN ('v', 'm')
+                         AND referenced.relname <> %s""",
+                    (f"pg_temp.{probe}", probe),
+                )
+                return [str(row[0]) for row in cursor.fetchall()]
+            except psycopg.Error:
+                return []
+    finally:
+        if created:
+            with connection.cursor() as cursor:
+                _execute(cursor, f'DROP VIEW IF EXISTS pg_temp."{probe}"')
+
+
 def _sql_error(
     connection: _DbConnection, statement: str
 ) -> tuple[str, str | None, str | None, str | None, str | None] | None:
@@ -1475,20 +1615,24 @@ def _split_warnings(
 
 
 def _warning_columns(rows: Sequence[str]) -> list[str]:
-    """The ``table.column`` named at the start of each warning row."""
+    """The table column or report path named at the start of each warning row."""
     columns: list[str] = []
     for row in rows:
         if not row.lower().startswith(WARNING_LABEL):
             continue
         rest = row[len(WARNING_LABEL) :].strip()
-        column = rest.split()[0].rstrip(".,;:") if rest else ""
-        if column and column not in columns:
-            columns.append(column)
+        subject = rest.split()[0].rstrip(".,;:") if rest else ""
+        if _WARNING_SUBJECT.fullmatch(subject) and subject not in columns:
+            columns.append(subject)
     return columns
 
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _HEADING_MARKS = "*_`"
+_WARNING_SUBJECT = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|"
+    r"reports/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.sql)\Z"
+)
 
 
 def _heading_first_word(title: str) -> str:
@@ -1584,9 +1728,9 @@ def _design_rows(
     for line in warning_body.splitlines():
         heading = _HEADING.match(line)
         if heading is not None:
-            entries.append(
-                (len(heading.group(1)), _heading_first_word(heading.group(2)))
-            )
+            subject = _heading_first_word(heading.group(2))
+            if _WARNING_SUBJECT.fullmatch(subject):
+                entries.append((len(heading.group(1)), subject))
     for column in warning_columns:
         levels = [level for level, word in entries if word == column]
         if not levels:
@@ -1607,6 +1751,7 @@ def _run_case(
     case: Mapping[str, object],
     connection: _DbConnection,
     database_url: str,
+    feature_warning_subjects: Sequence[str] = (),
 ) -> dict[str, object]:
     case_id = str(case["id"])
     case_path = root / str(case["file"])
@@ -1628,7 +1773,7 @@ def _run_case(
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "document":
         body = _as_object(_read_json(case_path), f"case {case_id}")
-        warning_columns: list[str] = []
+        warning_columns = list(feature_warning_subjects)
         warning_sql = body.get("warning_sql")
         if isinstance(warning_sql, str):
             warning_rows = _run_sql_file(connection, root / warning_sql).get("rows")
@@ -1638,7 +1783,8 @@ def _run_case(
                     cells = cast(list[object], row) if isinstance(row, list) else []
                     if cells:
                         texts.append(str(cells[0]))
-                warning_columns = _warning_columns(texts)
+                warning_columns.extend(_warning_columns(texts))
+        warning_columns = list(dict.fromkeys(warning_columns))
         rows = _design_rows(root, body, warning_columns)
         actual = {"columns": ["row"], "rows": [[row] for row in rows]}
         problems = compare_dataset(expected, actual, ordered=ordered)
@@ -1769,9 +1915,20 @@ def _run_case(
             actual = {"columns": [], "rows": []}
             problems = [f"report SQL file is missing: {report_name}"]
         else:
-            actual = _run_sql_file(connection, report_path)
-            actual, warnings = _split_warnings(actual)
-            problems = compare_dataset(expected, actual, ordered=ordered)
+            statement_count = _sql_statement_count(
+                report_path.read_text(encoding="utf-8")
+            )
+            if statement_count != 1:
+                row = (
+                    f"report file {report_name} holds {statement_count} statements; "
+                    "the report must be one query."
+                )
+                actual = {"columns": ["row"], "rows": [[row]]}
+                problems = [row]
+            else:
+                actual = _run_sql_file(connection, report_path)
+                actual, warnings = _split_warnings(actual)
+                problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "view":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         report_name = body.get("report")
@@ -1968,10 +2125,19 @@ def _check_feature(
     connection: _DbConnection,
     item: Mapping[str, object],
     root: Path | None = None,
+    migration_views: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     features = item.get("features")
     if not isinstance(features, list):
         return ["feature invariant needs a features list"]
+    invalid = [
+        f"unsupported SQL feature {feature!r}"
+        for feature in cast(list[object], features)
+        if not isinstance(feature, str) or feature not in FEATURE_PATTERNS
+    ]
+    if invalid:
+        return invalid
+    selected_features = cast(list[str], features)
     file_name = item.get("file")
     if isinstance(file_name, str):
         if root is None:
@@ -1983,16 +2149,24 @@ def _check_feature(
             return [f"feature file must stay inside the repository: {file_name}"]
         if not path.is_file():
             return [f"feature file is missing: {file_name}"]
-        text = path.read_text(encoding="utf-8")
-        errors: list[str] = []
-        for feature in cast(list[object], features):
-            if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
-                errors.append(f"unsupported SQL feature {feature!r}")
-            elif FEATURE_PATTERNS[feature].search(text) is None:
-                errors.append(
-                    f"file {file_name} does not show required feature {feature}"
-                )
-        return errors
+        feature_text = _strip_sql_comments_and_strings(
+            path.read_text(encoding="utf-8")
+        )
+        warnings: list[str] = []
+        for feature in selected_features:
+            if FEATURE_PATTERNS[feature].search(feature_text) is None:
+                found_in_view = False
+                if feature == "coalesce":
+                    definitions = _referenced_view_definitions(connection, path)
+                    view_text = _strip_sql_comments_and_strings("\n".join(definitions))
+                    found_in_view = FEATURE_PATTERNS[feature].search(view_text) is not None
+                if not found_in_view:
+                    label = FEATURE_LABELS.get(feature, feature.replace("_", " "))
+                    warnings.append(
+                        f"warning: {file_name} shows no {label}. "
+                        "Explain your query under Checker Warnings in DESIGN.md."
+                    )
+        return warnings
     view = item.get("view")
     schema = item.get("schema", "public")
     if not isinstance(view, str) or not isinstance(schema, str):
@@ -2011,14 +2185,9 @@ def _check_feature(
         row = cursor.fetchone()
     if row is None or not isinstance(row[0], str):
         return [f"required view {view} does not exist"]
-    definition = row[0]
-    errors = []
-    for feature in cast(list[object], features):
-        if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
-            errors.append(f"unsupported SQL feature {feature!r}")
-        elif FEATURE_PATTERNS[feature].search(definition) is None:
-            errors.append(f"view {view} does not show required feature {feature}")
-    return errors
+    if migration_views is not None and (schema, view) not in migration_views:
+        return [f"view {view} was not created by a migration"]
+    return []
 
 
 def _catalog_indexes(connection: _DbConnection) -> set[tuple[str, str]]:
@@ -2030,6 +2199,19 @@ def _catalog_indexes(connection: _DbConnection) -> set[tuple[str, str]]:
                JOIN pg_namespace AS namespace_entry
                  ON namespace_entry.oid = class_entry.relnamespace
                WHERE class_entry.relkind = 'i'""",
+        )
+        return {(str(row[0]), str(row[1])) for row in cursor.fetchall()}
+
+
+def _catalog_views(connection: _DbConnection) -> set[tuple[str, str]]:
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            """SELECT namespace_entry.nspname, class_entry.relname
+               FROM pg_class AS class_entry
+               JOIN pg_namespace AS namespace_entry
+                 ON namespace_entry.oid = class_entry.relnamespace
+               WHERE class_entry.relkind IN ('v', 'm')""",
         )
         return {(str(row[0]), str(row[1])) for row in cursor.fetchall()}
 
@@ -2554,6 +2736,7 @@ def _run_invariants(
     runner_dir: Path,
     stage: int,
     migration_indexes: set[tuple[str, str]],
+    migration_views: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, object]]:
     raw_invariants = manifest.get("invariants", [])
     if not isinstance(raw_invariants, list):
@@ -2567,6 +2750,7 @@ def _run_invariants(
         invariant_id = str(item.get("id", f"invariant-{index}"))
         kind = item.get("kind")
         summary: dict[str, object] = {}
+        warnings: list[str] = []
         try:
             if kind == "work_sql":
                 files = item.get("files")
@@ -2593,7 +2777,19 @@ def _run_invariants(
             elif kind == "normal_form":
                 problems = _check_normal_form(connection, item)
             elif kind == "feature":
-                problems = _check_feature(connection, item, root)
+                feature_rows = _check_feature(connection, item, root, migration_views)
+                if isinstance(item.get("file"), str):
+                    plain, warnings = _split_warnings(
+                        {"rows": [[row] for row in feature_rows]}
+                    )
+                    raw_rows = plain.get("rows")
+                    problems = [
+                        str(cast(list[object], row)[0])
+                        for row in cast(list[object], raw_rows)
+                        if isinstance(row, list) and row
+                    ]
+                else:
+                    problems = feature_rows
             elif kind == "index":
                 problems = _check_index(root, connection, item, migration_indexes)
             elif kind == "backup_restore":
@@ -2618,18 +2814,19 @@ def _run_invariants(
         )
         actual: dict[str, object] = {"differences": problems}
         actual.update(summary)
-        results.append(
-            {
-                "id": invariant_id,
-                "kind": str(kind),
-                "stage": invariant_stage,
-                "group": str(item.get("group", "invariants")),
-                "status": status,
-                "expected": item,
-                "actual": actual,
-                "differences": problems,
-            }
-        )
+        result: dict[str, object] = {
+            "id": invariant_id,
+            "kind": str(kind),
+            "stage": invariant_stage,
+            "group": str(item.get("group", "invariants")),
+            "status": status,
+            "expected": item,
+            "actual": actual,
+            "differences": problems,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        results.append(result)
     return results
 
 
@@ -2804,6 +3001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             _apply_migrations(root, connection)
             migration_indexes = _catalog_indexes(connection)
+            migration_views = _catalog_views(connection)
             setup = _run_pair(root, ["prepare"], scratch_url)
             if setup.returncode != 0:
                 results.append(
@@ -2836,17 +3034,57 @@ def main(argv: Sequence[str] | None = None) -> int:
                         }
                     results.append(case_result)
                 if arguments.case_id is None:
-                    results.extend(
-                        _run_invariants(
-                            root,
-                            manifest,
-                            connection,
-                            scratch_url,
-                            runner_dir,
-                            arguments.stage,
-                            migration_indexes,
-                        )
+                    invariant_results = _run_invariants(
+                        root,
+                        manifest,
+                        connection,
+                        scratch_url,
+                        runner_dir,
+                        arguments.stage,
+                        migration_indexes,
+                        migration_views,
                     )
+                    feature_warning_rows: list[str] = []
+                    for invariant_result in invariant_results:
+                        if invariant_result.get("kind") != "feature":
+                            continue
+                        raw_warnings = invariant_result.get("warnings")
+                        if isinstance(raw_warnings, list):
+                            feature_warning_rows.extend(
+                                str(warning) for warning in cast(list[object], raw_warnings)
+                            )
+                    feature_warning_subjects = _warning_columns(feature_warning_rows)
+                    if feature_warning_subjects:
+                        for case_index, case in enumerate(selected):
+                            if case.get("kind") != "document":
+                                continue
+                            try:
+                                results[case_index] = _run_case(
+                                    root,
+                                    case,
+                                    connection,
+                                    scratch_url,
+                                    feature_warning_subjects,
+                                )
+                            except (
+                                OSError,
+                                ValueError,
+                                psycopg.Error,
+                                subprocess.SubprocessError,
+                            ) as error:
+                                results[case_index] = {
+                                    "id": case["id"],
+                                    "kind": case.get("kind"),
+                                    "stage": case.get("stage"),
+                                    "group": str(
+                                        case.get("group", f"stage-{case.get('stage')}")
+                                    ),
+                                    "status": "fail",
+                                    "expected": "case completes without a runner error",
+                                    "actual": str(error),
+                                    "differences": [str(error)],
+                                }
+                    results.extend(invariant_results)
         finally:
             connection.close()
     except (OSError, ValueError, psycopg.Error) as error:

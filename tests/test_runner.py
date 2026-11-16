@@ -51,6 +51,10 @@ check_feature = cast(
     Callable[[object, Mapping[str, object], Path | None], list[str]],
     getattr(runner, "_check_feature"),
 )
+run_case = cast(
+    Callable[[Path, Mapping[str, object], object, str], dict[str, object]],
+    getattr(runner, "_run_case"),
+)
 check_index = cast(
     Callable[[Path, object, Mapping[str, object], set[tuple[str, str]]], list[str]],
     getattr(runner, "_check_index"),
@@ -80,7 +84,15 @@ split_warnings = cast(
 )
 run_invariants = cast(
     Callable[
-        [Path, Mapping[str, object], object, str, Path, int, set[tuple[str, str]]],
+        [
+            Path,
+            Mapping[str, object],
+            object,
+            str,
+            Path,
+            int,
+            set[tuple[str, str]],
+        ],
         list[dict[str, object]],
     ],
     getattr(runner, "_run_invariants"),
@@ -580,6 +592,22 @@ class DesignRecordTests(unittest.TestCase):
 
             self.assertEqual(
                 [], design_rows(root, self.CONFIG, ["section.assistant_id"])
+            )
+
+    def test_a_report_path_warning_heading_passes(self: DesignRecordTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(
+                root,
+                "# Design\n\n## Tables\n\n- student.\n\n"
+                "## Keys and Links\n\n- charge.\n\n"
+                "## Checker Warnings\n\n"
+                "### `reports/room_assignments.sql`\n\n"
+                "The query uses CASE for NULL handling.\n",
+            )
+
+            self.assertEqual(
+                [], design_rows(root, self.CONFIG, ["reports/room_assignments.sql"])
             )
 
     def test_a_trailing_annotation_on_the_entry_heading_passes(
@@ -1128,6 +1156,190 @@ class RunnerIntegrationTests(unittest.TestCase):
                 actual_rows,
             )
 
+    def test_view_must_come_from_a_migration(self: RunnerIntegrationTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = root / "cases"
+            pair = cases / "pair"
+            migrations = root / "migrations"
+            pair.mkdir(parents=True)
+            migrations.mkdir()
+            (cases / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab2/ready",
+                                "stage": 2,
+                                "kind": "query",
+                                "file": "cases/ready.sql",
+                            }
+                        ],
+                        "invariants": [
+                            {
+                                "id": "lab2/view",
+                                "stage": 2,
+                                "kind": "feature",
+                                "schema": "public",
+                                "view": "item_roster",
+                                "features": [],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pair / "manifest.json").write_text(
+                json.dumps({"version": 1, "cases": []}), encoding="utf-8"
+            )
+            (cases / "ready.sql").write_text("SELECT true AS ready;\n", encoding="utf-8")
+            (cases / "ready.expected").write_text(
+                '{"columns":["ready"],"rows":[[true]]}\n', encoding="utf-8"
+            )
+            (root / "load.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY);\n"
+                "CREATE VIEW item_roster AS SELECT id FROM item;\n",
+                encoding="utf-8",
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'if [ "$1" = prepare ]; then\n'
+                '  psql "$CMSC127_DATABASE_URL" --set ON_ERROR_STOP=1 --file load.sql\n'
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["2", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn(
+                "item_roster was not created by a migration", output.getvalue()
+            )
+
+            (migrations / "0001_create_item_roster.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY);\n"
+                "CREATE VIEW item_roster AS SELECT id FROM item;\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1);\n", encoding="utf-8"
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["2", "--root", str(root)])
+            self.assertEqual(0, exit_code, output.getvalue())
+
+    def test_feature_warning_costs_nothing_but_needs_a_design_heading(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = root / "cases"
+            pair = cases / "pair"
+            reports = root / "reports"
+            pair.mkdir(parents=True)
+            reports.mkdir()
+            (cases / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab2/outer-join-output",
+                                "stage": 2,
+                                "kind": "report",
+                                "file": "cases/outer.json",
+                            },
+                            {
+                                "id": "lab1/design",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/design.json",
+                            },
+                        ],
+                        "invariants": [
+                            {
+                                "id": "lab2/outer-join",
+                                "stage": 2,
+                                "kind": "feature",
+                                "group": "SQL Craft",
+                                "file": "reports/outer.sql",
+                                "features": ["left_join"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pair / "manifest.json").write_text(
+                json.dumps({"version": 1, "cases": []}), encoding="utf-8"
+            )
+            (cases / "outer.json").write_text(
+                json.dumps({"report": "reports/outer.sql"}), encoding="utf-8"
+            )
+            (cases / "outer.expected").write_text(
+                '{"columns":["one"],"rows":[[1]]}\n', encoding="utf-8"
+            )
+            (cases / "design.json").write_text(
+                json.dumps(
+                    {
+                        "file": "DESIGN.md",
+                        "headings": ["Tables", "Keys and Links", "Checker Warnings"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "design.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (reports / "outer.sql").write_text("SELECT 1 AS one;\n", encoding="utf-8")
+            (root / "migrations").mkdir()
+            (root / "load.sql").write_text("", encoding="utf-8")
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'if [ "$1" = prepare ]; then\n'
+                '  psql "$CMSC127_DATABASE_URL" --set ON_ERROR_STOP=1 --file load.sql\n'
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            design_path = root / "DESIGN.md"
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\n"
+                "### reports/outer.sql\n\n"
+                "This report uses a CASE expression for missing room values.\n",
+                encoding="utf-8",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["2", "--root", str(root)])
+            self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("warning: reports/outer.sql shows no outer join", output.getvalue())
+            self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["2", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn("DESIGN.md has no", output.getvalue())
+            self.assertIn("reports/outer.sql", output.getvalue())
+            self.assertIn("the checker warning is not explained", output.getvalue())
+
     def test_reject_case_requires_a_real_constraint(
         self: RunnerIntegrationTests,
     ) -> None:
@@ -1649,23 +1861,19 @@ class InvariantTests(unittest.TestCase):
         )
         self.assertTrue(any("must share one table" in error for error in split_errors))
 
-    def test_feature_check_reads_a_view_definition(self: InvariantTests) -> None:
+    def test_feature_check_does_not_require_a_join_in_the_view(
+        self: InvariantTests,
+    ) -> None:
         view = f"t13_feature_{uuid4().hex[:8]}"
         with self.connection.cursor() as cursor:
-            cursor.execute(f'CREATE TABLE "{self.schema}".left_row (id integer)')
-            cursor.execute(f'CREATE TABLE "{self.schema}".right_row (id integer)')
+            cursor.execute(f'CREATE TABLE "{self.schema}".room (id integer)')
             cursor.execute(
                 f'CREATE VIEW "{self.schema}"."{view}" AS '
-                f'SELECT a.id FROM "{self.schema}".left_row AS a '
-                f'LEFT JOIN "{self.schema}".right_row AS b ON b.id = a.id'
+                f'SELECT id FROM "{self.schema}".room'
             )
         item = {"schema": self.schema, "view": view, "features": ["left_join"]}
 
         self.assertEqual([], check_feature(self.connection, item, None))
-        errors = check_feature(
-            self.connection, {"schema": self.schema, "view": view, "features": ["union"]}, None
-        )
-        self.assertTrue(any("does not show required feature union" in error for error in errors))
 
     def test_index_check_requires_the_named_plan_index(self: InvariantTests) -> None:
         index = f"t13_index_{uuid4().hex[:8]}"
@@ -1770,9 +1978,198 @@ class InvariantTests(unittest.TestCase):
                 {"file": "reports/outer.sql", "features": ["intersect"]},
                 root,
             )
-            self.assertTrue(
-                any("does not show required feature intersect" in error for error in errors),
-                errors,
+            self.assertEqual(1, len(errors), errors)
+            self.assertTrue(errors[0].startswith("warning:"), errors)
+
+    def test_outer_join_check_accepts_each_join_direction(self: InvariantTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            report = reports / "outer.sql"
+            item = {"file": "reports/outer.sql", "features": ["left_join"]}
+            for query in (
+                "SELECT 1 FROM room r RIGHT JOIN section s ON s.id = r.id;",
+                "SELECT 1 FROM room r FULL OUTER\nJOIN section s ON s.id = r.id;",
+                "SELECT 1 FROM room r LEFT OUTER JOIN section s ON s.id = r.id;",
+            ):
+                report.write_text(query, encoding="utf-8")
+                self.assertEqual([], check_feature(self.connection, item, root), query)
+
+    def test_null_handling_check_accepts_the_taught_forms(self: InvariantTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            report = reports / "nulls.sql"
+            item = {"file": "reports/nulls.sql", "features": ["coalesce"]}
+            for query in (
+                "SELECT CASE WHEN label IS NULL THEN 'missing' ELSE label END FROM item;",
+                "SELECT label FROM item WHERE label IS NULL;",
+                "SELECT label FROM item WHERE label IS NOT NULL;",
+                "SELECT NULLIF(label, '') FROM item;",
+                "SELECT COALESCE(label, '') FROM item;",
+            ):
+                report.write_text(query, encoding="utf-8")
+                self.assertEqual([], check_feature(self.connection, item, root), query)
+
+    def test_null_handling_check_reads_a_view_used_by_the_report(
+        self: InvariantTests,
+    ) -> None:
+        view = f"t13_null_view_{uuid4().hex[:8]}"
+        with self.connection.cursor() as cursor:
+            cursor.execute(f'CREATE TABLE "{self.schema}".room_name (label text)')
+            cursor.execute(
+                f'CREATE VIEW "{self.schema}"."{view}" AS '
+                f'SELECT COALESCE(label, \'Unassigned\') AS room_name '
+                f'FROM "{self.schema}".room_name'
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "nulls.sql").write_text(
+                f'SELECT room_name FROM "{self.schema}"."{view}";\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                [],
+                check_feature(
+                    self.connection,
+                    {"file": "reports/nulls.sql", "features": ["coalesce"]},
+                    root,
+                ),
+            )
+
+    def test_feature_checks_ignore_comments_and_string_literals(
+        self: InvariantTests,
+    ) -> None:
+        phrases = {
+            "left_join": "LEFT JOIN",
+            "union": "UNION",
+            "intersect": "INTERSECT",
+            "except": "EXCEPT",
+            "self_join": "FROM item a JOIN item b ON true",
+            "having": "HAVING count(*) > 1",
+            "where_subquery": "WHERE id IN (SELECT id FROM other)",
+            "correlated_subquery": "(SELECT id WHERE a.id = b.id)",
+            "coalesce": "COALESCE(label, '')",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            report = reports / "feature.sql"
+            for feature, phrase in phrases.items():
+                item = {"file": "reports/feature.sql", "features": [feature]}
+                for text in (
+                    f"SELECT '{phrase}';\n",
+                    f"-- {phrase}\nSELECT 1;\n",
+                    f"/* {phrase} */ SELECT 1;\n",
+                    f"/* outer /* {phrase} */ */ SELECT 1;\n",
+                ):
+                    with self.subTest(feature=feature, text=text):
+                        report.write_text(text, encoding="utf-8")
+                        warnings = check_feature(self.connection, item, root)
+                        self.assertEqual(1, len(warnings), warnings)
+                        self.assertTrue(warnings[0].startswith("warning:"), warnings)
+
+    def test_feature_miss_warns_and_passes_the_invariant(self: InvariantTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "outer.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            results = run_invariants(
+                root,
+                {
+                    "invariants": [
+                        {
+                            "id": "lab2/outer-join",
+                            "kind": "feature",
+                            "stage": 2,
+                            "group": "SQL Craft",
+                            "file": "reports/outer.sql",
+                            "features": ["left_join"],
+                        }
+                    ]
+                },
+                self.connection,
+                "",
+                root,
+                2,
+                set(),
+            )
+
+            self.assertEqual("pass", results[0]["status"])
+            self.assertEqual([], results[0]["differences"])
+            self.assertEqual(
+                [
+                    "warning: reports/outer.sql shows no outer join. "
+                    "Explain your query under Checker Warnings in DESIGN.md."
+                ],
+                results[0]["warnings"],
+            )
+
+    def test_self_join_check_accepts_comma_and_qualified_tables(
+        self: InvariantTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            reports.mkdir()
+            report = reports / "self.sql"
+            item = {"file": "reports/self.sql", "features": ["self_join"]}
+            for query in (
+                "SELECT a.id FROM item a, item b WHERE a.id <> b.id;",
+                "SELECT a.id FROM public.item AS a JOIN public.item AS b ON a.id = b.id;",
+            ):
+                report.write_text(query, encoding="utf-8")
+                self.assertEqual([], check_feature(self.connection, item, root), query)
+
+    def test_report_case_requires_one_statement_and_accepts_trailing_comments(
+        self: InvariantTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reports = root / "reports"
+            cases = root / "cases"
+            reports.mkdir()
+            cases.mkdir()
+            case_path = cases / "report.json"
+            case_path.write_text(
+                json.dumps({"report": "reports/report.sql"}), encoding="utf-8"
+            )
+            (cases / "report.expected").write_text(
+                '{"columns":["one"],"rows":[["a;b"]]}\n', encoding="utf-8"
+            )
+            report_path = reports / "report.sql"
+            report_path.write_text(
+                "SELECT 'a;b' AS one; -- tail ;\n/* comment ; */\n",
+                encoding="utf-8",
+            )
+            case = {
+                "id": "lab2/report",
+                "kind": "report",
+                "file": "cases/report.json",
+                "group": "Query Correctness",
+            }
+
+            passing = run_case(root, case, self.connection, "")
+            self.assertEqual("pass", passing["status"])
+
+            report_path.write_text(
+                "SELECT 'a;b' AS one; SELECT 2 AS two;\n", encoding="utf-8"
+            )
+            failing = run_case(root, case, self.connection, "")
+            self.assertEqual("fail", failing["status"])
+            actual = cast(dict[str, object], failing["actual"])
+            rows = cast(list[list[object]], actual["rows"])
+            self.assertEqual(
+                [["report file reports/report.sql holds 2 statements; "
+                  "the report must be one query."]],
+                rows,
             )
 
     def test_protected_files_allow_pair_cases_and_reject_changes(
