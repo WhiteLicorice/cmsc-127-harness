@@ -1,7 +1,7 @@
 {
   "files": {
     ".gitattributes": "6cba89925fd49122ba2dd48b3ec309676bea77482d9f52925c8e1939d23ee5d6",
-    ".github/workflows/check.yml": "245abb2e167fcf6d5e8297fb9f2e75381163edce386b59bed0aa10a6b7e0f2aa",
+    ".github/workflows/check.yml": "8a327a4b6a3e7eab8888c82ec49d4e7193b9bf034a9db2e75d51bee921ac29e3",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
     "check.sh": "3be579b131868b5e0ac227d870c50e0f387577a8fe702a6e4091133661f03699",
