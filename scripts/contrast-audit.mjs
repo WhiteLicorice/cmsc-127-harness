@@ -285,7 +285,19 @@ try {
     for (const view of views) {
       if (view !== "initial") {
         await page.getByRole("button", { name: view, exact: true }).click();
-        await page.waitForTimeout(view === "Schema" ? 1800 : 500);
+        // Every panel paints "<p>Loading…</p>" until its fetch returns. A fixed
+        // sleep measures whichever half arrived, so the element count drifts
+        // between runs. Wait for the panel to replace the loading line, then
+        // let the layout settle before measuring.
+        await page.waitForFunction(
+          () => {
+            const content = document.querySelector("#panel-content");
+            if (content === null) return false;
+            return !(content.textContent ?? "").includes("Loading…");
+          },
+          undefined,
+          { timeout: 15_000 },
+        );
         if (view === "Schema") {
           await page.waitForFunction(
             () => {
@@ -295,8 +307,8 @@ try {
             undefined,
             { timeout: 15_000 },
           );
-          await page.waitForTimeout(500);
         }
+        await page.waitForTimeout(150);
       }
       const result = await page.evaluate(auditPage);
       report.themes[theme][view] = result.rows.length;
