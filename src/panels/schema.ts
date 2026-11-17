@@ -99,8 +99,8 @@ export function buildSchemaView(input: SchemaInput): SchemaView {
 export function renderSchema(input: SchemaInput): string {
   const view = buildSchemaView(input);
   const erd = input.erdText || "No Mermaid erDiagram block appears in README.md.";
-  const differenceList = view.differences.map((difference) => `<li>${escapeHtml(difference)}</li>`).join("");
+  const differenceList = view.differences.map((difference) => `<li class="state-fail">${escapeHtml(difference)}</li>`).join("");
   const relationshipList = view.relationships.map((relationship) => `<li>${escapeHtml(relationship)}</li>`).join("");
   const constraintList = view.constraints.map((constraint) => `<li>${escapeHtml(constraint)}</li>`).join("");
-  return `<div class="schema-diagrams"><section><h2>ERD from README.md</h2>${input.erdText ? `<pre class="mermaid">${escapeHtml(erd)}</pre>` : `<p>${escapeHtml(erd)}</p>`}</section><section><h2>Live schema</h2><pre${input.tables.length > 0 ? ' class="mermaid"' : ""}>${escapeHtml(view.liveDiagram)}</pre></section></div><section><h2>Differences</h2><ul>${differenceList || "<li>No differences found.</li>"}</ul></section><section><h2>Relationships</h2><ul>${relationshipList || "<li>No foreign keys found.</li>"}</ul></section><section><h2>Columns and constraints</h2><ul>${constraintList || "<li>No constraints found.</li>"}</ul></section>`;
+  return `<div class="schema-diagrams"><section><h2>ERD from README.md</h2>${input.erdText ? `<pre class="mermaid">${escapeHtml(erd)}</pre>` : `<p>${escapeHtml(erd)}</p>`}</section><section><h2>Live schema</h2><pre${input.tables.length > 0 ? ' class="mermaid"' : ""}>${escapeHtml(view.liveDiagram)}</pre></section></div><section><h2>Differences</h2><ul>${differenceList || '<li class="state-pass">No differences found.</li>'}</ul></section><section><h2>Relationships</h2><ul>${relationshipList || "<li>No foreign keys found.</li>"}</ul></section><section><h2>Columns and constraints</h2><ul>${constraintList || "<li>No constraints found.</li>"}</ul></section>`;
 }

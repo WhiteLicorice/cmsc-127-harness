@@ -5,6 +5,7 @@ import io
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import socket
@@ -245,7 +246,15 @@ class HarnessPageTests(unittest.TestCase):
             with urllib.request.urlopen(f"{base_url}/", timeout=3) as response:
                 page = response.read().decode("utf-8")
             self.assertIn("/vendor/mermaid.min.js", page)
-            self.assertNotIn("https://", page)
+            # The page loads every asset from its own folder. The byline link is
+            # the one off-origin reference, and a reader clicks it on purpose.
+            references = re.findall(r'(?:src|href)="([^"]+)"', page)
+            external = [
+                reference
+                for reference in references
+                if reference.startswith(("http://", "https://", "//"))
+            ]
+            self.assertEqual(external, ["https://github.com/WhiteLicorice/cmsc-127-harness"])
 
     def test_page_assets_contain_compiled_modules(self) -> None:
         self.assertTrue((ASSET_ROOT / "app.js").is_file())

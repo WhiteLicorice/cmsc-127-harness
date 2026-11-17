@@ -46,6 +46,17 @@ export function describeChecks(result: RunnerResult): CheckView[] {
   }));
 }
 
+// The status word carries the meaning. The class adds colour and weight.
+function resultClass(status: string): string {
+  if (status === "pass") {
+    return "result result-pass";
+  }
+  if (status === "fail") {
+    return "result result-fail";
+  }
+  return "result result-skip";
+}
+
 export function renderChecks(result: RunnerResult): string {
   const entries = describeChecks(result);
   if (entries.length === 0) {
@@ -62,7 +73,7 @@ export function renderChecks(result: RunnerResult): string {
         : entry.warnings.length > 0
           ? `<pre>${escapeHtml(entry.warnings.join("\n"))}</pre>`
           : "";
-    return `<tr><td>${escapeHtml(entry.id)}</td><td>${escapeHtml(entry.kind)}</td><td>${entry.stage ?? ""}</td><td>${escapeHtml(entry.status)}</td><td>${expected}</td><td>${actual}</td></tr>`;
+    return `<tr><td>${escapeHtml(entry.id)}</td><td>${escapeHtml(entry.kind)}</td><td>${entry.stage ?? ""}</td><td class="${resultClass(entry.status)}">${escapeHtml(entry.status)}</td><td>${expected}</td><td>${actual}</td></tr>`;
   }).join("");
   const summary = `${result.passed ?? 0} passed, ${result.failed ?? 0} failed, ${result.skipped ?? 0} skipped, ${result.warnings ?? 0} warnings`;
   return `<p>${escapeHtml(summary)}</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Case</th><th>Kind</th><th>Stage</th><th>Result</th><th>Expected</th><th>Actual</th></tr></thead><tbody>${rows}</tbody></table></div>`;

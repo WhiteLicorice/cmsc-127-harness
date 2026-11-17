@@ -7,6 +7,7 @@ import { type StatusData } from "./panels/status.js";
 declare global {
   interface Window {
     mermaid?: {
+      initialize: (config: Record<string, unknown>) => void;
       run: (options?: { querySelector?: string }) => Promise<void>;
     };
   }
@@ -83,10 +84,42 @@ function updateSchemas(response: TablesResponse): void {
   schemaSelect.replaceChildren(...options);
 }
 
+function configureMermaid(): void {
+  if (!window.mermaid) {
+    return;
+  }
+  const styles = getComputedStyle(document.documentElement);
+  const token = (name: string): string => styles.getPropertyValue(name).trim();
+  const dark = styles.colorScheme === "dark";
+  window.mermaid.initialize({
+    startOnLoad: false,
+    theme: "base",
+    themeVariables: {
+      darkMode: dark,
+      background: token("--surface"),
+      primaryColor: token("--surface-2"),
+      primaryTextColor: token("--text"),
+      primaryBorderColor: token("--border"),
+      secondaryColor: token("--surface"),
+      tertiaryColor: token("--code-bg"),
+      mainBkg: token("--surface-2"),
+      nodeBorder: token("--border"),
+      attributeBackgroundColorOdd: token("--surface"),
+      attributeBackgroundColorEven: token("--surface-2"),
+      lineColor: token("--border"),
+      textColor: token("--text"),
+      titleColor: token("--text"),
+      edgeLabelBackground: token("--surface"),
+      fontFamily: styles.fontFamily,
+    },
+  });
+}
+
 async function drawMermaid(): Promise<void> {
   if (!window.mermaid) {
     return;
   }
+  configureMermaid();
   try {
     await window.mermaid.run({ querySelector: ".mermaid" });
   } catch {
@@ -230,6 +263,11 @@ schemaSelect.addEventListener("change", () => {
   renderCurrentPanel();
   void pollTables();
   void refreshActivePanel();
+});
+
+document.addEventListener("cmsc127:theme", () => {
+  renderedMarkup = "";
+  renderCurrentPanel();
 });
 
 buildPanelButtons();
