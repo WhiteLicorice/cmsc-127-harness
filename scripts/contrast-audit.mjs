@@ -73,10 +73,12 @@ const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.ex
 // opaque layer makes the two colours equal and the ratio 1.
 //
 // A pseudo-element is a cover only where it paints: its rectangle is derived
-// from the originating element's border box and the pseudo's computed offsets
-// and size, and the layer counts only when that rectangle contains the sampled
-// point. A gradient contributes its highest-alpha colour stop; a url() image is
-// opaque, which is a named limit.
+// from the originating element's border box, the pseudo's computed offsets,
+// padding, border, and transform (including the translate/rotate/scale
+// longhands), and the layer counts only when the mapped rectangle contains the
+// sampled point. Each background-image layer stands alone: a layer whose stops
+// agree contributes its colour, a layer whose stops differ is a warning, and a
+// url() image is opaque.
 const VISIBILITY_RULE = `
   const parse = (value) => {
     if (!value || value === "none" || value === "transparent") return null;
@@ -142,53 +144,80 @@ const VISIBILITY_RULE = `
     const number = Number.parseFloat(value);
     return Number.isFinite(number) ? number : null;
   };
-  const imageLayer = (value) => {
-    if (!value || value === "none") return null;
-    if (value.includes("url(")) {
-      return { colour: { r: 0, g: 0, b: 0, a: 1 }, gradient: value, varying: false, highest: null };
+  // Split a computed background-image into its top-level layers. A comma
+  // inside a function belongs to that function, not to the layer list.
+  const splitLayers = (value) => {
+    const layers = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index];
+      if (character === "(") depth += 1;
+      else if (character === ")") depth = Math.max(0, depth - 1);
+      else if (character === "," && depth === 0) {
+        layers.push(value.slice(start, index).trim());
+        start = index + 1;
+      }
     }
-    const stops = [];
-    const pattern = /(rgba?|oklch|oklab|lab|lch|color|color-mix)\\(([^)]*)\\)/g;
-    let match = pattern.exec(value);
-    while (match !== null) {
-      const colour = resolveColour(match[0]);
-      if (colour !== null) stops.push(colour);
-      match = pattern.exec(value);
-    }
-    if (stops.length === 0) return null;
-    const first = stops[0];
-    const same = stops.every((stop) => Math.round(stop.r) === Math.round(first.r)
-      && Math.round(stop.g) === Math.round(first.g)
-      && Math.round(stop.b) === Math.round(first.b)
-      && Math.abs(stop.a - first.a) < 0.002);
-    const highest = stops.reduce((best, stop) => (stop.a > best.a ? stop : best));
-    return { colour: same ? first : null, gradient: value, varying: !same, highest };
+    layers.push(value.slice(start).trim());
+    return layers.filter((layer) => layer.length > 0);
   };
-  const layerColour = (style) => {
-    const image = imageLayer(style.backgroundImage);
-    const colour = resolveColour(style.backgroundColor);
-    let base = null;
-    let warning = null;
-    if (image !== null && image.varying) {
-      warning = { gradient: image.gradient, highest: image.highest };
-      base = colour;
-    } else if (image !== null && image.colour !== null) {
-      base = colour === null
-        ? image.colour
-        : {
-            r: image.colour.r * image.colour.a + colour.r * (1 - image.colour.a),
-            g: image.colour.g * image.colour.a + colour.g * (1 - image.colour.a),
-            b: image.colour.b * image.colour.a + colour.b * (1 - image.colour.a),
-            a: image.colour.a + colour.a * (1 - image.colour.a),
-          };
-    } else {
-      base = colour;
+  // Each layer is judged apart. A layer whose stops agree contributes its
+  // colour; a layer whose stops differ contributes a warning and no colour; a
+  // url() layer is opaque.
+  const imageLayers = (value) => {
+    if (!value || value === "none") return [];
+    const layers = [];
+    for (const layer of splitLayers(value)) {
+      if (layer.includes("url(")) {
+        layers.push({ colour: { r: 0, g: 0, b: 0, a: 1 }, gradient: layer, varying: false, highest: null });
+        continue;
+      }
+      const stops = [];
+      const pattern = /(rgba?|oklch|oklab|lab|lch|color|color-mix)\\(([^)]*)\\)/g;
+      let match = pattern.exec(layer);
+      while (match !== null) {
+        const colour = resolveColour(match[0]);
+        if (colour !== null) stops.push(colour);
+        match = pattern.exec(layer);
+      }
+      if (stops.length === 0) continue;
+      const first = stops[0];
+      const same = stops.every((stop) => Math.round(stop.r) === Math.round(first.r)
+        && Math.round(stop.g) === Math.round(first.g)
+        && Math.round(stop.b) === Math.round(first.b)
+        && Math.abs(stop.a - first.a) < 0.002);
+      const highest = stops.reduce((best, stop) => (stop.a > best.a ? stop : best));
+      layers.push({ colour: same ? first : null, gradient: layer, varying: !same, highest });
     }
-    if (base === null) return { layer: null, warning };
+    return layers;
+  };
+  const composite = (front, back) => ({
+    r: front.r * front.a + back.r * (1 - front.a),
+    g: front.g * front.a + back.g * (1 - front.a),
+    b: front.b * front.a + back.b * (1 - front.a),
+    a: front.a + back.a * (1 - front.a),
+  });
+  const layerColour = (style) => {
+    const images = imageLayers(style.backgroundImage);
+    let base = resolveColour(style.backgroundColor);
+    const warnings = [];
+    // The first listed layer is on top; composite from the last to the first.
+    for (let index = images.length - 1; index >= 0; index -= 1) {
+      const image = images[index];
+      if (image.varying) {
+        warnings.push({ gradient: image.gradient, highest: image.highest });
+        continue;
+      }
+      if (image.colour !== null) {
+        base = base === null ? image.colour : composite(image.colour, base);
+      }
+    }
+    if (base === null) return { layer: null, warnings };
     const opacity = Number.parseFloat(style.opacity);
     const alpha = base.a * (Number.isFinite(opacity) ? opacity : 1);
-    if (alpha <= 0) return { layer: null, warning };
-    return { layer: { r: base.r, g: base.g, b: base.b, a: Math.min(1, alpha) }, warning };
+    if (alpha <= 0) return { layer: null, warnings };
+    return { layer: { r: base.r, g: base.g, b: base.b, a: Math.min(1, alpha) }, warnings };
   };
   // Where a pseudo-element paints, from its originating element's border box,
   // the pseudo's computed offsets and size, and its padding and border.
@@ -233,9 +262,59 @@ const VISIBILITY_RULE = `
     }
     return inside;
   };
+  const angleValue = (value) => {
+    if (value.endsWith("deg")) return Number.parseFloat(value);
+    if (value.endsWith("grad")) return Number.parseFloat(value) * 0.9;
+    if (value.endsWith("rad")) return Number.parseFloat(value) * 180 / Math.PI;
+    if (value.endsWith("turn")) return Number.parseFloat(value) * 360;
+    const number = Number.parseFloat(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  // Compose the individual transform properties in CSS order: translate, then
+  // rotate, then scale, then transform.
+  const individualMatrix = (style, rect) => {
+    let matrix = new DOMMatrix();
+    if (style.translate && style.translate !== "none") {
+      const parts = style.translate.split(/\\s+/);
+      const x = lengthValue(parts[0], rect.width);
+      const y = parts.length > 1 ? lengthValue(parts[1], rect.height) : 0;
+      const z = parts.length > 2 ? lengthValue(parts[2], 0) : 0;
+      matrix = matrix.translate(x, y, z);
+    }
+    if (style.rotate && style.rotate !== "none") {
+      const parts = style.rotate.split(/\\s+/);
+      if (parts.length === 1) {
+        matrix = matrix.rotate(angleValue(parts[0]));
+      } else {
+        let axis = parts.slice(0, -1);
+        const angle = angleValue(parts[parts.length - 1]);
+        if (axis.length === 1) {
+          axis = axis[0] === "x" ? ["1", "0", "0"]
+            : axis[0] === "y" ? ["0", "1", "0"]
+            : ["0", "0", "1"];
+        }
+        matrix = matrix.rotateAxis(angle, Number(axis[0]), Number(axis[1]), Number(axis[2]));
+      }
+    }
+    if (style.scale && style.scale !== "none") {
+      const parts = style.scale.split(/\\s+/).map(Number);
+      const x = Number.isFinite(parts[0]) ? parts[0] : 1;
+      const y = parts.length > 1 && Number.isFinite(parts[1]) ? parts[1] : x;
+      const z = parts.length > 2 && Number.isFinite(parts[2]) ? parts[2] : 1;
+      matrix = matrix.scale(x, y, z);
+    }
+    if (style.transform && style.transform !== "none") {
+      matrix = matrix.multiply(new DOMMatrix(style.transform));
+    }
+    return matrix;
+  };
   const pseudoQuad = (rect, style) => {
-    if (!style.transform || style.transform === "none") return null;
-    const matrix = new DOMMatrix(style.transform);
+    const hasIndividual = (style.translate && style.translate !== "none")
+      || (style.rotate && style.rotate !== "none")
+      || (style.scale && style.scale !== "none");
+    const hasTransform = style.transform && style.transform !== "none";
+    if (!hasIndividual && !hasTransform) return null;
+    const matrix = individualMatrix(style, rect);
     const parts = style.transformOrigin.split(/\\s+/);
     const originX = rect.left + lengthValue(parts[0], rect.width);
     const originY = rect.top + lengthValue(parts[1], rect.height);
@@ -264,10 +343,10 @@ const VISIBILITY_RULE = `
         if (style.display === "none") continue;
         if (style.position === "static") continue;
         if (style.zIndex !== "auto" && Number(style.zIndex) < 0) continue;
-        const { layer, warning } = layerColour(style);
-        if (layer !== null || warning !== null) {
+        const result = layerColour(style);
+        if (result.layer !== null || result.warnings.length > 0) {
           const rect = pseudoRect(node, style);
-          descriptors.push({ rect, quad: pseudoQuad(rect, style), layer, warning });
+          descriptors.push({ rect, quad: pseudoQuad(rect, style), layer: result.layer, warnings: result.warnings });
         }
       }
       pseudoCache.set(node, descriptors);
@@ -275,13 +354,13 @@ const VISIBILITY_RULE = `
     const layers = [];
     const warnings = [];
     for (const descriptor of descriptors) {
-      const { rect, quad, layer, warning } = descriptor;
+      const { rect, quad, layer } = descriptor;
       const contains = quad === null
         ? point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
         : insideQuad(point, quad);
       if (!contains) continue;
       if (layer !== null) layers.push(layer);
-      if (warning !== null) warnings.push(warning);
+      warnings.push(...descriptor.warnings);
     }
     return { layers, warnings };
   };
@@ -387,9 +466,9 @@ const VISIBILITY_RULE = `
         for (let index = textIndex - 1; index >= 0; index -= 1) {
           const item = stack[index];
           if (item === element || item.contains(element) || element.contains(item)) continue;
-          const { layer, warning } = layerColour(getComputedStyle(item));
-          if (layer !== null) layers.push(layer);
-          if (warning !== null) warnings.push(warning);
+          const result = layerColour(getComputedStyle(item));
+          if (result.layer !== null) layers.push(result.layer);
+          warnings.push(...result.warnings);
         }
       }
     }
