@@ -251,12 +251,13 @@ A stage is one group of checks, one for each lab. The runner reads
 `cases/pair/manifest.json`. Each listed case has an `.expected` JSON sidecar
 and may have an `.exit` sidecar. An unlisted case file fails before the runner
 creates a database. The runner reads all cases up to the requested stage.
-Stage 2 includes stage 1.
+Stage 2 includes stage 1. `./check.sh --select-stage` prints the stage in
+`.stage` at the repository root.
 
 A pair adds its own cases in `cases/pair/manifest.json`. The pair manifest uses
-the same fields. Its files stay inside `cases/pair/`. A lab bundle installs
-published files under `cases/published/<lab>/`. Those folders are protected,
-and a bundle does not replace the pair manifest.
+the same fields. Its files stay inside `cases/pair/`. The starter holds each
+lab's published files under `cases/published/<lab>/`. Those folders are
+protected, and they do not replace the pair manifest.
 
 Result data uses a JSON object with `columns` and `rows` fields. SQL `NULL`
 uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
@@ -296,7 +297,7 @@ list runs after the cases. Each invariant checks one property.
 | `feature` | Looks for a named SQL feature in a view definition from the PostgreSQL catalog, or in a report SQL file. | It can miss a feature that the query text hides. It can accept a feature that does no useful work. |
 | `index` | Reads the index's key columns from `pg_index` and `pg_attribute`, then reads the structured plan from `EXPLAIN`. It compares the index identity with the catalog, requires that a migration created the index, requires the stated leading key column, and requires the plan's `Index Cond` to name that column. | The check disables sequential scans, so the plan does not prove the optimizer's ordinary choice. |
 | `backup_restore` | Calls the pair's commands and compares table rows before and after restore. | |
-| `protected` | Checks the hashes of the files that came with the folder. | |
+| `protected` | Checks the hashes of the protected files. | |
 | `written` | Checks that required headings have content. | It does not judge the content. |
 | `contribution` | Prints commits and changed lines by member and week. | The table is information and does not enter the count. |
 | `pyright` | Runs strict Pyright and rejects a `# pyright: ignore` directive. | When Pyright is absent, the check fails with the pip repair. |
