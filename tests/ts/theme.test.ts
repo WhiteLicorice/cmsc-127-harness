@@ -160,10 +160,11 @@ describe("theme tokens", () => {
   it("uses the guidebook UP maroon, forest green, and gold", () => {
     for (const id of ["upv-light", "upv-dark"]) {
       const tokens = readTokens(themeBlock(id));
-      expect(tokens["--header-bg"]).toBe("#7b1113");
+      expect(tokens["--header-bg"]).toBe("#8a1538");
     }
     const light = readTokens(themeBlock("upv-light"));
-    expect(light["--accent"]).toBe("#014421");
+    expect(light["--accent"]).toBe("#00573f");
+    expect(light["--fail"]).toBe("#8a1538");
     expect(light["--focus-header"]).toBe("#ffb81c");
     const dark = readTokens(themeBlock("upv-dark"));
     expect(dark["--focus"]).toBe("#ffb81c");

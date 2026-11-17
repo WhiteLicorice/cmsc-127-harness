@@ -12,23 +12,23 @@
   --muted: #5c4f45;
   --border: #8a7a6c;
   --rule: #d0c9c2;
-  --header-bg: #7b1113;
+  --header-bg: #8a1538;
   --header-text: #ffffff;
   --header-muted: #f0d9d9;
-  --focus: #014421;
+  --focus: #00573f;
   --focus-header: #ffb81c;
-  --accent: #014421;
+  --accent: #00573f;
   --pass: #0b6b33;
-  --fail: #7b1113;
+  --fail: #8a1538;
   --warn: #8a5a00;
   --info: #1f5f8b;
   --pass-bg: #f0f4ef;
-  --fail-bg: #f7efed;
+  --fail-bg: #f8efef;
   --warn-bg: #f8f3ec;
   --info-bg: #f2f4f4;
   --row-insert: #ebf1eb;
   --row-update: #f6f0e7;
-  --row-delete: #f4eae8;
+  --row-delete: #f6eaeb;
 }
 
 [data-theme="upv-light"] {
@@ -41,23 +41,23 @@
   --muted: #5c4f45;
   --border: #8a7a6c;
   --rule: #d0c9c2;
-  --header-bg: #7b1113;
+  --header-bg: #8a1538;
   --header-text: #ffffff;
   --header-muted: #f0d9d9;
-  --focus: #014421;
+  --focus: #00573f;
   --focus-header: #ffb81c;
-  --accent: #014421;
+  --accent: #00573f;
   --pass: #0b6b33;
-  --fail: #7b1113;
+  --fail: #8a1538;
   --warn: #8a5a00;
   --info: #1f5f8b;
   --pass-bg: #f0f4ef;
-  --fail-bg: #f7efed;
+  --fail-bg: #f8efef;
   --warn-bg: #f8f3ec;
   --info-bg: #f2f4f4;
   --row-insert: #ebf1eb;
   --row-update: #f6f0e7;
-  --row-delete: #f4eae8;
+  --row-delete: #f6eaeb;
 }
 
 [data-theme="upv-dark"] {
@@ -70,7 +70,7 @@
   --muted: #c9b8aa;
   --border: #8d7a6b;
   --rule: #4c4039;
-  --header-bg: #7b1113;
+  --header-bg: #8a1538;
   --header-text: #ffffff;
   --header-muted: #f0d9d9;
   --focus: #ffb81c;
@@ -420,7 +420,7 @@
     --muted: #c9b8aa;
     --border: #8d7a6b;
     --rule: #4c4039;
-    --header-bg: #7b1113;
+    --header-bg: #8a1538;
     --header-text: #ffffff;
     --header-muted: #f0d9d9;
     --focus: #ffb81c;
@@ -453,23 +453,23 @@
     --muted: #5c4f45;
     --border: #8a7a6c;
     --rule: #d0c9c2;
-    --header-bg: #7b1113;
+    --header-bg: #8a1538;
     --header-text: #ffffff;
     --header-muted: #f0d9d9;
-    --focus: #014421;
+    --focus: #00573f;
     --focus-header: #ffb81c;
-    --accent: #014421;
+    --accent: #00573f;
     --pass: #0b6b33;
-    --fail: #7b1113;
+    --fail: #8a1538;
     --warn: #8a5a00;
     --info: #1f5f8b;
     --pass-bg: #f0f4ef;
-    --fail-bg: #f7efed;
+    --fail-bg: #f8efef;
     --warn-bg: #f8f3ec;
     --info-bg: #f2f4f4;
     --row-insert: #ebf1eb;
     --row-update: #f6f0e7;
-    --row-delete: #f4eae8;
+    --row-delete: #f6eaeb;
   }
 }
 * {
