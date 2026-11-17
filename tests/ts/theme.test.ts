@@ -177,7 +177,7 @@ describe("theme contrast", () => {
   // surface that carries it. A pair belongs here when a rule paints that
   // foreground on that background somewhere in the page.
   const pairs: Array<[string, string, number, string]> = [
-    ["--text", "--surface", 4.5, "panel body and diagram odd rows"],
+    ["--text", "--surface", 4.5, "panel body, theme and schema pickers, diagram odd rows"],
     ["--text", "--bg", 4.5, "page body"],
     ["--text", "--surface-2", 4.5, "table head, diagram title and even rows, active tab"],
     ["--text", "--code-bg", 4.5, "code block"],
