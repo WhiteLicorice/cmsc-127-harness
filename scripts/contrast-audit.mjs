@@ -191,6 +191,10 @@ function focusRing() {
   const style = getComputedStyle(element);
   const outline = parse(style.outlineColor);
   if (!outline) return null;
+  // A ring that is not painted is not a ring. Skip an element whose outline
+  // is absent or zero width so the walk cannot compare a colour nobody sees.
+  const width = Number.parseFloat(style.outlineWidth);
+  if (style.outlineStyle === "none" || !Number.isFinite(width) || width <= 0) return null;
   const box = element.getBoundingClientRect();
   const stack = document.elementsFromPoint(
     Math.min(Math.max(box.left - 2, 0), window.innerWidth - 1),
@@ -244,7 +248,7 @@ let serverOutput = "";
 server.stdout.on("data", (chunk) => { serverOutput += chunk.toString(); });
 server.stderr.on("data", (chunk) => { serverOutput += chunk.toString(); });
 
-const report = { themes: {}, textFailures: [], focusFailures: [], labelCounts: [] };
+const report = { themes: {}, textFailures: [], focusFailures: [], focusMeasured: 0, labelCounts: [] };
 let browser;
 let failure = null;
 
@@ -323,7 +327,9 @@ try {
       await page.keyboard.press("Tab");
       await page.waitForTimeout(60);
       const ring = await page.evaluate(focusRing);
-      if (ring && !ring.pass) report.focusFailures.push({ theme, ...ring });
+      if (!ring) continue;
+      report.focusMeasured += 1;
+      if (!ring.pass) report.focusFailures.push({ theme, ...ring });
     }
 
     await page.close();
@@ -357,6 +363,7 @@ for (const item of report.textFailures.slice(0, 40)) {
       `"${item.text}"  ${item.where}  [${item.theme} ${item.view}]`,
   );
 }
+console.log(`focus rings measured: ${report.focusMeasured}`);
 console.log(`focus ring failures: ${report.focusFailures.length}`);
 for (const item of report.focusFailures) {
   console.log(`  ${item.ratio} < ${item.floor}  ${item.outline} on ${item.bg}  ${item.target}  [${item.theme}]`);
@@ -370,6 +377,9 @@ if (failure) {
   process.exitCode = 1;
 } else if (measured === 0) {
   console.error("The contrast audit measured no text. The page did not render.");
+  process.exitCode = 1;
+} else if (report.focusMeasured === 0) {
+  console.error("The contrast audit measured no focus ring. The walk reached nothing.");
   process.exitCode = 1;
 } else {
   console.log("Contrast audit passed.");
