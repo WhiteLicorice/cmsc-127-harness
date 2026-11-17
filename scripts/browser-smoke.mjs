@@ -162,10 +162,7 @@ try {
         .evaluate((node) => getComputedStyle(node).fontFamily);
       schemaPageFont = await page.evaluate(() => getComputedStyle(document.body).fontFamily);
       schemaLabelColor = await page.evaluate(() => {
-        const label = document.querySelector(".mermaid p");
-        if (label === null) {
-          return { actual: "", expected: "" };
-        }
+        const labels = [...document.querySelectorAll(".mermaid p")];
         const probe = document.createElement("span");
         probe.style.color = getComputedStyle(document.documentElement)
           .getPropertyValue("--text")
@@ -173,7 +170,12 @@ try {
         document.body.append(probe);
         const expected = getComputedStyle(probe).color;
         probe.remove();
-        return { actual: getComputedStyle(label).color, expected };
+        const first = labels[0];
+        return {
+          count: labels.length,
+          actual: first === undefined ? "" : getComputedStyle(first).color,
+          expected,
+        };
       });
     }
     const name = `${String(panelNumber).padStart(2, "0")}-${panel.toLowerCase()}.png`;
@@ -199,12 +201,18 @@ try {
   }
   record(`schema label font: ${labelFont}`);
 
+  if (schemaLabelColor.count === 0) {
+    throw new Error("No diagram label was found to check.");
+  }
+  if (schemaLabelColor.count !== 12) {
+    throw new Error(`Expected 12 diagram labels, found ${schemaLabelColor.count}.`);
+  }
   if (schemaLabelColor.actual !== schemaLabelColor.expected) {
     throw new Error(
       `A diagram label uses ${schemaLabelColor.actual}, not the text colour ${schemaLabelColor.expected}.`,
     );
   }
-  record(`schema label colour: ${schemaLabelColor.actual}`);
+  record(`schema labels: ${schemaLabelColor.count}, colour ${schemaLabelColor.actual}`);
 
   const themes = [
     "upv-light", "upv-dark", "github-light", "github-dark", "one-dark", "nord",

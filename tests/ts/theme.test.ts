@@ -177,9 +177,9 @@ describe("theme contrast", () => {
   // surface that carries it. A pair belongs here when a rule paints that
   // foreground on that background somewhere in the page.
   const pairs: Array<[string, string, number, string]> = [
-    ["--text", "--surface", 4.5, "panel body"],
+    ["--text", "--surface", 4.5, "panel body and diagram odd rows"],
     ["--text", "--bg", 4.5, "page body"],
-    ["--text", "--surface-2", 4.5, "table head, diagram label, active tab"],
+    ["--text", "--surface-2", 4.5, "table head, diagram title and even rows, active tab"],
     ["--text", "--code-bg", 4.5, "code block"],
     ["--text", "--row-insert", 4.5, "insert row"],
     ["--text", "--row-update", 4.5, "update row"],
@@ -267,7 +267,9 @@ describe("theme contrast", () => {
   });
 
   // A new colour rule must arrive with a pair in the table above, or this fails.
-  it("covers every foreground colour the stylesheet paints", () => {
+  // This reads tokens only. It cannot see which background a rule paints on, so
+  // scripts/contrast-audit.mjs is the guard that checks the rendered page.
+  it("gives every `color: var(--x)` token a pair", () => {
     const declared = new Set(
       [...css.matchAll(/(?<![-\w])color:\s*var\((--[a-z0-9-]+)\)/g)].map((match) => match[1] ?? ""),
     );

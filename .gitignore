@@ -7,5 +7,7 @@ smoke-artifacts/
 smoke-project/
 smoke-project-pair/
 smoke-project-pair/
+audit-artifacts/
+audit-project/
 __pycache__/
 *.py[cod]

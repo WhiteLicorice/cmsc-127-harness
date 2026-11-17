@@ -104,8 +104,10 @@ function configureMermaid(): void {
       tertiaryColor: token("--code-bg"),
       mainBkg: token("--surface-2"),
       nodeBorder: token("--border"),
-      attributeBackgroundColorOdd: token("--surface"),
-      attributeBackgroundColorEven: token("--surface-2"),
+      // The ER renderer reads rowOdd and rowEven for the attribute rows. It
+      // ignores attributeBackgroundColorOdd and attributeBackgroundColorEven.
+      rowOdd: token("--surface"),
+      rowEven: token("--surface-2"),
       lineColor: token("--border"),
       textColor: token("--text"),
       titleColor: token("--text"),
