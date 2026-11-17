@@ -49,6 +49,7 @@ const THEMES = [
   "tokyo-night", "gruvbox-light", "gruvbox-dark",
 ];
 const PORT = "55447";
+const VIEWPORT = { width: 1440, height: 900 };
 const TABLE = "audit_student";
 const EMPTY_SCHEMA = "audit_empty";
 const CHROME_BASELINE = 14;
@@ -59,8 +60,90 @@ const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.ex
 
 // The one visibility rule. It is injected into every page function so the walk,
 // the assertions, and the tabbable set cannot drift apart.
+//
+// Content the user can scroll to is painted: a container whose overflow is auto
+// or scroll and whose content overflows it does not clip the hit test. Content
+// below the fold is handled by sizing the viewport to the document before each
+// view. A cover is the topmost element that paints a fully opaque background;
+// a transparent or near-transparent layer is not a cover.
 const VISIBILITY_RULE = `
+  const parse = (value) => {
+    if (!value || value === "none" || value === "transparent") return null;
+    const match = /rgba?\\(([^)]+)\\)/.exec(value);
+    if (!match) return null;
+    const parts = match[1].split(/[,\\s/]+/).filter((part) => part.length > 0).map(Number);
+    if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
+    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
   const visibleCache = new Map();
+  const scrollableAncestor = (element) => {
+    for (let node = element.parentElement; node && node !== document.documentElement; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      const scrollsX = (style.overflowX === "auto" || style.overflowX === "scroll")
+        && node.scrollWidth > node.clientWidth;
+      const scrollsY = (style.overflowY === "auto" || style.overflowY === "scroll")
+        && node.scrollHeight > node.clientHeight;
+      if (scrollsX || scrollsY) return node;
+    }
+    return null;
+  };
+  // A pseudo-element paints above its originating element's children. A fully
+  // opaque one is a cover; a tint is not.
+  const pseudoCovers = (element) => {
+    for (const pseudo of ["::before", "::after"]) {
+      const style = getComputedStyle(element, pseudo);
+      if (style.content === "none" || style.content === "normal") continue;
+      const colour = parse(style.backgroundColor);
+      if (colour !== null && colour.a === 1) return true;
+    }
+    return false;
+  };
+  const hitState = (element, box) => {
+    const stack = document.elementsFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+    const textIndex = stack.findIndex((item) => item === element || element.contains(item));
+    if (textIndex < 0) return "missing";
+    for (let index = 0; index < textIndex; index += 1) {
+      const item = stack[index];
+      const related = item === element || item.contains(element) || element.contains(item);
+      if (!related || pseudoCovers(item)) return "covered";
+    }
+    return "visible";
+  };
+  const clippedBox = (element) => {
+    const box = element.getBoundingClientRect();
+    let left = 0;
+    let top = 0;
+    let right = window.innerWidth;
+    let bottom = window.innerHeight;
+    for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
+      if (node === element) continue;
+      const style = getComputedStyle(node);
+      const scrollsX = (style.overflowX === "auto" || style.overflowX === "scroll")
+        && node.scrollWidth > node.clientWidth;
+      const scrollsY = (style.overflowY === "auto" || style.overflowY === "scroll")
+        && node.scrollHeight > node.clientHeight;
+      const clipsX = style.overflowX !== "visible" && !scrollsX;
+      const clipsY = style.overflowY !== "visible" && !scrollsY;
+      if (clipsX || clipsY) {
+        const rect = node.getBoundingClientRect();
+        if (clipsX) {
+          left = Math.max(left, rect.left + node.clientLeft);
+          right = Math.min(right, rect.left + node.clientLeft + node.clientWidth);
+        }
+        if (clipsY) {
+          top = Math.max(top, rect.top + node.clientTop);
+          bottom = Math.min(bottom, rect.top + node.clientTop + node.clientHeight);
+        }
+      }
+    }
+    return {
+      left: Math.max(left, box.left),
+      top: Math.max(top, box.top),
+      right: Math.min(right, box.right),
+      bottom: Math.min(bottom, box.bottom),
+    };
+  };
   const isVisible = (element) => {
     if (!(element instanceof Element)) return false;
     const cached = visibleCache.get(element);
@@ -73,32 +156,27 @@ const VISIBILITY_RULE = `
       if (box.width < 1 || box.height < 1) {
         visible = false;
       } else {
-        let left = 0;
-        let top = 0;
-        let right = window.innerWidth;
-        let bottom = window.innerHeight;
-        for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
-          if (node !== element) {
-            const style = getComputedStyle(node);
-            if (style.overflowX !== "visible" || style.overflowY !== "visible") {
-              const rect = node.getBoundingClientRect();
-              left = Math.max(left, rect.left + node.clientLeft);
-              top = Math.max(top, rect.top + node.clientTop);
-              right = Math.min(right, rect.left + node.clientLeft + node.clientWidth);
-              bottom = Math.min(bottom, rect.top + node.clientTop + node.clientHeight);
+        let clipped = clippedBox(element);
+        let state = clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1
+          ? hitState(element, clipped)
+          : "missing";
+        // Content inside a scrollport is painted once the user scrolls to it.
+        // Scroll it into view, retry the hit test, then restore the scroll.
+        if (state === "missing") {
+          const scroller = scrollableAncestor(element);
+          if (scroller !== null) {
+            const savedTop = scroller.scrollTop;
+            const savedLeft = scroller.scrollLeft;
+            element.scrollIntoView({ block: "nearest", inline: "nearest" });
+            clipped = clippedBox(element);
+            if (clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1) {
+              state = hitState(element, clipped);
             }
+            scroller.scrollTop = savedTop;
+            scroller.scrollLeft = savedLeft;
           }
         }
-        left = Math.max(left, box.left);
-        top = Math.max(top, box.top);
-        right = Math.min(right, box.right);
-        bottom = Math.min(bottom, box.bottom);
-        if (right - left < 1 || bottom - top < 1) {
-          visible = false;
-        } else {
-          const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
-          visible = hit !== null && (hit === element || element.contains(hit));
-        }
+        visible = state === "visible";
       }
     }
     visibleCache.set(element, visible);
@@ -274,14 +352,6 @@ function runSql(statements) {
 }
 
 const auditPage = new Function("counters", `${VISIBILITY_RULE}
-  const parse = (value) => {
-    if (!value || value === "none" || value === "transparent") return null;
-    const match = /rgba?\\(([^)]+)\\)/.exec(value);
-    if (!match) return null;
-    const parts = match[1].split(/[,\\s/]+/).filter((part) => part.length > 0).map(Number);
-    if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
-    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
-  };
   const over = (front, back) => ({
     r: front.r * front.a + back.r * (1 - front.a),
     g: front.g * front.a + back.g * (1 - front.a),
@@ -302,7 +372,6 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
     "#" + [colour.r, colour.g, colour.b].map((value) => Math.round(value).toString(16).padStart(2, "0")).join("");
 
   const base = parse(getComputedStyle(document.body).backgroundColor) ?? { r: 255, g: 255, b: 255, a: 1 };
-  const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
 
   const ancestorBackdrop = (element) => {
     const chain = [];
@@ -629,7 +698,7 @@ try {
   browser = await chromium.launch({ headless: true });
 
   for (const theme of THEMES) {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const page = await browser.newPage({ viewport: VIEWPORT });
     await page.goto(address, { waitUntil: "domcontentloaded" });
     await page.evaluate((value) => localStorage.setItem("cmsc127-theme", value), theme);
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -676,7 +745,15 @@ try {
     };
 
     const measureView = async (view) => {
+      // Content below the fold is painted and reachable. Size the viewport to
+      // the document before measuring so the clip is the page, not the first
+      // 900 px, then restore it for the next view.
+      const height = await page.evaluate(() =>
+        Math.max(document.documentElement.scrollHeight, document.body.scrollHeight));
+      await page.setViewportSize({ width: VIEWPORT.width, height: Math.max(VIEWPORT.height, Math.ceil(height)) });
+      await page.waitForTimeout(50);
       const result = await page.evaluate(auditPage, COUNTERS);
+      await page.setViewportSize(VIEWPORT);
       report.themes[theme].views[view.name] = result.rows.length;
       if (!report.labelCounts.includes(result.labelCount)) report.labelCounts.push(result.labelCount);
       for (const row of result.rows.filter((entry) => !entry.pass)) {
