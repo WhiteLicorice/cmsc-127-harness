@@ -293,7 +293,7 @@ const VISIBILITY_RULE = `
             : axis[0] === "y" ? ["0", "1", "0"]
             : ["0", "0", "1"];
         }
-        matrix = matrix.rotateAxis(angle, Number(axis[0]), Number(axis[1]), Number(axis[2]));
+        matrix = matrix.rotateAxisAngle(Number(axis[0]), Number(axis[1]), Number(axis[2]), angle);
       }
     }
     if (style.scale && style.scale !== "none") {
@@ -355,10 +355,16 @@ const VISIBILITY_RULE = `
     const warnings = [];
     for (const descriptor of descriptors) {
       const { rect, quad, layer } = descriptor;
-      const contains = quad === null
-        ? point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
-        : insideQuad(point, quad);
-      if (!contains) continue;
+      const untransformed = point.x >= rect.left && point.x <= rect.right
+        && point.y >= rect.top && point.y <= rect.bottom;
+      const contains = quad === null ? untransformed : insideQuad(point, quad);
+      if (!contains) {
+        // A varying gradient still warns when its untransformed box covers the
+        // point, even if a transform moves the painted quad away: the warning
+        // is about the gradient the audit cannot evaluate, not about coverage.
+        if (untransformed) warnings.push(...descriptor.warnings);
+        continue;
+      }
       if (layer !== null) layers.push(layer);
       warnings.push(...descriptor.warnings);
     }
