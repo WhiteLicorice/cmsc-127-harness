@@ -304,6 +304,30 @@ class HarnessPageTests(unittest.TestCase):
             self.assertIn("Check the database password", payload["message"])
             self.assertNotIn("Traceback", json.dumps(payload))
 
+    def test_status_returns_a_plain_message_for_a_missing_privilege(self) -> None:
+        server_module = self.load_server()
+        with patch.object(
+            server_module.psycopg,
+            "connect",
+            side_effect=psycopg.errors.InsufficientPrivilege(
+                "permission denied for table student"
+            ),
+        ):
+            with running_server(
+                REPOSITORY_ROOT,
+                "postgresql://postgres@127.0.0.1:55446/postgres",
+            ) as base_url:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+                payload = json.loads(error.exception.read())
+                error.exception.close()
+            self.assertIn(
+                "This database role cannot read a table. Check the role in "
+                "CMSC127_DATABASE_URL and what it can read.",
+                payload["message"],
+            )
+            self.assertNotIn("Traceback", json.dumps(payload))
+
     def test_server_catalog_statements_are_select_only(self) -> None:
         server_module = self.load_server()
         namespace = cast(dict[str, object], vars(server_module))

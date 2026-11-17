@@ -329,7 +329,7 @@ class ComparatorTests(unittest.TestCase):
         """, schema="t04_empty")
 
         self.assertEqual(1, len(differences))
-        self.assertIn("no tables found in schema t04_empty", differences[0].message)
+        self.assertIn("No tables found in schema t04_empty", differences[0].message)
         self.assertIn(
             "check that your migrations ran against this database",
             differences[0].message.lower(),

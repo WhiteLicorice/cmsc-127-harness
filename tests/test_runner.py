@@ -594,7 +594,7 @@ class ManifestTests(unittest.TestCase):
                 '{"columns":[],"rows":[]}\n', encoding="utf-8"
             )
 
-            with self.assertRaisesRegex(ValueError, "unlisted case sidecar.*orphan.expected"):
+            with self.assertRaisesRegex(ValueError, "unlisted expected or .exit file.*orphan.expected"):
                 load_manifest(root)
 
     def test_duplicate_id_names_existing_manifest(self: ManifestTests) -> None:
@@ -2213,6 +2213,67 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
             fake_rows = cast(list[dict[str, object]], fake_result["results"])
             self.assertEqual("fail", fake_rows[0]["status"])
+            fake_differences = cast(list[str], fake_rows[0]["differences"])
+            self.assertTrue(
+                any(
+                    "the error does not come from a named constraint. A RAISE or "
+                    "ASSERT, or an error with no constraint name, does not test the "
+                    "schema. Change the insert so a table constraint refuses the row."
+                    in difference
+                    for difference in fake_differences
+                ),
+                fake_differences,
+            )
+
+    def test_reject_case_reports_a_statement_that_succeeds(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = "CREATE TABLE item (id integer PRIMARY KEY, label text);\n"
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, label) VALUES (1, 'valid');\n",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+        differences = cast(list[str], rows[0]["differences"])
+        self.assertTrue(
+            any(
+                "statement succeeded, but the case requires rejection. Change "
+                "the statement so a table constraint refuses the row."
+                in difference
+                for difference in differences
+            ),
+            differences,
+        )
+
+    def test_reject_case_reports_a_different_sqlstate(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        migration = (
+            "CREATE TABLE item (id integer PRIMARY KEY, n integer CHECK (n > 0));\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            exit_code, rows = self._run_reject_root(
+                Path(directory),
+                migration,
+                "SELECT 1;\n",
+                "INSERT INTO item (id, n) VALUES (1, -1);\n",
+            )
+        self.assertEqual(1, exit_code)
+        self.assertEqual("fail", rows[0]["status"])
+        differences = cast(list[str], rows[0]["differences"])
+        self.assertTrue(
+            any(
+                "SQLSTATE differs: expected '23505', actual '23514'. Change the "
+                "statement so it fails with the expected SQLSTATE."
+                in difference
+                for difference in differences
+            ),
+            differences,
+        )
 
     def _run_reject_root(
         self: RunnerIntegrationTests,
@@ -2559,7 +2620,11 @@ class RunnerIntegrationTests(unittest.TestCase):
         self.assertEqual("fail", rows[0]["status"])
         differences = cast(list[str], rows[0]["differences"])
         self.assertTrue(
-            any("item_force" in difference for difference in differences),
+            any(
+                "is a view" in difference
+                and "Insert into the table itself" in difference
+                for difference in differences
+            ),
             differences,
         )
 
@@ -2740,7 +2805,11 @@ class InvariantTests(unittest.TestCase):
                 {(self.schema, index)},
             )
             self.assertTrue(
-                any("leads with label, not id" in error for error in errors),
+                any(
+                    "leads with label. The case expects id as the first column. "
+                    "Change the index to lead with id." in error
+                    for error in errors
+                ),
                 errors,
             )
             with self.connection.cursor() as cursor:
@@ -2755,7 +2824,51 @@ class InvariantTests(unittest.TestCase):
                 {(self.schema, index)},
             )
             self.assertTrue(
-                any("does not filter index" in error for error in errors),
+                any(
+                    f"the query plan does not filter on id through index {index}. "
+                    "Add a filter on id." in error
+                    for error in errors
+                ),
+                errors,
+            )
+
+    def test_index_check_requires_the_query_to_use_the_index(
+        self: InvariantTests,
+    ) -> None:
+        index = f"t13_index_{uuid4().hex[:8]}"
+        other = f"t13_other_{uuid4().hex[:8]}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "report.sql").write_text(
+                f"SELECT id FROM \"{self.schema}\".item WHERE label = 'alpha';\n",
+                encoding="utf-8",
+            )
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    f'CREATE TABLE "{self.schema}".item '
+                    "(id integer, label text)"
+                )
+                cursor.execute(
+                    f'CREATE INDEX "{index}" ON "{self.schema}".item (id)'
+                )
+                cursor.execute(
+                    f'CREATE INDEX "{other}" ON "{self.schema}".item (label)'
+                )
+                cursor.execute(
+                    f'INSERT INTO "{self.schema}".item VALUES (1, \'alpha\')'
+                )
+            errors = check_index(
+                root,
+                self.connection,
+                {"file": "report.sql", "index": index},
+                {(self.schema, index), (self.schema, other)},
+            )
+            self.assertTrue(
+                any(
+                    f"the query plan does not use index {index}. It uses: {other}. "
+                    f"Rewrite the query so it uses index {index}." in error
+                    for error in errors
+                ),
                 errors,
             )
 
@@ -2968,8 +3081,8 @@ class InvariantTests(unittest.TestCase):
             actual = cast(dict[str, object], failing["actual"])
             rows = cast(list[list[object]], actual["rows"])
             self.assertEqual(
-                [["report file reports/report.sql holds 2 statements; "
-                  "the report must be one query."]],
+                [["report file reports/report.sql holds 2 statements. "
+                  "The report must be one query."]],
                 rows,
             )
 

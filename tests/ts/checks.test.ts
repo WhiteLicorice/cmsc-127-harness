@@ -20,6 +20,33 @@ describe("checks panel", () => {
     expect(JSON.stringify(entries[0])).toContain("actual");
   });
 
+  it("shows a failed case's difference text beside its result", async () => {
+    const { renderChecks } = await import("../../src/panels/checks.js");
+    const html = renderChecks({
+      results: [
+        {
+          id: "case-3",
+          kind: "reject",
+          status: "fail",
+          expected: { sqlstate: "23505" },
+          actual: { sqlstate: "42P01" },
+          differences: [
+            "the statement failed before it reached a constraint: a table or column does not exist.",
+          ],
+        },
+      ],
+      passed: 0,
+      failed: 1,
+      skipped: 0,
+      warnings: 0,
+    });
+
+    expect(html).toContain("difference-note");
+    expect(html).toContain(
+      "the statement failed before it reached a constraint: a table or column does not exist.",
+    );
+  });
+
   it("shows a passing case's warnings apart from its result", async () => {
     const { describeChecks, renderChecks } = await import(
       "../../src/panels/checks.js"

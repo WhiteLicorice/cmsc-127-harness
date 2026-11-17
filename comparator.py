@@ -321,7 +321,7 @@ def compare_erd(
                 schema,
                 "ERD block supplied",
                 "schema has no tables",
-                f"no tables found in schema {schema}. Check that your migrations ran against this database.",
+                f"No tables found in schema {schema}. Check that your migrations ran against this database.",
             )
         ]
 

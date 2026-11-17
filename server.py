@@ -26,7 +26,10 @@ from comparator import Difference, compare_erd
 ROW_CAP = 100
 POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
-_NO_SCHEMA_MESSAGE = "No schema is available in this database. Add a schema, then reload the page."
+_NO_SCHEMA_MESSAGE = (
+    "No schema is visible to this role. Check that CMSC127_DATABASE_URL names "
+    "the right database and role."
+)
 
 _SCHEMAS_SQL = r"""
 SELECT schema_name
@@ -449,8 +452,23 @@ def _schema_endpoint(
 
     if erd_text:
         with _connect_tuple(server.context) as connection:
-            differences = compare_erd(connection, erd_text, schema)
-        difference_data = [_difference_data(difference) for difference in differences]
+            try:
+                differences = compare_erd(connection, erd_text, schema)
+            except ValueError as error:
+                detail = str(error).strip().rstrip(".!?")
+                difference_data = [
+                    {
+                        "property": "erd",
+                        "subject": "README.md",
+                        "erdValue": "erDiagram block",
+                        "schemaValue": "unreadable",
+                        "message": f"README.md: the ERD block cannot be read. {detail}.",
+                    }
+                ]
+            else:
+                difference_data = [
+                    _difference_data(difference) for difference in differences
+                ]
     else:
         difference_data = [
             {
@@ -551,7 +569,10 @@ def _checks_endpoint(
             "passed": 0,
             "failed": 0,
             "skipped": 0,
-            "message": "No check results found. Run check.sh from the project root.",
+            "message": (
+                "No check results yet. The lab runner writes "
+                ".cmsc127/last-run.json when it runs."
+            ),
         }
     except (OSError, json.JSONDecodeError):
         return 200, {
@@ -559,7 +580,10 @@ def _checks_endpoint(
             "passed": 0,
             "failed": 0,
             "skipped": 0,
-            "message": "The last check result file is not valid JSON.",
+            "message": (
+                "The last check result file, .cmsc127/last-run.json, is not valid "
+                "JSON. Run bash check.sh again to write a new one."
+            ),
         }
     if not isinstance(result, dict):
         return 200, {
@@ -567,7 +591,10 @@ def _checks_endpoint(
             "passed": 0,
             "failed": 0,
             "skipped": 0,
-            "message": "The last check result file has an unsupported format.",
+            "message": (
+                "The last check result file, .cmsc127/last-run.json, has an "
+                "unsupported format. Run bash check.sh again to write a new one."
+            ),
         }
     result_data = cast(dict[str, object], result)
     if not _valid_check_document(result_data):
@@ -576,7 +603,10 @@ def _checks_endpoint(
             "passed": 0,
             "failed": 0,
             "skipped": 0,
-            "message": "The last check result file has an unsupported format.",
+            "message": (
+                "The last check result file, .cmsc127/last-run.json, has an "
+                "unsupported format. Run bash check.sh again to write a new one."
+            ),
         }
     return 200, result_data
 
@@ -590,7 +620,10 @@ def _status_endpoint(
         return 503, {
             "server": "running",
             "databaseStatus": "down",
-            "message": "PostgreSQL is unavailable. Check the database server and connection settings.",
+            "message": (
+                "PostgreSQL is unavailable. Check that the server is running and "
+                "that CMSC127_DATABASE_URL is right."
+            ),
         }
     row = rows[0]
     return 200, {
@@ -617,10 +650,23 @@ API_ENDPOINTS: dict[str, Endpoint] = {
 def _database_message(error: Exception) -> str:
     detail = str(error).lower()
     if "password" in detail or "authentication" in detail:
-        return "Check the database password and restart the harness."
+        return "Check the database password, then start the page again."
     if "cmsc127_database_url" in detail:
         return "Set CMSC127_DATABASE_URL to the local PostgreSQL connection URL."
-    return "PostgreSQL is unavailable. Check the database server and connection settings."
+    if "permission denied" in detail:
+        return (
+            "This database role cannot read a table. Check the role in "
+            "CMSC127_DATABASE_URL and what it can read."
+        )
+    if "database" in detail and "does not exist" in detail:
+        return (
+            "The database in CMSC127_DATABASE_URL does not exist. Check the "
+            "database name in the URL."
+        )
+    return (
+        "PostgreSQL is unavailable. Check that the server is running and that "
+        "CMSC127_DATABASE_URL is right."
+    )
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -741,7 +787,8 @@ def main() -> int:
                 0,
             )
         except OSError as error:
-            print(f"Could not select a free local port: {error}", file=sys.stderr)
+            detail = str(error).strip().rstrip(".!?")
+            print(f"Could not select a free local port. {detail}.", file=sys.stderr)
             return 1
 
     address = f"http://127.0.0.1:{server.server_port}/"

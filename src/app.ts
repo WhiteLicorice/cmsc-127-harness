@@ -47,7 +47,7 @@ function showMessage(message: string, source: "tables" | "panel" = "panel"): voi
   connectionMessage.hidden = visibleMessage.length === 0;
 }
 
-const SERVER_UNREACHABLE = "The harness server cannot be reached. Run ./start.sh from the project directory in Git Bash.";
+const SERVER_UNREACHABLE = "The page cannot reach its server. Run bash <path to the Block 1 bundle>/start.sh from the folder you started the page in.";
 
 function describeRequestError(error: unknown): string {
   if (error instanceof TypeError) {
@@ -125,7 +125,7 @@ async function drawMermaid(): Promise<void> {
   try {
     await window.mermaid.run({ querySelector: ".mermaid" });
   } catch {
-    showMessage("The schema diagram could not be drawn. Check the ERD text in README.md.");
+    showMessage("The schema diagram could not be drawn. Check the ERD block in the README.md of the folder you started the page in.");
   }
 }
 
@@ -206,11 +206,11 @@ async function pollTables(): Promise<void> {
     updateSchemas(response);
     previousTables = currentTables;
     currentTables = response;
-    const now = new Date().toISOString();
+    const now = new Date();
     if (previousTables) {
-      feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now)].slice(-100);
+      feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now.toISOString())].slice(-100);
     }
-    pollSummary.textContent = `Last table poll: ${now}. Interval: ${pollInterval} ms.`;
+    pollSummary.textContent = `Last table poll: ${now.toLocaleTimeString()}.`;
     showMessage(response.message ?? "", "tables");
     if (activePanel === "tables" || activePanel === "changes") {
       renderCurrentPanel();
@@ -282,4 +282,4 @@ void requestJson("/api/changes")
     window.setInterval(() => void pollTables(), pollInterval);
     window.setInterval(() => void refreshActivePanel(), pollInterval);
   })
-  .catch(() => showMessage("The harness server is not running. Start it again from Git Bash."));
+  .catch(() => showMessage(SERVER_UNREACHABLE));

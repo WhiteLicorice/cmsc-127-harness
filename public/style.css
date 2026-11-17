@@ -744,6 +744,11 @@ pre {
   background: var(--warn-bg);
 }
 
+.difference-note {
+  color: var(--fail);
+  background: var(--fail-bg);
+}
+
 .mermaid {
   text-align: center;
   white-space: pre;

@@ -35,13 +35,13 @@ case "$(uname -s 2>/dev/null)" in
         ;;
     Linux*)
         os=linux
-        python_prefix=(python3)
+        python_prefix=(python3.15)
         python_expected='Python 3.15.2'
         postgres_expected='18.6'
         ;;
     Darwin*)
         os=macos
-        python_prefix=(python3)
+        python_prefix=(python3.15)
         python_expected='Python 3.15.2'
         postgres_expected='18.6'
         ;;
@@ -63,10 +63,10 @@ case "$os" in
         python_fix='Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
         ;;
     linux)
-        python_fix='On Ubuntu, run sudo apt install python3 python3-venv. Open a new terminal.'
+        python_fix='On Ubuntu, run curl -LsSf https://astral.sh/uv/install.sh | sh. Open a new terminal. Run uv python install 3.15.2.'
         ;;
     macos)
-        python_fix='Install Python 3.15.2 from python.org. Put its bin folder on PATH and open a new terminal.'
+        python_fix='Install Python 3.15.2 from python.org and open a new terminal.'
         ;;
     *)
         python_fix='Run this doctor in Git Bash, WSL, Linux, or macOS.'

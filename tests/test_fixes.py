@@ -667,6 +667,41 @@ class PyrightTests(unittest.TestCase):
             )
             self.assertEqual("missing", summary["status"])
 
+    def test_pyright_missing_config_names_the_restore(self: PyrightTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            problems, summary = check_pyright(root, None)
+
+            self.assertIn(
+                "pyrightconfig.json is missing. Strict type checking needs it. "
+                "Restore it from the starter you received.",
+                problems,
+            )
+            self.assertEqual("fail", summary["status"])
+
+    def test_pyright_invalid_config_names_the_file(self: PyrightTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(root / "pyrightconfig.json", "{not json\n")
+
+            problems, summary = check_pyright(root, None)
+
+            self.assertIn("pyrightconfig.json is not valid JSON.", problems)
+            self.assertEqual("fail", summary["status"])
+
+    def test_pyright_config_requires_strict_mode(self: PyrightTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(root / "pyrightconfig.json", '{"typeCheckingMode": "basic"}\n')
+
+            problems, summary = check_pyright(root, None)
+
+            self.assertIn(
+                'pyrightconfig.json must set "typeCheckingMode" to "strict".',
+                problems,
+            )
+            self.assertEqual("fail", summary["status"])
+
     def test_pyright_result_reaches_the_count_line_and_json(self: PyrightTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

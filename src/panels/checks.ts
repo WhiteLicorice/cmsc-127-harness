@@ -7,6 +7,7 @@ export type CheckResult = {
   status: string;
   expected?: unknown;
   actual?: unknown;
+  differences?: string[];
   warnings?: string[];
 };
 
@@ -21,7 +22,7 @@ export type RunnerResult = {
 };
 
 // The server sends this message when .cmsc127/last-run.json is absent.
-const MISSING_RESULT = "No check results found. Run check.sh from the project root.";
+const MISSING_RESULT = "No check results yet. The lab runner writes .cmsc127/last-run.json when it runs.";
 
 export type CheckView = {
   id: string;
@@ -30,6 +31,7 @@ export type CheckView = {
   status: string;
   expected?: unknown;
   actual?: unknown;
+  differences: string[];
   warnings: string[];
 };
 
@@ -42,6 +44,7 @@ export function describeChecks(result: RunnerResult): CheckView[] {
     ...(entry.status === "fail"
       ? { expected: entry.expected ?? null, actual: entry.actual ?? null }
       : {}),
+    differences: entry.differences ?? [],
     warnings: entry.warnings ?? [],
   }));
 }
@@ -66,15 +69,19 @@ export function renderChecks(result: RunnerResult): string {
   const entries = describeChecks(result);
   if (entries.length === 0) {
     if (result.message === undefined || result.message === MISSING_RESULT) {
-      return "<p>No check result exists. Run check.sh from the project root.</p>";
+      return `<p>${escapeHtml(MISSING_RESULT)}</p>`;
     }
-    return `<p>${escapeHtml(result.message)} This page cannot read the file. Run check.sh from the project root to write a new result.</p>`;
+    return `<p>${escapeHtml(result.message)}</p>`;
   }
   const rows = entries.map((entry) => {
     const expected = entry.status === "fail" ? codeBlock(entry.expected) : "";
+    const differences =
+      entry.status === "fail" && entry.differences.length > 0
+        ? `<pre class="difference-note">${escapeHtml(entry.differences.join("\n"))}</pre>`
+        : "";
     const actual =
       entry.status === "fail"
-        ? codeBlock(entry.actual)
+        ? `${differences}${codeBlock(entry.actual)}`
         : entry.warnings.length > 0
           ? `<pre class="warning-note">${escapeHtml(entry.warnings.join("\n"))}</pre>`
           : "";

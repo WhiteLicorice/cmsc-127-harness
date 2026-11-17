@@ -132,9 +132,9 @@ export function renderTableSnapshot(
   const header = columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
   const cap = current.rowCap ?? 100;
   const emptyNote = (current.kind === "r" || current.kind === "p") && current.rows.length === 0 && removedRows.length === 0
-    ? " This table has no committed rows in the latest poll. Check that the table name and the committed data match what you expect."
+    ? " This table has no rows in the last poll. Check that the table name and the data you saved match what you expect."
     : "";
-  return `<section class="table-card"><h2>${escapeHtml(current.table)}</h2><p>Showing up to ${cap} rows. Only these rows are polled.${emptyNote}</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Change</th>${header}</tr></thead><tbody>${currentRows.join("")}${removedRows.join("")}</tbody></table></div></section>`;
+  return `<section class="table-card"><h2>${escapeHtml(current.table)}</h2><p>Showing up to ${cap} rows. The page compares only the rows it shows.${emptyNote}</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Change</th>${header}</tr></thead><tbody>${currentRows.join("")}${removedRows.join("")}</tbody></table></div></section>`;
 }
 
 export function renderTables(current: TablesResponse, previous?: TablesResponse | null): string {
@@ -145,5 +145,5 @@ export function renderTables(current: TablesResponse, previous?: TablesResponse 
   const cards = current.tables
     .map((table) => renderTableSnapshot(table, oldTables.get(table.table)))
     .join("");
-  return `<p>Rows use committed data. The page polls every second.</p>${cards || "<p>No tables or views exist in this schema.</p>"}`;
+  return `<p>Rows show only data the database has finished writing. The page polls every second.</p>${cards || "<p>No tables or views exist in this schema.</p>"}`;
 }

@@ -339,7 +339,7 @@ bash doctor.sh
 ```
 
 The PowerShell doctor checks Python 3.15.2, the pinned drivers, PostgreSQL
-18.6 tools, Git, the PostgreSQL 18 service, port 5432, and a database
+18.x tools, Git, the PostgreSQL 18 service, port 5432, and a database
 connection. The Bash doctor checks Python, the pinned drivers, PostgreSQL
 tools, Git, and a database connection. Each doctor ends with a step count.
 It returns zero only when every step passes.

@@ -4,7 +4,7 @@ describe("row comparison", () => {
   it.each(["r", "p", "v", "m"])("limits the empty-table note to table kinds: %s", async (kind) => {
     const { renderTableSnapshot } = await import("../../src/panels/tables.js");
     const html = renderTableSnapshot({ table: "empty", kind, primaryKey: [], columns: ["id"], rows: [] });
-    expect(html.includes("This table has no committed rows in the latest poll.")).toBe(kind === "r" || kind === "p");
+    expect(html.includes("This table has no rows in the last poll.")).toBe(kind === "r" || kind === "p");
   });
 
   it("marks an inserted row", async () => {

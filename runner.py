@@ -253,10 +253,10 @@ class FormFault(ValueError):
 
 def _as_object(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError(f"{label} must be a JSON object")
+        raise ValueError(f"{label} must be a JSON object.")
     candidate = cast(dict[object, object], value)
     if not all(isinstance(key, str) for key in candidate):
-        raise ValueError(f"{label} must use string keys")
+        raise ValueError(f"{label} must use string keys.")
     return {str(key): item for key, item in candidate.items()}
 
 
@@ -264,7 +264,9 @@ def _read_json(path: Path) -> object:
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
-        raise FormFault(path, 1, 1, "file is not UTF-8 text") from error
+        raise FormFault(
+            path, 1, 1, "file is not UTF-8 text. Save it as UTF-8."
+        ) from error
     try:
         return json.loads(text, parse_float=Decimal)
     except json.JSONDecodeError as error:
@@ -349,33 +351,34 @@ def _validate_dataset(
 ) -> None:
     columns = value.get("columns")
     if not isinstance(columns, list):
-        raise fault("columns must be a list", (*base, "columns"))
+        raise fault("columns must be a list.", (*base, "columns"))
     column_list = cast(list[object], columns)
     for column_index, name in enumerate(column_list):
         if not isinstance(name, str):
             raise fault(
-                f"column {column_index + 1} must be a string",
+                f"column {column_index + 1} must be a string.",
                 (*base, "columns", column_index),
             )
     rows = value.get("rows")
     if not isinstance(rows, list):
-        raise fault("rows must be a list", (*base, "rows"))
+        raise fault("rows must be a list.", (*base, "rows"))
     for row_index, row in enumerate(cast(list[object], rows)):
         if not isinstance(row, list):
             raise fault(
-                f"row {row_index + 1} must be a list",
+                f"row {row_index + 1} must be a list.",
                 (*base, "rows", row_index),
             )
         row_values = cast(list[object], row)
         if len(row_values) != len(column_list):
             raise fault(
-                f"row {row_index + 1} must have {len(column_list)} values",
+                f"row {row_index + 1} must have {len(column_list)} values.",
                 (*base, "rows", row_index),
             )
         for cell in row_values:
             if isinstance(cell, (dict, list)):
                 raise fault(
-                    f"row {row_index + 1} must hold JSON scalars",
+                    f"row {row_index + 1} must hold only numbers, strings, true, "
+                    "false, or null.",
                     (*base, "rows", row_index),
                 )
 
@@ -389,7 +392,7 @@ def _validate_expected(path: Path, expected: Mapping[str, object], kind: str) ->
     if kind == "reject":
         sqlstate = expected.get("sqlstate")
         if sqlstate is not None and not isinstance(sqlstate, str):
-            raise fault("sqlstate must be a string", ("sqlstate",))
+            raise fault("sqlstate must be a string.", ("sqlstate",))
         return
     _validate_dataset(expected, fault, ())
 
@@ -591,37 +594,37 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
 
     if kind == "state":
         if not isinstance(body.get("operation"), str):
-            raise fault("operation must be a string", ("operation",))
+            raise fault("operation must be a string.", ("operation",))
         if not isinstance(body.get("check_sql"), str):
-            raise fault("check_sql must be a string", ("check_sql",))
+            raise fault("check_sql must be a string.", ("check_sql",))
         return
     if kind == "document":
         if not isinstance(body.get("file"), str):
-            raise fault("file must be a string", ("file",))
+            raise fault("file must be a string.", ("file",))
         headings = body.get("headings")
         if not isinstance(headings, list) or not all(
             isinstance(heading, str) for heading in cast(list[object], headings)
         ):
-            raise fault("headings must be a list of strings", ("headings",))
+            raise fault("headings must be a list of strings.", ("headings",))
         placeholders = body.get("placeholders")
         if not isinstance(placeholders, dict) or not all(
             isinstance(value, str)
             for value in cast(dict[object, object], placeholders).values()
         ):
-            raise fault("placeholders must be an object of strings", ("placeholders",))
+            raise fault("placeholders must be an object of strings.", ("placeholders",))
         warning_sql = body.get("warning_sql")
         if warning_sql is not None and not isinstance(warning_sql, str):
-            raise fault("warning_sql must be a string", ("warning_sql",))
+            raise fault("warning_sql must be a string.", ("warning_sql",))
         return
     if kind in {"report", "view"}:
         if not isinstance(body.get("report"), str):
-            raise fault("report must be a string", ("report",))
+            raise fault("report must be a string.", ("report",))
         if kind == "view" and not isinstance(body.get("view"), str):
-            raise fault("view must be a string", ("view",))
+            raise fault("view must be a string.", ("view",))
         return
     steps = body.get("steps")
     if not isinstance(steps, list):
-        raise fault("steps must be a list", ("steps",))
+        raise fault("steps must be a list.", ("steps",))
     for index, raw_step in enumerate(cast(list[object], steps)):
         try:
             step = _as_object(raw_step, "step")
@@ -629,9 +632,9 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
             raise fault(str(error), ("steps", index)) from error
         session = step.get("session")
         if not isinstance(session, str) or session not in {"a", "b"}:
-            raise fault("session must be a or b", ("steps", index, "session"))
+            raise fault("session must be a or b.", ("steps", index, "session"))
         if not isinstance(step.get("sql"), str):
-            raise fault("sql must be a string", ("steps", index, "sql"))
+            raise fault("sql must be a string.", ("steps", index, "sql"))
         expected = step.get("expected")
         if expected is not None:
             try:
@@ -640,7 +643,7 @@ def _validate_case_body(path: Path, kind: str, case_id: str) -> None:
                 raise fault(str(error), ("steps", index, "expected")) from error
             _validate_dataset(expected_object, fault, ("steps", index, "expected"))
     if not isinstance(body.get("check_sql"), str):
-        raise fault("check_sql must be a string", ("check_sql",))
+        raise fault("check_sql must be a string.", ("check_sql",))
 
 
 def _validate_invariant_fields(
@@ -654,7 +657,7 @@ def _validate_invariant_fields(
         value = invariant.get(name)
         if not isinstance(value, expected_type):
             raise fault(
-                f"invariant {index}: {kind} needs a {description}",
+                f"invariant {index}: {kind} needs a {description}.",
                 (*location, name),
             )
         return value
@@ -664,13 +667,13 @@ def _validate_invariant_fields(
         file_list = cast(list[object], files)
         if not file_list:
             raise fault(
-                f"invariant {index}: work_sql needs a non-empty files list",
+                f"invariant {index}: work_sql needs a non-empty files list.",
                 (*location, "files"),
             )
         for file_index, file_name in enumerate(file_list):
             if not isinstance(file_name, str) or not file_name.endswith(".sql"):
                 raise fault(
-                    f"invariant {index}: work_sql needs SQL files",
+                    f"invariant {index}: work_sql needs SQL files.",
                     (*location, "files", file_index),
                 )
     elif kind == "normal_form":
@@ -684,7 +687,7 @@ def _validate_invariant_fields(
             for field in ("determinant", "dependent"):
                 if not isinstance(rule.get(field), list):
                     raise fault(
-                        f"invariant {index}: rule {rule_index + 1} needs a {field} list",
+                        f"invariant {index}: rule {rule_index + 1} needs a {field} list.",
                         (*location, "rules", rule_index, field),
                     )
     elif kind == "feature":
@@ -692,14 +695,14 @@ def _validate_invariant_fields(
         for feature_index, feature in enumerate(cast(list[object], features)):
             if not isinstance(feature, str) or feature not in FEATURE_PATTERNS:
                 raise fault(
-                    f"invariant {index}: unsupported SQL feature {feature!r}",
+                    f"invariant {index}: unsupported SQL feature {feature!r}.",
                     (*location, "features", feature_index),
                 )
         file_name = invariant.get("file")
         if file_name is not None:
             if not isinstance(file_name, str):
                 raise fault(
-                    f"invariant {index}: feature file must be a string",
+                    f"invariant {index}: feature file must be a string.",
                     (*location, "file"),
                 )
         else:
@@ -711,7 +714,7 @@ def _validate_invariant_fields(
         key_column = invariant.get("key_column")
         if key_column is not None and not isinstance(key_column, str):
             raise fault(
-                f"invariant {index}: key_column must be a string",
+                f"invariant {index}: key_column must be a string.",
                 (*location, "key_column"),
             )
     elif kind == "written":
@@ -720,7 +723,7 @@ def _validate_invariant_fields(
         for section_index, section in enumerate(cast(list[object], sections)):
             if not isinstance(section, str):
                 raise fault(
-                    f"invariant {index}: section names must be strings",
+                    f"invariant {index}: section names must be strings.",
                     (*location, "sections", section_index),
                 )
 
@@ -744,34 +747,34 @@ def _validate_case(
         raise fault(str(error), location) from error
     case_id = case.get("id")
     if not isinstance(case_id, str) or not case_id:
-        raise fault(f"case {index}: id must be a non-empty string", (*location, "id"))
+        raise fault(f"case {index}: id must be a non-empty string.", (*location, "id"))
     replacement = case.get("replaces")
     if replacement is not None:
         if pair or not isinstance(replacement, str) or not replacement:
             raise fault(
-                f"case {case_id}: replaces must name one published case",
+                f"case {case_id}: replaces must name one published case.",
                 (*location, "replaces"),
             )
     existing_manifest = identifiers.get(case_id)
     if existing_manifest is not None:
         raise fault(
-            f"case {case_id}: duplicate id, already defined in {existing_manifest}",
+            f"case {case_id}: duplicate id, already defined in {existing_manifest}.",
             (*location, "id"),
         )
     identifiers[case_id] = source_manifest
     stage = case.get("stage")
     if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
         raise fault(
-            f"case {case_id}: stage must be a positive integer",
+            f"case {case_id}: stage must be a positive integer.",
             (*location, "stage"),
         )
     kind = case.get("kind")
     if not isinstance(kind, str) or kind not in CASE_KINDS:
-        raise fault(f"case {case_id}: unsupported kind {kind!r}", (*location, "kind"))
+        raise fault(f"case {case_id}: unsupported kind {kind!r}.", (*location, "kind"))
     relative_file = case.get("file")
     if not isinstance(relative_file, str) or not relative_file:
         raise fault(
-            f"case {case_id}: file must be a relative path",
+            f"case {case_id}: file must be a relative path.",
             (*location, "file"),
         )
     case_path = (root / relative_file).resolve()
@@ -779,7 +782,7 @@ def _validate_case(
         case_path.relative_to(case_root.resolve())
     except ValueError as error:
         raise fault(
-            f"case {case_id}: file must be inside cases/",
+            f"case {case_id}: file must be inside cases/.",
             (*location, "file"),
         ) from error
     if pair:
@@ -787,12 +790,12 @@ def _validate_case(
             case_path.relative_to((case_root / "pair").resolve())
         except ValueError as error:
             raise fault(
-                f"case {case_id}: file must be inside cases/pair/",
+                f"case {case_id}: file must be inside cases/pair/.",
                 (*location, "file"),
             ) from error
     if not case_path.is_file():
         raise fault(
-            f"case {case_id}: case file is missing: {relative_file}",
+            f"case {case_id}: case file is missing: {relative_file}.",
             (*location, "file"),
         )
     allowed_suffixes = {
@@ -808,7 +811,7 @@ def _validate_case(
     }
     if case_path.suffix not in allowed_suffixes[str(kind)]:
         raise fault(
-            f"case {case_id}: {kind} needs a supported case-file type",
+            f"case {case_id}: {kind} needs a supported case-file type.",
             (*location, "file"),
         )
     alternate_file = case.get("alternate_file")
@@ -816,7 +819,7 @@ def _validate_case(
     if alternate_file is not None:
         if not isinstance(alternate_file, str) or not alternate_file:
             raise fault(
-                f"case {case_id}: alternate_file must be a relative path",
+                f"case {case_id}: alternate_file must be a relative path.",
                 (*location, "alternate_file"),
             )
         alternate_case_path = (root / alternate_file).resolve()
@@ -824,17 +827,17 @@ def _validate_case(
             alternate_case_path.relative_to(case_root.resolve())
         except ValueError as error:
             raise fault(
-                f"case {case_id}: alternate_file must be inside cases/",
+                f"case {case_id}: alternate_file must be inside cases/.",
                 (*location, "alternate_file"),
             ) from error
         if alternate_case_path.suffix not in allowed_suffixes[str(kind)]:
             raise fault(
-                f"case {case_id}: alternate_file has an unsupported type for {kind}",
+                f"case {case_id}: alternate_file has an unsupported type for {kind}.",
                 (*location, "alternate_file"),
             )
         if not alternate_case_path.is_file():
             raise fault(
-                f"case {case_id}: alternate case file is missing: {alternate_file}",
+                f"case {case_id}: alternate case file is missing: {alternate_file}.",
                 (*location, "alternate_file"),
             )
         listed.add(alternate_case_path)
@@ -847,7 +850,7 @@ def _validate_case(
             1,
             "a reject case must be one plain `INSERT ... VALUES` row of "
             "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
-            "second row",
+            "second row.",
             root=root,
         )
     if kind == "reject" and alternate_case_path is not None and not _is_single_insert_statement(
@@ -859,7 +862,7 @@ def _validate_case(
             1,
             "a reject case must be one plain `INSERT ... VALUES` row of "
             "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
-            "second row",
+            "second row.",
             root=root,
         )
     listed.add(case_path)
@@ -869,7 +872,7 @@ def _validate_case(
     else:
         if not isinstance(expected_file, str) or not expected_file:
             raise fault(
-                f"case {case_id}: expected_file must be a relative path",
+                f"case {case_id}: expected_file must be a relative path.",
                 (*location, "expected_file"),
             )
         expected_path = (root / expected_file).resolve()
@@ -877,18 +880,18 @@ def _validate_case(
             expected_path.relative_to(case_root.resolve())
         except ValueError as error:
             raise fault(
-                f"case {case_id}: expected_file must be inside cases/",
+                f"case {case_id}: expected_file must be inside cases/.",
                 (*location, "expected_file"),
             ) from error
         if expected_path.suffix != ".expected":
             raise fault(
-                f"case {case_id}: expected_file must end in .expected",
+                f"case {case_id}: expected_file must end in .expected.",
                 (*location, "expected_file"),
             )
     listed.add(expected_path)
     if not expected_path.is_file():
         raise fault(
-            f"case {case_id}: .expected sidecar is missing",
+            f"case {case_id}: the .expected file is missing.",
             (*location, "file"),
         )
     expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
@@ -898,7 +901,7 @@ def _validate_case(
     if alternate_expected_file is not None:
         if not isinstance(alternate_expected_file, str) or not alternate_expected_file:
             raise fault(
-                f"case {case_id}: alternate_expected_file must be a relative path",
+                f"case {case_id}: alternate_expected_file must be a relative path.",
                 (*location, "alternate_expected_file"),
             )
         alternate_expected_path = (root / alternate_expected_file).resolve()
@@ -906,18 +909,18 @@ def _validate_case(
             alternate_expected_path.relative_to(case_root.resolve())
         except ValueError as error:
             raise fault(
-                f"case {case_id}: alternate_expected_file must be inside cases/",
+                f"case {case_id}: alternate_expected_file must be inside cases/.",
                 (*location, "alternate_expected_file"),
             ) from error
         if alternate_expected_path.suffix != ".expected":
             raise fault(
-                f"case {case_id}: alternate_expected_file must end in .expected",
+                f"case {case_id}: alternate_expected_file must end in .expected.",
                 (*location, "alternate_expected_file"),
             )
         listed.add(alternate_expected_path)
         if not alternate_expected_path.is_file():
             raise fault(
-                f"case {case_id}: alternate .expected sidecar is missing",
+                f"case {case_id}: the alternate .expected file is missing.",
                 (*location, "alternate_expected_file"),
             )
         alternate_expected = _as_object(
@@ -928,28 +931,28 @@ def _validate_case(
     if "role" in case or "role_env" in case:
         role = case.get("role")
         if kind != "reject":
-            raise fault(f"case {case_id}: role is only valid for a reject case", (*location, "role"))
+            raise fault(f"case {case_id}: role is only valid for a reject case.", (*location, "role"))
         if not isinstance(role, str) or ROLE_NAME.fullmatch(role) is None:
-            raise fault(f"case {case_id}: role must be a lowercase PostgreSQL role name", (*location, "role"))
+            raise fault(f"case {case_id}: role must be a lowercase PostgreSQL role name.", (*location, "role"))
         role_env = case.get("role_env")
         if role_env is not None and (
             not isinstance(role_env, str)
             or re.fullmatch(r"[A-Z_][A-Z0-9_]*", role_env) is None
         ):
             raise fault(
-                f"case {case_id}: role_env must be an environment variable name",
+                f"case {case_id}: role_env must be an environment variable name.",
                 (*location, "role_env"),
             )
         if expected.get("sqlstate") != "42501":
-            raise fault(f"case {case_id}: role reject cases must expect SQLSTATE 42501", (*location, "role"))
+            raise fault(f"case {case_id}: role reject cases must expect SQLSTATE 42501.", (*location, "role"))
     exit_path = case_path.with_suffix(".exit")
     if exit_path.exists():
         try:
             expected_exit = int(exit_path.read_text(encoding="utf-8").strip())
         except (ValueError, UnicodeDecodeError) as error:
-            raise FormFault(exit_path, 1, 1, "must contain one integer", root=root) from error
+            raise FormFault(exit_path, 1, 1, "The .exit file must contain one integer.", root=root) from error
         if expected_exit < 0:
-            raise FormFault(exit_path, 1, 1, "must be zero or greater", root=root)
+            raise FormFault(exit_path, 1, 1, "The .exit file must contain a number zero or greater.", root=root)
     if kind in {"state", "race", "document", "report", "view"}:
         _validate_case_body(case_path, str(kind), case_id)
         if alternate_case_path is not None:
@@ -1003,12 +1006,12 @@ def _load_pair_manifest(
         return FormFault(pair_path, line, column, message, root=root)
 
     if pair_manifest.get("version") != 1:
-        raise fault("version must be 1", ("version",))
+        raise fault("version must be 1.", ("version",))
     if "invariants" in pair_manifest or "skips" in pair_manifest:
-        raise fault("the pair manifest may list only cases", ())
+        raise fault("the pair manifest may list only cases.", ())
     raw_cases = pair_manifest.get("cases")
     if not isinstance(raw_cases, list):
-        raise fault("cases must be a list", ("cases",))
+        raise fault("cases must be a list.", ("cases",))
     cases: list[dict[str, object]] = []
     for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
         cases.append(
@@ -1032,7 +1035,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
     case_root = root / "cases"
     manifest_path = case_root / "manifest.json"
     if not manifest_path.is_file():
-        raise FormFault(manifest_path, 1, 1, "file is missing", root=root)
+        raise FormFault(manifest_path, 1, 1, "file is missing.", root=root)
     manifest_text = manifest_path.read_text(encoding="utf-8")
     manifest = _as_object(_read_json(manifest_path), "cases/manifest.json")
     locations = _json_locations(manifest_text)
@@ -1042,10 +1045,10 @@ def _load_manifest(root: Path) -> dict[str, object]:
         return FormFault(manifest_path, line, column, message, root=root)
 
     if manifest.get("version") != 1:
-        raise fault("version must be 1", ("version",))
+        raise fault("version must be 1.", ("version",))
     raw_cases = manifest.get("cases")
     if not isinstance(raw_cases, list):
-        raise fault("cases must be a list", ("cases",))
+        raise fault("cases must be a list.", ("cases",))
 
     identifiers: dict[str, str] = {}
     listed: set[Path] = set()
@@ -1083,12 +1086,12 @@ def _load_manifest(root: Path) -> dict[str, object]:
             return FormFault(path, line, column, message, root=root)
 
         if published_manifest.get("version") != 1:
-            raise published_fault("version must be 1", ("version",))
+            raise published_fault("version must be 1.", ("version",))
         if "invariants" in published_manifest or "skips" in published_manifest:
-            raise published_fault("a published lab manifest may list only cases", ())
+            raise published_fault("a published lab manifest may list only cases.", ())
         published_raw_cases = published_manifest.get("cases")
         if not isinstance(published_raw_cases, list):
-            raise published_fault("cases must be a list", ("cases",))
+            raise published_fault("cases must be a list.", ("cases",))
         for index, raw_case in enumerate(
             cast(list[object], published_raw_cases), start=1
         ):
@@ -1114,7 +1117,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
         replaced = cases_by_id.get(replacement)
         if replaced is None:
             raise ValueError(
-                f"case {case['id']}: replaces unknown case {replacement}"
+                f"case {case['id']}: replaces unknown case {replacement}."
             )
         replaced_stage = replaced.get("stage")
         replacement_stage = case.get("stage")
@@ -1124,10 +1127,10 @@ def _load_manifest(root: Path) -> dict[str, object]:
             or not isinstance(replacement_stage, int)
             or isinstance(replacement_stage, bool)
         ):
-            raise ValueError(f"case {case['id']}: replacement stage is invalid")
+            raise ValueError(f"case {case['id']}: replacement stage is invalid.")
         if replaced_stage >= replacement_stage:
             raise ValueError(
-                f"case {case['id']}: replacement stage must be later than {replacement}"
+                f"case {case['id']}: replacement stage must be later than {replacement}."
             )
     manifest["cases"] = all_cases
 
@@ -1157,11 +1160,11 @@ def _load_manifest(root: Path) -> dict[str, object]:
     )
     if unlisted_sidecars:
         relative = unlisted_sidecars[0].relative_to(root).as_posix()
-        raise fault(f"unlisted case sidecar: {relative}", ("cases",))
+        raise fault(f"unlisted expected or .exit file: {relative}", ("cases",))
 
     raw_invariants = manifest.get("invariants", [])
     if not isinstance(raw_invariants, list):
-        raise fault("invariants must be a list", ("invariants",))
+        raise fault("invariants must be a list.", ("invariants",))
     for index, raw_invariant in enumerate(cast(list[object], raw_invariants), start=1):
         location = ("invariants", index - 1)
         try:
@@ -1175,19 +1178,19 @@ def _load_manifest(root: Path) -> dict[str, object]:
             or invariant_stage < 1
         ):
             raise fault(
-                f"invariant {index}: stage must be a positive integer",
+                f"invariant {index}: stage must be a positive integer.",
                 (*location, "stage"),
             )
         kind = invariant.get("kind")
         if not isinstance(kind, str) or kind not in INVARIANT_KINDS:
             raise fault(
-                f"invariant {index}: unsupported kind {kind!r}",
+                f"invariant {index}: unsupported kind {kind!r}.",
                 (*location, "kind"),
             )
         _validate_invariant_fields(invariant, str(kind), index, fault, location)
     skips = manifest.get("skips", [])
     if not isinstance(skips, list):
-        raise fault("skips must be a list", ("skips",))
+        raise fault("skips must be a list.", ("skips",))
     for index, raw_skip in enumerate(cast(list[object], skips), start=1):
         location = ("skips", index - 1)
         try:
@@ -1197,7 +1200,7 @@ def _load_manifest(root: Path) -> dict[str, object]:
         skip_stage = skip.get("stage", 1)
         if not isinstance(skip_stage, int) or isinstance(skip_stage, bool) or skip_stage < 1:
             raise fault(
-                f"skip {index}: stage must be a positive integer",
+                f"skip {index}: stage must be a positive integer.",
                 (*location, "stage"),
             )
     return manifest
@@ -1216,14 +1219,14 @@ def published_stage(root: Path) -> int:
         manifest = _as_object(_read_json(path), path.relative_to(root).as_posix())
         raw_cases = manifest.get("cases")
         if not isinstance(raw_cases, list):
-            raise ValueError(f"{path.relative_to(root).as_posix()}: cases must be a list")
+            raise ValueError(f"{path.relative_to(root).as_posix()}: cases must be a list.")
         for index, raw_case in enumerate(cast(list[object], raw_cases), start=1):
             case = _as_object(raw_case, f"case {index}")
             stage = case.get("stage")
             if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1:
                 raise ValueError(
                     f"{path.relative_to(root).as_posix()}: case {index}: "
-                    "stage must be a positive integer"
+                    "stage must be a positive integer."
                 )
             stages.append(stage)
     return max(stages, default=1)
@@ -1335,14 +1338,14 @@ def compare_dataset(
     expected_rows_value = expected.get("rows")
     actual_rows_value = actual.get("rows")
     if not isinstance(expected_columns, list) or not isinstance(actual_columns, list):
-        return ["expected and actual results need a columns list"]
+        return ["expected and actual results need a columns list."]
     if expected_columns != actual_columns:
         differences.append(
             "column order or names differ: "
             f"expected {expected_columns!r}, actual {actual_columns!r}"
         )
     if not isinstance(expected_rows_value, list) or not isinstance(actual_rows_value, list):
-        return differences + ["expected and actual results need a rows list"]
+        return differences + ["expected and actual results need a rows list."]
     expected_rows = cast(list[object], expected_rows_value)
     actual_rows = cast(list[object], actual_rows_value)
     expected_column_list = cast(list[object], expected_columns)
@@ -1350,11 +1353,11 @@ def compare_dataset(
     for label, rows in (("expected", expected_rows), ("actual", actual_rows)):
         for index, row in enumerate(rows, start=1):
             if not isinstance(row, list):
-                differences.append(f"{label} row {index} is not a list")
+                differences.append(f"{label} row {index} is not a list.")
             elif len(cast(list[object], row)) != len(
                 expected_column_list if label == "expected" else actual_column_list
             ):
-                differences.append(f"{label} row {index} has the wrong column count")
+                differences.append(f"{label} row {index} has the wrong column count.")
     if differences:
         return differences
     expected_rows = [cast(list[object], row) for row in expected_rows]
@@ -1566,7 +1569,7 @@ def _migration_faults(root: Path) -> list[str]:
         if number != expected:
             faults.append(
                 f"migrations/{path.name}: the numbers must start at 0001 and have "
-                f"no gaps or repeats; expected {expected:04d}."
+                f"no gaps or repeats. The next number is {expected:04d}."
             )
             expected = number + 1
         else:
@@ -1597,7 +1600,7 @@ def _report_path(root: Path, report_name: str, case_id: str) -> Path | None:
         report_path.relative_to(root.resolve())
     except ValueError as error:
         raise ValueError(
-            f"case {case_id}: the report must stay inside the repository"
+            f"case {case_id}: the report must stay inside the repository."
         ) from error
     if report_path.suffix != ".sql" or not report_path.is_file():
         return None
@@ -1634,9 +1637,9 @@ def _view_bypass_rows(
     if view_name in relations:
         return []
     if not relations:
-        return [[view_name, f"the report does not read the {view_name} view"]]
+        return [[view_name, f"the report does not read the {view_name} view."]]
     return [
-        [relation, f"the report reads {relation} instead of the {view_name} view"]
+        [relation, f"the report reads {relation} instead of the {view_name} view."]
         for relation in relations
     ]
 
@@ -2036,14 +2039,17 @@ def _design_rows(
         or not isinstance(headings, list)
         or not isinstance(placeholders, dict)
     ):
-        return ["the design case needs file, headings, and placeholders"]
+        return ["the design case needs file, headings, and placeholders."]
     path = root / file_name
     if not path.is_file():
         return [f"{file_name} is missing, so the design record cannot be checked."]
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return [f"{file_name} is not UTF-8 text, so the design record cannot be read."]
+        return [
+            f"{file_name} is not UTF-8 text, so the design record cannot be read. "
+            "Save it as UTF-8."
+        ]
     placeholder_text = cast(dict[str, object], placeholders)
     level_two = [
         (title, body, number)
@@ -2191,18 +2197,33 @@ def _run_case(
         expected_code = expected.get("sqlstate")
         if error is None:
             actual = {"sqlstate": None}
-            problems = ["statement succeeded, but the case requires rejection"]
+            problems = [
+                "statement succeeded, but the case requires rejection. Change "
+                "the statement so a table constraint refuses the row."
+            ]
         else:
             error_code, constraint_name, table_name, column_name, source_function = error
             actual = {"sqlstate": error_code}
             problems = []
             if expected_code is not None and expected_code != error_code:
                 problems.append(
-                    f"SQLSTATE differs: expected {expected_code!r}, actual {error_code!r}"
+                    f"SQLSTATE differs: expected {expected_code!r}, actual "
+                    f"{error_code!r}. Change the statement so it fails with the "
+                    "expected SQLSTATE."
                 )
             if role is not None:
                 if error_code != "42501" or source_function in _RAISE_SOURCE_FUNCTIONS:
-                    problems.append("the error does not come from the restricted role's privileges")
+                    problems.append(
+                        "the error does not come from the restricted role's "
+                        "privileges. Change the case so the restricted role refuses "
+                        "the statement."
+                    )
+            elif error_code in {"42P01", "42703"}:
+                problems.append(
+                    "the statement failed before it reached a constraint: a table "
+                    "or column does not exist. Check the names in the case file and "
+                    "the migration that creates them."
+                )
             elif not _constraint_refused(
                 connection,
                 error_code,
@@ -2212,17 +2233,18 @@ def _run_case(
                 source_function,
             ):
                 problems.append(
-                    "the error does not come from a named constraint; a RAISE, "
-                    "or an error with no constraint, does not test the schema"
+                    "the error does not come from a named constraint. A RAISE or "
+                    "ASSERT, or an error with no constraint name, does not test the "
+                    "schema. Change the insert so a table constraint refuses the row."
                 )
             elif target is not None:
                 tree = _relation_tree(connection, target)
                 rule = _tree_rule(connection, tree)
                 if rule is not None:
                     problems.append(
-                        f"the insert target {target} carries the rewrite rule "
-                        f"{rule}; rewrite rules are outside this course, so the "
-                        "case cannot show that a constraint refuses the row"
+                        f"the insert target {target} is a view, and the view "
+                        "handles the insert. Insert into the table itself so a "
+                        "constraint refuses the row."
                     )
                 elif (
                     table_name is not None
@@ -2238,14 +2260,14 @@ def _run_case(
                 ):
                     problems.append(
                         "the constraint refuses the row only after a user trigger "
-                        "runs; it must refuse the same insert with user triggers off"
+                        "runs. The same insert must fail with user triggers off."
                     )
     elif kind == "state":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         operation = body.get("operation")
         check_sql = body.get("check_sql")
         if not isinstance(operation, str) or not isinstance(check_sql, str):
-            raise ValueError(f"case {case_id}: state file needs operation and check_sql strings")
+            raise ValueError(f"case {case_id}: state file needs operation and check_sql strings.")
         restore_problems = _backup_restore(root, connection, database_url) if operation == "restore" else []
         if operation != "restore":
             with connection.cursor() as cursor:
@@ -2264,7 +2286,7 @@ def _run_case(
         steps = body.get("steps")
         check_sql = body.get("check_sql")
         if not isinstance(steps, list) or not isinstance(check_sql, str):
-            raise ValueError(f"case {case_id}: race file needs steps and check_sql")
+            raise ValueError(f"case {case_id}: race file needs steps and check_sql.")
         second = cast(_DbConnection, psycopg.connect(database_url, autocommit=True))
         step_results: list[dict[str, object]] = []
         problems = []
@@ -2278,7 +2300,7 @@ def _run_case(
                     or session not in {"a", "b"}
                     or not isinstance(statement, str)
                 ):
-                    raise ValueError(f"case {case_id}: each race step needs session a or b and SQL")
+                    raise ValueError(f"case {case_id}: each race step needs session a or b and SQL.")
                 active = connection if session == "a" else second
                 with active.cursor() as cursor:
                     _execute(cursor, statement)
@@ -2314,7 +2336,7 @@ def _run_case(
         body = _as_object(_read_json(case_path), f"case {case_id}")
         report_name = body.get("report")
         if not isinstance(report_name, str):
-            raise ValueError(f"case {case_id}: report file needs a report string")
+            raise ValueError(f"case {case_id}: report file needs a report string.")
         report_path = _report_path(root, report_name, case_id)
         if report_path is None:
             actual = {"columns": [], "rows": []}
@@ -2325,8 +2347,8 @@ def _run_case(
             )
             if statement_count != 1:
                 row = (
-                    f"report file {report_name} holds {statement_count} statements; "
-                    "the report must be one query."
+                    f"report file {report_name} holds {statement_count} statements. "
+                    "The report must be one query."
                 )
                 actual = {"columns": ["row"], "rows": [[row]]}
                 problems = [row]
@@ -2339,7 +2361,7 @@ def _run_case(
         report_name = body.get("report")
         view_name = body.get("view")
         if not isinstance(report_name, str) or not isinstance(view_name, str):
-            raise ValueError(f"case {case_id}: view file needs report and view strings")
+            raise ValueError(f"case {case_id}: view file needs report and view strings.")
         report_path = _report_path(root, report_name, case_id)
         view_rows: list[list[object]]
         if report_path is None:
@@ -2364,7 +2386,9 @@ def _run_case(
         problems: list[str] = []
         if completed.returncode != expected_exit:
             problems.append(
-                f"exit differs: expected {expected_exit}, actual {completed.returncode}"
+                f"exit differs: expected {expected_exit}, actual "
+                f"{completed.returncode}. Change the command so it exits with the "
+                "expected status."
             )
         if expected_exit == 0:
             try:
@@ -2373,7 +2397,8 @@ def _run_case(
                 problems.extend(compare_dataset(expected, output, ordered=ordered))
                 actual["result"] = output
             except (json.JSONDecodeError, ValueError) as error:
-                problems.append(f"./run must print a JSON result object: {error}")
+                detail = str(error).strip().rstrip(".!?")
+                problems.append(f"./run must print a JSON result object. {detail}.")
                 actual["stderr"] = completed.stderr.strip()
     else:
         problems = [f"unsupported case kind {kind!r}"]
@@ -2441,16 +2466,16 @@ def _check_normal_form(
     mapping = config.get("mapping")
     rules = config.get("rules")
     if not isinstance(mapping, dict) or not isinstance(rules, list):
-        return ["normal_form needs mapping and rules"]
+        return ["normal_form needs mapping and rules."]
     columns = _as_object(cast(object, mapping), "normal_form mapping")
     errors: list[str] = []
     targets: dict[str, tuple[str, str]] = {}
     catalog: dict[str, set[str] | None] = {}
     if not columns:
-        errors.append("normal_form mapping is empty")
+        errors.append("normal_form mapping is empty.")
     for source_name, target_value in columns.items():
         if not isinstance(target_value, dict):
-            errors.append(f"mapping for {source_name} must be an object")
+            errors.append(f"mapping for {source_name} must be an object.")
             continue
         target_object = _as_object(
             cast(object, target_value), f"mapping for {source_name}"
@@ -2458,20 +2483,20 @@ def _check_normal_form(
         table = target_object.get("table")
         column = target_object.get("column")
         if not isinstance(table, str) or not isinstance(column, str):
-            errors.append(f"mapping for {source_name} needs table and column")
+            errors.append(f"mapping for {source_name} needs table and column.")
             continue
         if table not in catalog:
             catalog[table] = _table_columns(connection, table)
         table_columns = catalog[table]
         if table_columns is None:
             errors.append(
-                f"mapping for {source_name} names a table that does not exist: {table}"
+                f"mapping for {source_name} names a table that does not exist: {table}."
             )
             continue
         if column not in table_columns:
             errors.append(
                 f"mapping for {source_name} names a column that does not exist: "
-                f"{table}.{column}"
+                f"{table}.{column}."
             )
             continue
         targets[source_name] = (table, column)
@@ -2481,14 +2506,14 @@ def _check_normal_form(
         determinant_names = rule.get("determinant")
         dependent_names = rule.get("dependent")
         if not isinstance(determinant_names, list) or not isinstance(dependent_names, list):
-            errors.append(f"{rule_id}: determinant and dependent must be lists")
+            errors.append(f"{rule_id}: determinant and dependent must be lists.")
             continue
         determinant: list[tuple[str, str]] = []
         dependents: list[tuple[str, str]] = []
         valid = True
         for source_name in cast(list[object], determinant_names):
             if not isinstance(source_name, str) or source_name not in columns:
-                errors.append(f"{rule_id}: source column {source_name!r} has no mapping")
+                errors.append(f"{rule_id}: source column {source_name!r} has no mapping.")
                 valid = False
                 continue
             target = targets.get(source_name)
@@ -2498,7 +2523,7 @@ def _check_normal_form(
             determinant.append(target)
         for source_name in cast(list[object], dependent_names):
             if not isinstance(source_name, str) or source_name not in columns:
-                errors.append(f"{rule_id}: source column {source_name!r} has no mapping")
+                errors.append(f"{rule_id}: source column {source_name!r} has no mapping.")
                 valid = False
                 continue
             target = targets.get(source_name)
@@ -2511,16 +2536,16 @@ def _check_normal_form(
         determinant_tables = {table for table, _ in determinant}
         all_tables = determinant_tables | {table for table, _ in dependents}
         if len(all_tables) != 1:
-            errors.append(f"{rule_id}: determinant and dependent columns must share one table")
+            errors.append(f"{rule_id}: determinant and dependent columns must share one table.")
             continue
         determinant_columns = frozenset(column for _, column in determinant)
         if len(determinant_tables) != 1:
-            errors.append(f"{rule_id}: determinant columns must be in one table")
+            errors.append(f"{rule_id}: determinant columns must be in one table.")
             continue
         determinant_table = next(iter(determinant_tables))
         if determinant_columns not in _unique_keys(connection, determinant_table):
             errors.append(
-                f"{rule_id}: no primary or unique key enforces the determinant in {determinant_table}"
+                f"{rule_id}: no primary or unique key enforces the determinant in {determinant_table}."
             )
             continue
     return errors
@@ -2534,9 +2559,9 @@ def _check_feature(
 ) -> list[str]:
     features = item.get("features")
     if not isinstance(features, list):
-        return ["feature invariant needs a features list"]
+        return ["feature invariant needs a features list."]
     invalid = [
-        f"unsupported SQL feature {feature!r}"
+        f"unsupported SQL feature {feature!r}."
         for feature in cast(list[object], features)
         if not isinstance(feature, str) or feature not in FEATURE_PATTERNS
     ]
@@ -2546,7 +2571,7 @@ def _check_feature(
     file_name = item.get("file")
     if isinstance(file_name, str):
         if root is None:
-            return ["feature invariant needs the repository root for a file check"]
+            return ["feature invariant needs the repository root for a file check."]
         path = (root / file_name).resolve()
         try:
             path.relative_to(root.resolve())
@@ -2575,7 +2600,7 @@ def _check_feature(
     view = item.get("view")
     schema = item.get("schema", "public")
     if not isinstance(view, str) or not isinstance(schema, str):
-        return ["feature invariant needs a schema, view, and features list"]
+        return ["feature invariant needs a schema, view, and features list."]
     with connection.cursor() as cursor:
         _execute(
             cursor,
@@ -2589,9 +2614,9 @@ def _check_feature(
         )
         row = cursor.fetchone()
     if row is None or not isinstance(row[0], str):
-        return [f"required view {view} does not exist"]
+        return [f"required view {view} does not exist."]
     if migration_views is not None and (schema, view) not in migration_views:
-        return [f"view {view} was not created by a migration"]
+        return [f"view {view} was not created by a migration."]
     return []
 
 
@@ -2742,25 +2767,26 @@ def _check_index(
     index_name = item.get("index")
     key_column = item.get("key_column")
     if not isinstance(file_name, str) or not isinstance(index_name, str):
-        return ["index invariant needs file and index"]
+        return ["index invariant needs file and index."]
     if key_column is not None and not isinstance(key_column, str):
-        return ["index key_column must be a string"]
+        return ["index key_column must be a string."]
     query_path = root / file_name
     if not query_path.is_file() or query_path.suffix != ".sql":
         return [f"index query must be a SQL file: {file_name}"]
     identity = _resolve_index(connection, index_name)
     if identity is None:
-        return [f"index {index_name} does not exist in the catalog"]
+        return [f"index {index_name} does not exist in the catalog."]
     if identity not in migration_indexes:
-        return [f"index {index_name} was not created by a migration"]
+        return [f"index {index_name} was not created by a migration."]
     if isinstance(key_column, str):
         key_columns = _index_key_columns(connection, identity)
         if not key_columns:
-            return [f"index {index_name} has no key column in the catalog"]
+            return [f"index {index_name} has no key column in the catalog."]
         if key_columns[0] != key_column:
             return [
-                f"index {index_name} leads with {key_columns[0]}, not {key_column}: "
-                f"{key_columns!r}"
+                f"index {index_name} leads with {key_columns[0]}. The case "
+                f"expects {key_column} as the first column. Change the index to "
+                f"lead with {key_column}."
             ]
     query = query_path.read_text(encoding="utf-8")
     with connection.cursor() as cursor:
@@ -2771,13 +2797,13 @@ def _check_index(
         finally:
             _execute(cursor, "SET enable_seqscan = on")
     if row is None:
-        return [f"query plan is missing for index {index_name}"]
+        return [f"query plan is missing for index {index_name}."]
     plan_value = row[0]
     if isinstance(plan_value, (str, bytes)):
         try:
             plan: object = json.loads(plan_value)
         except json.JSONDecodeError:
-            return [f"query plan is not JSON for index {index_name}"]
+            return [f"query plan is not JSON for index {index_name}."]
     else:
         plan = plan_value
     used_names = _plan_indexes(plan)
@@ -2790,8 +2816,10 @@ def _check_index(
         if resolved is not None:
             used.add(resolved)
     if identity not in used:
+        names = ", ".join(sorted(name for _, name in used_names)) or "none"
         return [
-            f"query plan does not use index {index_name}: {sorted(used_names)!r}"
+            f"the query plan does not use index {index_name}. It uses: {names}. "
+            f"Rewrite the query so it uses index {index_name}."
         ]
     if isinstance(key_column, str):
         conditions = [
@@ -2802,8 +2830,8 @@ def _check_index(
         pattern = re.compile(rf"\b{re.escape(key_column)}\b")
         if not any(pattern.search(condition) for condition in conditions):
             return [
-                f"query plan does not filter index {index_name} on {key_column}: "
-                f"{conditions!r}"
+                f"the query plan does not filter on {key_column} through index "
+                f"{index_name}. Add a filter on {key_column}."
             ]
     return []
 
@@ -2812,42 +2840,42 @@ def _check_written(root: Path, item: Mapping[str, object]) -> list[str]:
     file_name = item.get("file")
     sections = item.get("sections")
     if not isinstance(file_name, str) or not isinstance(sections, list):
-        return ["written invariant needs file and sections"]
+        return ["written invariant needs file and sections."]
     path = root / file_name
     if not path.is_file():
         return [f"written answer file is missing: {file_name}"]
     content = path.read_text(encoding="utf-8")
     for heading in cast(list[object], sections):
         if not isinstance(heading, str):
-            return ["written section names must be strings"]
+            return ["written section names must be strings."]
         pattern = re.compile(
             rf"^#+\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^#+\s+|\Z)",
             re.MULTILINE,
         )
         match = pattern.search(content)
         if match is None:
-            return [f"written answer is missing section {heading!r}"]
+            return [f"written answer is missing section {heading!r}."]
         body = match.group(1).strip()
         if not body or re.fullmatch(r"(?is)(?:TODO|write here|your answer here)[.\s]*", body):
-            return [f"written section {heading!r} is empty or still a template"]
+            return [f"written section {heading!r} is empty or still a template."]
     return []
 
 
 def _check_protected(root: Path, runner_dir: Path) -> list[str]:
     manifest_path = runner_dir / "protected.json"
     if not manifest_path.is_file():
-        return ["pinned runner has no published protected-file list"]
+        return ["pinned runner has no published protected-file list."]
     manifest = _as_object(_read_json(manifest_path), "protected.json")
     files = manifest.get("files")
     if not isinstance(files, dict):
-        return ["pinned protected-file list is invalid"]
+        return ["pinned protected-file list is invalid."]
     protected_files = _as_object(cast(object, files), "pinned protected-file list files")
     allowed_value = manifest.get("allowed_paths", [])
     if not isinstance(allowed_value, list):
-        return ["pinned protected-file allowed_paths list is invalid"]
+        return ["pinned protected-file allowed_paths list is invalid."]
     optional_value = manifest.get("optional_files", [])
     if not isinstance(optional_value, list):
-        return ["pinned protected-file optional_files list is invalid"]
+        return ["pinned protected-file optional_files list is invalid."]
     allowed_paths = [
         value for value in cast(list[object], allowed_value) if isinstance(value, str)
     ]
@@ -2855,11 +2883,11 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
         value for value in cast(list[object], optional_value) if isinstance(value, str)
     }
     if any(value not in protected_files for value in optional_files):
-        return ["pinned protected-file optional_files must name protected files"]
+        return ["pinned protected-file optional_files must name protected files."]
     errors: list[str] = []
     for relative, expected_hash in protected_files.items():
         if not isinstance(expected_hash, str):
-            errors.append(f"protected hash for {relative} is invalid")
+            errors.append(f"protected hash for {relative} is invalid.")
             continue
         path = root / relative
         if not path.is_file():
@@ -2877,7 +2905,10 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
         check=False,
     )
     if paths.returncode != 0:
-        errors.append("Git could not check tracked and untracked files")
+        errors.append(
+            "Git could not list the files. Run the checks in your Git clone, "
+            "not a downloaded folder."
+        )
     else:
         for raw_path in paths.stdout.split(b"\0"):
             if not raw_path:
@@ -2942,20 +2973,21 @@ def _result_warning_columns(root: Path, stage: int | None) -> tuple[list[str], s
     path = root / ".cmsc127" / "last-run.json"
     if not path.is_file():
         run_text = (
-            f"Run bash check.sh {stage} once to write it."
+            f"Run bash check.sh {stage} once to write it"
             if stage is not None
-            else "Run bash check.sh once to write it."
+            else "Run bash check.sh once to write it"
         )
         return [], (
-            "DESIGN.md: the checker warning entries were skipped because "
-            f".cmsc127/last-run.json does not exist. {run_text}"
+            "DESIGN.md: the Checker Warnings entries are not checked yet because "
+            f".cmsc127/last-run.json does not exist. {run_text}."
         )
     try:
         document = _as_object(_read_json(path), ".cmsc127/last-run.json")
     except (OSError, ValueError) as error:
+        detail = str(error).strip().rstrip(".!?")
         return [], (
-            "DESIGN.md: the checker warning entries were skipped because "
-            f".cmsc127/last-run.json could not be read: {error}"
+            "DESIGN.md: the Checker Warnings entries are not checked because "
+            f".cmsc127/last-run.json could not be read. {detail}."
         )
     results = document.get("results")
     rows: list[str] = []
@@ -3015,9 +3047,7 @@ def _lint(root: Path, runner_dir: Path) -> int:
         message = str(error)
         if message.startswith("Form fault: "):
             message = message[len("Form fault: ") :]
-        if message.startswith(".stage"):
-            message = message[len(".stage") :].lstrip(": ").strip()
-        faults.append(f".stage: {message}")
+        faults.append(message)
     for error in _check_protected(root, runner_dir):
         faults.append(_protected_lint_message(error))
     design_config = _design_config(root)
@@ -3099,7 +3129,7 @@ def _backup_restore(
                 ]
             if command[0] == "backup":
                 if not backup_path.is_file():
-                    return ["./run backup did not create CMSC127_BACKUP_FILE"]
+                    return ["./run backup did not create CMSC127_BACKUP_FILE."]
                 with connection.cursor() as cursor:
                     _execute(
                         cursor,
@@ -3114,7 +3144,7 @@ def _backup_restore(
                     with connection.cursor() as cursor:
                         _execute(cursor, "TRUNCATE " + quoted_tables + " CASCADE")
         after = _schema_snapshot(connection)
-    return [] if before == after else ["restored rows differ from the pre-backup rows"]
+    return [] if before == after else ["restored rows differ from the pre-backup rows."]
 
 
 def _contribution_table(root: Path) -> str:
@@ -3204,7 +3234,7 @@ def _check_pyright(
     if ignores:
         return (
             [
-                f'student code must not use "# pyright: ignore": {item}'
+                f'student code must not use "# pyright: ignore": {item}.'
                 for item in ignores
             ],
             {"errors": len(ignores), "status": "fail"},
@@ -3212,25 +3242,28 @@ def _check_pyright(
     config_path = root / "pyrightconfig.json"
     if not config_path.is_file():
         return (
-            ["pyrightconfig.json is missing; strict type checking needs it"],
+            [
+                "pyrightconfig.json is missing. Strict type checking needs it. "
+                "Restore it from the starter you received."
+            ],
             {"errors": None, "status": "fail"},
         )
     try:
         loaded_config = json.loads(config_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return (
-            ["pyrightconfig.json is not valid JSON"],
+            ["pyrightconfig.json is not valid JSON."],
             {"errors": None, "status": "fail"},
         )
     if not isinstance(loaded_config, dict):
         return (
-            ['pyrightconfig.json must set "typeCheckingMode" to "strict"'],
+            ['pyrightconfig.json must set "typeCheckingMode" to "strict".'],
             {"errors": None, "status": "fail"},
         )
     config = cast(dict[str, object], loaded_config)
     if config.get("typeCheckingMode") != "strict":
         return (
-            ['pyrightconfig.json must set "typeCheckingMode" to "strict"'],
+            ['pyrightconfig.json must set "typeCheckingMode" to "strict".'],
             {"errors": None, "status": "fail"},
         )
     if command is None:
@@ -3257,11 +3290,11 @@ def _check_pyright(
             {"errors": None, "status": "fail"},
         )
     if not isinstance(loaded, dict):
-        return (["Pyright returned an unexpected report"], {"errors": None, "status": "fail"})
+        return (["Pyright returned an unexpected report."], {"errors": None, "status": "fail"})
     report = cast(dict[str, object], loaded)
     diagnostics = report.get("generalDiagnostics")
     if not isinstance(diagnostics, list):
-        return (["Pyright returned an unexpected report"], {"errors": None, "status": "fail"})
+        return (["Pyright returned an unexpected report."], {"errors": None, "status": "fail"})
     problems: list[str] = []
     for raw in cast(list[object], diagnostics):
         if not isinstance(raw, dict):
@@ -3310,7 +3343,7 @@ def _run_invariants(
 ) -> list[dict[str, object]]:
     raw_invariants = manifest.get("invariants", [])
     if not isinstance(raw_invariants, list):
-        raise ValueError("cases/manifest.json: invariants must be a list")
+        raise ValueError("cases/manifest.json: invariants must be a list.")
     results: list[dict[str, object]] = []
     for index, raw_item in enumerate(cast(list[object], raw_invariants), start=1):
         item = _as_object(raw_item, f"invariant {index}")
@@ -3326,11 +3359,11 @@ def _run_invariants(
                 files = item.get("files")
                 problems: list[str] = []
                 if not isinstance(files, list) or not files:
-                    problems.append("work_sql needs a non-empty files list")
+                    problems.append("work_sql needs a non-empty files list.")
                 else:
                     for file_name in cast(list[object], files):
                         if not isinstance(file_name, str) or not file_name.endswith(".sql"):
-                            problems.append(f"report must be a SQL file: {file_name!r}")
+                            problems.append(f"report must be a SQL file: {file_name!r}.")
                         elif not (root / file_name).is_file():
                             problems.append(f"report SQL file is missing: {file_name}")
                         else:
@@ -3509,7 +3542,8 @@ def _self_test() -> int:
         )
         return completed.returncode
     except (OSError, psycopg.Error) as error:
-        print(f"Self-test setup failed: {error}")
+        detail = str(error).strip().rstrip(".!?")
+        print(f"Self-test setup failed. {detail}.")
         return 1
     finally:
         if admin is not None and name:
@@ -3537,7 +3571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return 0
     if arguments.stage < 1:
-        parser.error("stage must be a positive integer")
+        parser.error("stage must be a positive integer.")
     runner_dir = (
         arguments.runner_dir.resolve()
         if arguments.runner_dir is not None
@@ -3675,7 +3709,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             connection.close()
     except (OSError, ValueError, psycopg.Error) as error:
-        print(f"Runner setup failed: {error}")
+        detail = str(error).strip().rstrip(".!?")
+        print(f"Runner setup failed. {detail}.")
         return 1
     finally:
         if admin is not None and database_name:

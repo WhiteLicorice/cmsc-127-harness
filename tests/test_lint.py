@@ -221,7 +221,7 @@ class LintTests(unittest.TestCase):
                 code, output, errors = run_lint(root, runner_dir)
 
                 self.assertEqual(1, code, output + errors)
-                self.assertIn(".stage: must be a positive integer", output)
+                self.assertIn(".stage must be a positive integer.", output)
 
     def test_a_protected_fault_names_the_file_and_repair(self: LintTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -349,7 +349,7 @@ class LintTests(unittest.TestCase):
                     "migrations/0002_create_item.sql: the numbers must start at 0001",
                     output,
                 )
-                self.assertIn("expected 0001", output)
+                self.assertIn("The next number is 0001", output)
 
     def test_a_required_file_fault_names_the_file(self: LintTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -377,7 +377,8 @@ class LintTests(unittest.TestCase):
 
                 self.assertEqual(0, code, output + errors)
                 self.assertIn(
-                    "skipped because .cmsc127/last-run.json does not exist", output
+                    "not checked yet because .cmsc127/last-run.json does not exist",
+                    output,
                 )
 
     def test_warning_entries_are_checked_from_the_result_file(

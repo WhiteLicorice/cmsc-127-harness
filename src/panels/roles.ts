@@ -12,7 +12,7 @@ export function describeRolePrivileges(entry: RolePrivilege): string {
 
 export function renderRoles(entries: RolePrivilege[]): string {
   if (entries.length === 0) {
-    return "<p>No tables or user roles exist in this schema.</p>";
+    return "<p>No tables or roles exist in this schema.</p>";
   }
   const rows = entries.map((entry) =>
     `<tr><td>${escapeHtml(entry.role)}</td><td>${escapeHtml(entry.table)}</td><td>${escapeHtml(describeRolePrivileges(entry))}</td></tr>`,

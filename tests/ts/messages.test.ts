@@ -63,3 +63,24 @@ it("successful Checks and Tables requests clear only their own error stream", as
   await tick(0);
   expect(message.hidden).toBe(true);
 });
+
+it("names the bundle start command when the server cannot be reached", async () => {
+  vi.resetModules();
+  const elements = new Map(["#panels", "#panel-content", "#schema-select", "#connection-message", "#poll-summary"]
+    .map((selector) => [selector, new ElementStub()]));
+  vi.stubGlobal("document", {
+    querySelector: (selector: string) => elements.get(selector),
+    createElement: () => new ElementStub(),
+    activeElement: null,
+    addEventListener: () => undefined,
+  });
+  vi.stubGlobal("window", { setInterval: () => 0 });
+  vi.stubGlobal("fetch", async () => { throw new TypeError("Failed to fetch"); });
+  const settle = async (): Promise<void> => { for (let step = 0; step < 20; step += 1) await Promise.resolve(); };
+  await import("../../src/app.js");
+  await settle();
+  const message = elements.get("#connection-message")!;
+  expect(message.textContent).toBe(
+    "The page cannot reach its server. Run bash <path to the Block 1 bundle>/start.sh from the folder you started the page in.",
+  );
+});

@@ -106,8 +106,8 @@ foreach ($tool in @('psql', 'pg_dump')) {
         ).Value
         $toolFailure = "$tool reports $toolVersionOutput."
     }
-    $toolOk = $toolExitCode -eq 0 -and $toolVersion -eq '18.6'
-    Report-Result $toolOk "$tool reports PostgreSQL 18.6." $toolFailure $repair
+    $toolOk = $toolExitCode -eq 0 -and $toolVersion -match '^18\.'
+    Report-Result $toolOk "$tool reports PostgreSQL 18.x." $toolFailure $repair
 }
 
 $git = Find-Application 'git'

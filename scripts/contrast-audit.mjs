@@ -522,7 +522,7 @@ const VIEWS = [
     panelId: "tables",
     waitSelector: "tbody tr",
     exact: { "tbody tr": 2, "thead th": 3, ".table-card": 1 },
-    text: ["Rows use committed data", "audit_student"],
+    text: ["Rows show only data the database has finished writing", "audit_student"],
   },
   {
     name: "Changes",
@@ -592,18 +592,18 @@ const VIEWS = [
     panel: "Checks",
     panelId: "checks",
     hideCheckResult: true,
-    waitText: "No check result exists",
+    waitText: "No check results yet",
     exact: { "tbody tr": 0 },
-    text: ["No check result exists"],
+    text: ["No check results yet"],
   },
   {
     name: "Server unreachable",
     panel: "Tables",
     panelId: "tables",
     route: "tables-abort",
-    waitConnection: "The harness server cannot be reached.",
+    waitConnection: "The page cannot reach its server.",
     exact: { "tbody tr": 2, ".table-card": 1 },
-    text: ["Rows use committed data"],
+    text: ["Rows show only data the database has finished writing"],
   },
   {
     name: "Tables error",
@@ -611,7 +611,7 @@ const VIEWS = [
     route: "tables-error",
     waitConnection: "The tables request failed.",
     exact: { "tbody tr": 2, ".table-card": 1 },
-    text: ["Rows use committed data"],
+    text: ["Rows show only data the database has finished writing"],
   },
   {
     name: "Tables empty",
@@ -626,15 +626,15 @@ const VIEWS = [
     name: "Roles empty",
     panel: "Roles",
     panelId: "roles",
-    waitText: "No tables or user roles exist in this schema.",
+    waitText: "No tables or roles exist in this schema.",
     exact: { "tbody tr": 0 },
-    text: ["No tables or user roles exist in this schema."],
+    text: ["No tables or roles exist in this schema."],
   },
 ];
 
 const COUNTERS = [
   "tbody tr", "thead th", "p", "dl dt", ".result-pass", ".result-fail", ".result-skip",
-  ".warning-note", ".error-message", ".mermaid svg", ".mermaid p", ".table-card",
+  ".warning-note", ".difference-note", ".error-message", ".mermaid svg", ".mermaid p", ".table-card",
 ];
 
 if (!process.env["CMSC127_DATABASE_URL"]) {
