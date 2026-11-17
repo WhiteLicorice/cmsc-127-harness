@@ -47,13 +47,13 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
+      - name: Install Chromium for the browser tests and smoke
+        run: npx playwright install chromium --with-deps --only-shell
       - name: Test and build
         run: |
           npm run typecheck
           npm test -- --reporter=verbose
           npm run build
-      - name: Install Chromium for headless smoke
-        run: npx playwright install chromium --with-deps --only-shell
       - name: Seed the browser smoke table
         shell: bash
         run: |
@@ -166,14 +166,14 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
+      - name: Install Chromium for the browser tests and smoke on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium --only-shell
       - name: Test and build
         run: |
           npm run typecheck
           npm test -- --reporter=verbose
           npm run build
-      - name: Install Chromium for headless smoke on macOS and Windows
-        if: runner.os != 'Linux'
-        run: npx playwright install chromium --only-shell
       - name: Seed the browser smoke table
         shell: bash
         run: |
