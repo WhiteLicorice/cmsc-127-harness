@@ -1471,6 +1471,12 @@ class RunnerIntegrationTests(unittest.TestCase):
                                 "kind": "document",
                                 "file": "cases/design.json",
                             },
+                            {
+                                "id": "pair/readme",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/readme.json",
+                            },
                         ],
                     }
                 ),
@@ -1495,6 +1501,22 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
             (cases / "design.expected").write_text(
                 '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (cases / "readme.json").write_text(
+                json.dumps(
+                    {
+                        "file": "README.md",
+                        "headings": ["Setup"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "readme.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "README.md").write_text(
+                "# Readme\n\n## Setup\n\nRun the checks.\n", encoding="utf-8"
             )
             (root / "migrations" / "0001_create_item.sql").write_text(
                 "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
@@ -1543,8 +1565,9 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["1", "--root", str(root)])
             self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("PASS pair/readme", output.getvalue())
             self.assertIn("warning: item.label is not validated.", output.getvalue())
-            self.assertIn("2/2 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+            self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
 
     def test_all_case_kinds_pass_and_each_defect_fails(
         self: RunnerIntegrationTests,
@@ -1964,6 +1987,12 @@ class RunnerIntegrationTests(unittest.TestCase):
                                 "kind": "document",
                                 "file": "cases/design.json",
                             },
+                            {
+                                "id": "pair/readme",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/readme.json",
+                            },
                         ],
                         "invariants": [
                             {
@@ -2001,6 +2030,22 @@ class RunnerIntegrationTests(unittest.TestCase):
             (cases / "design.expected").write_text(
                 '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
             )
+            (cases / "readme.json").write_text(
+                json.dumps(
+                    {
+                        "file": "README.md",
+                        "headings": ["Setup"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "readme.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "README.md").write_text(
+                "# Readme\n\n## Setup\n\nRun the checks.\n", encoding="utf-8"
+            )
             (reports / "outer.sql").write_text("SELECT 1 AS one;\n", encoding="utf-8")
             (root / "migrations").mkdir()
             (root / "load.sql").write_text("", encoding="utf-8")
@@ -2027,8 +2072,9 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["2", "--root", str(root)])
             self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("PASS pair/readme", output.getvalue())
             self.assertIn("warning: reports/outer.sql shows no outer join", output.getvalue())
-            self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+            self.assertIn("4/4 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
 
             design_path.write_text(
                 "# Design\n\n## Tables\n\n- item.\n\n"

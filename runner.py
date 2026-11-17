@@ -2065,6 +2065,16 @@ def _design_rows(
     return rows
 
 
+def _document_file(root: Path, case: Mapping[str, object]) -> str | None:
+    """The file a document case checks, or None when the case cannot be read."""
+    try:
+        body = _as_object(_read_json(_case_file(root, case)), "document case")
+    except (OSError, ValueError):
+        return None
+    file_name = body.get("file")
+    return file_name if isinstance(file_name, str) else None
+
+
 def _run_case(
     root: Path,
     case: Mapping[str, object],
@@ -3411,6 +3421,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if warning_subjects:
                         for case_index, case in enumerate(selected):
                             if case.get("kind") != "document":
+                                continue
+                            if _document_file(root, case) != "DESIGN.md":
                                 continue
                             try:
                                 results[case_index] = _run_case(

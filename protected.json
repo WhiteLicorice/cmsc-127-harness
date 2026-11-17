@@ -64,7 +64,7 @@
     "cases/published/lab3/design.expected": "f19f182daef27c1c61f4bdf965c446205c6d2d606a0864f3ca3b500f42c295ee",
     "cases/published/lab3/design.json": "d2f6359eba8740a9740bab3e73e07ee23bb43fd4806c2a6488faad65a93f9425",
     "cases/published/lab3/facts.expected": "aa6fbfee6f1738df9e1b50f3e544d2f4dbba46d2b45b4319e24966475d5e6d23",
-    "cases/published/lab3/facts.sql": "05811ba3f1e7a540d414b7df606f31ca7485a4d13d3e335103348840bce0fdbb",
+    "cases/published/lab3/facts.sql": "9e8a1fb113160e0f51951050c32f45b5a63e289ca62d8ef9ad16a8e8951c9d3c",
     "cases/published/lab3/manifest.json": "b7e392c3c0caef4ddf6f60d0acaaa77b7d758c7c4ba83ca165feb19bafb0f7ee",
     "cases/published/lab3/race-bypass.expected": "62acbd9a749279d2518fcbac4d54a02e2fb4581554af7d9f603daed1b3178114",
     "cases/published/lab3/race-bypass.sql": "0ac541bd3b2bd20e3d17fd9d6731118581417b8887e306035ad2bd557fe33fa0",
