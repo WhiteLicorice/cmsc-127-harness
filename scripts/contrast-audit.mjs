@@ -11,15 +11,25 @@
 // background, with the selected option's text. The open list is a native popup
 // outside the DOM and is not measured.
 //
-// Every view also asserts what it must contain. A panel that finishes in an
-// error state, an empty state it should not be in, or with fewer rows than the
-// fixture seeds fails the run, so measuring nothing cannot pass as measuring
-// something.
+// Every view asserts what it must contain, and every assertion reads the page,
+// not the DOM. A required selector needs a visible match: display not none,
+// visibility not hidden, and a box of at least 1x1. Required text is read from
+// visible text nodes only. Required rows are counted as visible rows.
 //
-// Focus rings are walked in the initial view, where a scroll container is also
-// focusable. Every focusable element must paint a ring in every theme, so a
-// theme that drops its outline fails instead of silently contributing zero
-// measurements.
+// Each view also names the panel it measures. The panel id must match and the
+// panel must contain a marker only that panel renders, so a view cannot measure
+// a different panel's markup. A view whose marker was already on the page
+// before the click must see the panel text change.
+//
+// The chrome baseline is 14 measured elements: the title, the byline, the two
+// control labels, the poll summary, the seven tabs, and the two closed select
+// values. Every minimum below is that baseline plus what the fixture puts in
+// the panel, so a panel that renders nothing cannot pass.
+//
+// The tab order comes from the browser, not from a selector: the walk presses
+// Tab and records document.activeElement until focus cycles, then requires a
+// ring on every visited element. A focusable the selector would have missed is
+// visited and counted.
 import { spawn } from "node:child_process";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -34,6 +44,7 @@ const THEMES = [
 const PORT = "55447";
 const TABLE = "audit_student";
 const EMPTY_SCHEMA = "audit_empty";
+const CHROME_BASELINE = 14;
 const projectRoot = resolve("audit-project");
 const artifactRoot = resolve("audit-artifacts");
 const checkResultPath = resolve(projectRoot, ".cmsc127", "last-run.json");
@@ -54,70 +65,77 @@ const CHECK_RESULT = {
   warnings: 1,
 };
 
-// Each view names the panel it shows and what must be on the page before it is
-// measured. `min` is the floor for the whole page's text elements, so a panel
-// that renders one error paragraph cannot pass as a measured panel.
+// `min` is CHROME_BASELINE plus the fixture's content for the panel. `needs`
+// counts visible matches. `text` is checked against visible text only.
 const VIEWS = [
   {
     name: "initial",
-    min: 20,
+    panelId: "tables",
+    min: 24,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 2, "thead th": 2 },
-  },
-  {
-    name: "Tables",
-    panel: "Tables",
-    min: 20,
-    waitSelector: "tbody tr",
-    needs: { "tbody tr": 2, "thead th": 2 },
+    needs: { "tbody tr": 2, "thead th": 3 },
+    text: ["Rows use committed data", "audit_student"],
   },
   {
     name: "Changes",
     panel: "Changes",
-    min: 12,
-    waitAny: ["No changes observed yet", "Changes come from the one-second"],
+    panelId: "changes",
+    min: 15,
+    waitText: "No changes observed yet",
     needs: { "p": 1 },
+    text: ["No changes observed yet"],
   },
   {
     name: "Schema",
     panel: "Schema",
-    min: 30,
+    panelId: "schema",
+    min: 36,
     waitSelector: ".mermaid svg",
     needs: { ".mermaid svg": 2, ".mermaid p": 12 },
+    text: ["audit_student"],
   },
   {
     name: "Sessions",
     panel: "Sessions",
-    min: 24,
+    panelId: "sessions",
+    min: 26,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 1 },
+    needs: { "tbody tr": 1, "thead th": 6 },
+    text: ["PostgreSQL limits which sessions a role can see.", "PID"],
   },
   {
     name: "Checks",
     panel: "Checks",
-    min: 30,
+    panelId: "checks",
+    min: 40,
     waitSelector: ".result-pass",
     needs: { "tbody tr": 4, ".result-pass": 1, ".result-fail": 1, ".result-skip": 1, ".warning-note": 1 },
+    text: ["Case", "Result", "3 rows exceed the soft limit"],
   },
   {
     name: "Roles",
     panel: "Roles",
-    min: 14,
+    panelId: "roles",
+    min: 20,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 1 },
+    needs: { "tbody tr": 1, "thead th": 3 },
+    text: ["Privileges"],
   },
   {
     name: "Status",
     panel: "Status",
-    min: 16,
+    panelId: "status",
+    min: 22,
     waitSelector: "dl dt",
     needs: { "dl dt": 4 },
+    text: ["Last poll"],
   },
   {
     name: "Status disconnected",
     panel: "Status",
-    min: 12,
-    route: true,
+    panelId: "status",
+    min: 15,
+    route: "status-disconnected",
     waitSelector: ".error-message",
     needs: { ".error-message": 1 },
     text: ["PostgreSQL is unavailable"],
@@ -125,17 +143,38 @@ const VIEWS = [
   {
     name: "Checks empty",
     panel: "Checks",
-    min: 12,
+    panelId: "checks",
+    min: 15,
     hideCheckResult: true,
     waitText: "No check result exists",
     needs: { "tbody tr": 0 },
     text: ["No check result exists"],
   },
   {
+    name: "Server unreachable",
+    panel: "Tables",
+    panelId: "tables",
+    min: 25,
+    route: "tables-abort",
+    waitConnection: "The harness server cannot be reached.",
+    needs: { "tbody tr": 2 },
+    text: ["Rows use committed data"],
+  },
+  {
+    name: "Tables error",
+    panelId: "tables",
+    min: 25,
+    route: "tables-error",
+    waitConnection: "The tables request failed.",
+    needs: { "tbody tr": 2 },
+    text: ["Rows use committed data"],
+  },
+  {
     name: "Tables empty",
     panel: "Tables",
+    panelId: "tables",
     schema: EMPTY_SCHEMA,
-    min: 12,
+    min: 16,
     waitText: "No tables or views exist in this schema.",
     needs: { "tbody tr": 0 },
     text: ["No tables or views exist in this schema."],
@@ -143,7 +182,8 @@ const VIEWS = [
   {
     name: "Roles empty",
     panel: "Roles",
-    min: 12,
+    panelId: "roles",
+    min: 15,
     waitText: "No tables or user roles exist in this schema.",
     needs: { "tbody tr": 0 },
     text: ["No tables or user roles exist in this schema."],
@@ -202,6 +242,15 @@ function auditPage(counters) {
 
   const base = parse(getComputedStyle(document.body).backgroundColor) ?? { r: 255, g: 255, b: 255, a: 1 };
   const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
+
+  // A visible box: painted, not collapsed, and at least one pixel each way.
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const box = element.getBoundingClientRect();
+    return box.width >= 1 && box.height >= 1;
+  };
 
   const ancestorBackdrop = (element) => {
     const chain = [];
@@ -277,21 +326,15 @@ function auditPage(counters) {
   };
 
   const rows = [];
-  const seen = new Set();
   for (const element of document.querySelectorAll("body *")) {
     if (element.closest("script") || element.closest("style")) continue;
     const hasText = [...element.childNodes].some(
       (node) => node.nodeType === 3 && (node.textContent ?? "").trim().length > 0,
     );
-    if (!hasText || seen.has(element)) continue;
-    const style = getComputedStyle(element);
-    if (style.visibility === "hidden" || style.display === "none") continue;
-    const box = element.getBoundingClientRect();
-    if (box.width < 1 || box.height < 1) continue;
-    if (Number.parseFloat(style.opacity) === 0) continue;
-    const colour = parse(style.color);
+    if (!hasText) continue;
+    if (!isVisible(element)) continue;
+    const colour = parse(getComputedStyle(element).color);
     if (!colour || colour.a === 0) continue;
-    seen.add(element);
     rows.push(measure(element, element.textContent ?? "", colour));
   }
 
@@ -300,26 +343,61 @@ function auditPage(counters) {
   for (const select of document.querySelectorAll("select")) {
     const option = select.selectedOptions[0];
     if (!option) continue;
-    const style = getComputedStyle(select);
-    if (style.visibility === "hidden" || style.display === "none") continue;
-    const box = select.getBoundingClientRect();
-    if (box.width < 1 || box.height < 1) continue;
-    const colour = parse(style.color);
+    if (!isVisible(select)) continue;
+    const colour = parse(getComputedStyle(select).color);
     if (!colour || colour.a === 0) continue;
     rows.push(measure(select, option.textContent ?? "", colour));
   }
 
+  // Visible text only: every text node whose ancestors are all painted.
+  const visibleText = (root) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if ((node.textContent ?? "").trim().length === 0) continue;
+      let visible = true;
+      for (let element = node.parentElement; element && element !== root.parentElement; element = element.parentElement) {
+        if (!isVisible(element)) {
+          visible = false;
+          break;
+        }
+      }
+      if (visible) parts.push(node.textContent ?? "");
+    }
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  };
+
   const content = document.querySelector("#panel-content");
   const counts = {};
   for (const selector of counters) {
-    counts[selector] = content === null ? 0 : content.querySelectorAll(selector).length;
+    counts[selector] = content === null
+      ? 0
+      : [...content.querySelectorAll(selector)].filter(isVisible).length;
   }
+
+  const connection = document.querySelector("#connection-message");
+  const probe = document.createElement("div");
+  probe.style.background = "var(--bg)";
+  document.body.append(probe);
+  const expectedBg = getComputedStyle(probe).backgroundColor;
+  probe.remove();
 
   return {
     rows,
-    labelCount: document.querySelectorAll(".mermaid p").length,
     counts,
-    panelText: (content?.textContent ?? "").replace(/\s+/g, " ").trim(),
+    panelText: content === null ? "" : visibleText(content),
+    panelId: content?.dataset["panel"] ?? "",
+    theme: document.documentElement.dataset["theme"] ?? "",
+    bodyBg: getComputedStyle(document.body).backgroundColor,
+    expectedBg,
+    connection: {
+      visible: connection !== null && isVisible(connection),
+      text: connection === null ? "" : visibleText(connection),
+    },
+    labelCount: content === null
+      ? 0
+      : [...content.querySelectorAll(".mermaid p")].filter(isVisible).length,
   };
 }
 
@@ -378,7 +456,6 @@ function focusRing() {
     : `${element.tagName.toLowerCase()}${element.dataset["panel"] ? `[${element.dataset["panel"]}]` : ""}`;
   const value = ratio(outline, acc);
   return {
-    index: Number(element.dataset["auditFocus"] ?? "-1"),
     target,
     outline: hex(outline),
     bg: hex(acc),
@@ -388,15 +465,18 @@ function focusRing() {
   };
 }
 
-function tagFocusables() {
-  const selector = 'a[href], button, select:not([disabled]), [tabindex="0"]';
-  const nodes = [...document.querySelectorAll(selector)].filter((node) => {
-    const style = getComputedStyle(node);
-    const box = node.getBoundingClientRect();
-    return style.visibility !== "hidden" && style.display !== "none" && box.width >= 1 && box.height >= 1;
-  });
-  nodes.forEach((node, index) => node.setAttribute("data-audit-focus", String(index)));
-  return nodes.length;
+// Tag the focused element so the walk can tell one element from another. The
+// tag is a scratch attribute; no stylesheet rule reads it.
+function tagFocused() {
+  const element = document.activeElement;
+  if (!element || element === document.body) return null;
+  let id = element.getAttribute("data-audit-focus");
+  if (id === null) {
+    window.__auditFocus = (window.__auditFocus ?? 0) + 1;
+    id = String(window.__auditFocus);
+    element.setAttribute("data-audit-focus", id);
+  }
+  return id;
 }
 
 await mkdir(projectRoot, { recursive: true });
@@ -442,6 +522,7 @@ const report = {
   textFailures: [],
   focusFailures: [],
   viewFailures: [],
+  themeFailures: [],
   focus: {},
   labelCounts: [],
 };
@@ -499,25 +580,63 @@ try {
       { timeout: 15_000 },
     );
 
-    report.themes[theme] = {};
+    // The page must render the theme that was asked for, and the body must
+    // paint that theme's --bg. A typo in the storage key would otherwise file
+    // thirteen copies of one theme under thirteen names.
+    const identity = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg)";
+      document.body.append(probe);
+      const expectedBg = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return {
+        theme: document.documentElement.dataset.theme ?? "",
+        bodyBg: getComputedStyle(document.body).backgroundColor,
+        expectedBg,
+      };
+    });
+    if (identity.theme !== theme) {
+      report.themeFailures.push({ theme, problem: `the page rendered ${JSON.stringify(identity.theme)}` });
+    } else if (identity.bodyBg !== identity.expectedBg) {
+      report.themeFailures.push({
+        theme,
+        problem: `the body painted ${identity.bodyBg}, not --bg ${identity.expectedBg}`,
+      });
+    }
+
+    report.themes[theme] = {
+      renderedTheme: identity.theme,
+      bodyBg: identity.bodyBg,
+      expectedBg: identity.expectedBg,
+      views: {},
+    };
 
     const measureView = async (view) => {
       const result = await page.evaluate(auditPage, COUNTERS);
-      report.themes[theme][view.name] = result.rows.length;
+      report.themes[theme].views[view.name] = result.rows.length;
       if (!report.labelCounts.includes(result.labelCount)) report.labelCounts.push(result.labelCount);
       for (const row of result.rows.filter((entry) => !entry.pass)) {
         report.textFailures.push({ theme, view: view.name, ...row });
       }
       const problems = [];
+      if (result.panelId !== view.panelId) {
+        problems.push(`the panel id is ${JSON.stringify(result.panelId)}, expected ${JSON.stringify(view.panelId)}`);
+      }
       if (result.rows.length < view.min) {
-        problems.push(`measured ${result.rows.length} text elements, expected at least ${view.min}`);
+        problems.push(`measured ${result.rows.length} visible text elements, expected at least ${view.min}`);
       }
       for (const [selector, count] of Object.entries(view.needs ?? {})) {
         const actual = result.counts[selector] ?? 0;
-        if (actual < count) problems.push(`${selector}: ${actual}, expected at least ${count}`);
+        if (actual < count) problems.push(`visible ${selector}: ${actual}, expected at least ${count}`);
       }
       for (const text of view.text ?? []) {
-        if (!result.panelText.includes(text)) problems.push(`panel text does not include ${JSON.stringify(text)}`);
+        if (!result.panelText.includes(text)) problems.push(`visible panel text does not include ${JSON.stringify(text)}`);
+      }
+      if (view.waitConnection && !result.connection.visible) {
+        problems.push("the connection message is not visible");
+      }
+      if (view.waitConnection && !result.connection.text.includes(view.waitConnection)) {
+        problems.push(`the connection message does not include ${JSON.stringify(view.waitConnection)}`);
       }
       if (problems.length > 0) report.viewFailures.push({ theme, view: view.name, problems });
     };
@@ -525,25 +644,37 @@ try {
     // The initial view, where a scroll container is also focusable.
     await measureView(VIEWS[0]);
 
-    const focusables = await page.evaluate(tagFocusables);
-    const seen = new Set();
+    // The tab order from the browser: press Tab until focus cycles, and
+    // require a ring on every element that was visited.
     await page.locator("body").click({ position: { x: 5, y: 5 } });
-    for (let step = 0; step < focusables + 4; step += 1) {
+    const visited = new Set();
+    const missing = [];
+    let rings = 0;
+    for (let step = 0; step < 40; step += 1) {
       await page.keyboard.press("Tab");
-      await page.waitForTimeout(60);
+      await page.waitForTimeout(50);
+      const id = await page.evaluate(tagFocused);
+      if (id === null || visited.has(id)) break;
+      visited.add(id);
       const ring = await page.evaluate(focusRing);
-      if (!ring) continue;
-      seen.add(ring.index);
-      if (!ring.pass) report.focusFailures.push({ theme, ...ring });
+      if (ring === null) {
+        missing.push(id);
+      } else {
+        rings += 1;
+        if (!ring.pass) report.focusFailures.push({ theme, ...ring });
+      }
     }
-    const missing = [...Array(focusables).keys()].filter((index) => !seen.has(index));
-    report.focus[theme] = { focusables, measured: seen.size, missing };
+    report.focus[theme] = { visited: visited.size, rings, missing };
 
     for (const view of VIEWS.slice(1)) {
+      const before = await page.evaluate(() => ({
+        id: document.querySelector("#panel-content")?.dataset["panel"] ?? "",
+        text: document.querySelector("#panel-content")?.textContent ?? "",
+      }));
       if (view.schema) {
         await page.selectOption("#schema-select", view.schema);
       }
-      if (view.route) {
+      if (view.route === "status-disconnected") {
         await page.route("**/api/status*", (route) => route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -552,6 +683,16 @@ try {
             server: "running",
             message: "PostgreSQL is unavailable. Check the database server and connection settings.",
           }),
+        }));
+      }
+      if (view.route === "tables-abort") {
+        await page.route("**/api/tables*", (route) => route.abort());
+      }
+      if (view.route === "tables-error") {
+        await page.route("**/api/tables*", (route) => route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ message: "The tables request failed." }),
         }));
       }
       if (view.hideCheckResult) {
@@ -570,9 +711,19 @@ try {
             if (expected.text && !text.includes(expected.text)) return false;
             if (expected.any.length > 0 && !expected.any.some((item) => text.includes(item))) return false;
             if (expected.selector && content.querySelector(expected.selector) === null) return false;
+            if (expected.connection) {
+              const message = document.querySelector("#connection-message");
+              if (message === null || message.hidden) return false;
+              if (!(message.textContent ?? "").includes(expected.connection)) return false;
+            }
             return true;
           },
-          { text: view.waitText ?? "", any: view.waitAny ?? [], selector: view.waitSelector ?? "" },
+          {
+            text: view.waitText ?? "",
+            any: view.waitAny ?? [],
+            selector: view.waitSelector ?? "",
+            connection: view.waitConnection ?? "",
+          },
           { timeout: 15_000 },
         );
       } catch {
@@ -592,8 +743,36 @@ try {
         );
       }
       await page.waitForTimeout(150);
+
+      // A view that clicks a tab must see the panel change, or it is measuring
+      // the previous view's markup.
+      if (view.panel) {
+        const after = await page.evaluate(() => ({
+          id: document.querySelector("#panel-content")?.dataset["panel"] ?? "",
+          text: document.querySelector("#panel-content")?.textContent ?? "",
+        }));
+        if (after.id === before.id && after.text === before.text) {
+          report.viewFailures.push({
+            theme,
+            view: view.name,
+            problems: ["the click did not change the panel"],
+          });
+        }
+      }
+
       await measureView(view);
-      if (view.route) await page.unroute("**/api/status*");
+
+      if (view.route) {
+        await page.unroute("**/api/status*");
+        await page.unroute("**/api/tables*");
+      }
+      if (view.route === "tables-abort" || view.route === "tables-error") {
+        await page.waitForFunction(
+          () => document.querySelector("#connection-message")?.hidden === true,
+          undefined,
+          { timeout: 15_000 },
+        );
+      }
       if (view.hideCheckResult) {
         await writeFile(checkResultPath, JSON.stringify(CHECK_RESULT, null, 1), "utf-8");
       }
@@ -620,24 +799,29 @@ try {
 }
 
 const measured = Object.values(report.themes).reduce(
-  (total, views) => total + Object.values(views).reduce((sum, count) => sum + count, 0),
+  (total, entry) => total + Object.values(entry.views).reduce((sum, count) => sum + count, 0),
   0,
 );
 
 await writeFile(resolve(artifactRoot, "contrast.json"), JSON.stringify(report, null, 1), "utf-8");
 
 const range = (view) => {
-  const counts = Object.values(report.themes).map((views) => views[view]).filter((count) => count !== undefined);
+  const counts = Object.values(report.themes)
+    .map((entry) => entry.views[view])
+    .filter((count) => count !== undefined);
   return counts.length === 0 ? "0" : `${Math.min(...counts)}-${Math.max(...counts)}`;
 };
-const rings = Object.values(report.focus).map((entry) => entry.measured);
+const ringCounts = Object.values(report.focus).map((entry) => entry.rings);
+const backgrounds = new Set(Object.values(report.themes).map((entry) => entry.bodyBg));
 
 console.log(`themes: ${THEMES.length}, views: ${VIEWS.length}`);
 console.log(`text elements measured: ${measured}`);
 console.log(`per view: ${VIEWS.map((view) => `${view.name} ${range(view.name)}`).join(", ")}`);
 console.log(`diagram label counts seen: ${report.labelCounts.join(", ")}`);
-console.log(`focusable elements: ${[...new Set(Object.values(report.focus).map((entry) => entry.focusables))].join(", ")}`);
-console.log(`focus rings per theme: ${rings.length === 0 ? "0" : `${Math.min(...rings)}-${Math.max(...rings)}`}`);
+console.log(`rendered themes: ${[...new Set(Object.values(report.themes).map((entry) => entry.renderedTheme))].join(", ")}`);
+console.log(`distinct body backgrounds: ${backgrounds.size}`);
+console.log(`tabbables visited: ${[...new Set(Object.values(report.focus).map((entry) => entry.visited))].join(", ")}`);
+console.log(`focus rings per theme: ${ringCounts.length === 0 ? "0" : `${Math.min(...ringCounts)}-${Math.max(...ringCounts)}`}`);
 console.log(`text failures: ${report.textFailures.length}`);
 for (const item of report.textFailures.slice(0, 40)) {
   console.log(
@@ -649,13 +833,17 @@ console.log(`focus ring failures: ${report.focusFailures.length}`);
 for (const item of report.focusFailures) {
   console.log(`  ${item.ratio} < ${item.floor}  ${item.outline} on ${item.bg}  ${item.target}  [${item.theme}]`);
 }
+console.log(`theme failures: ${report.themeFailures.length}`);
+for (const item of report.themeFailures) {
+  console.log(`  ${item.theme}: ${item.problem}`);
+}
 console.log(`view failures: ${report.viewFailures.length}`);
 for (const item of report.viewFailures.slice(0, 20)) {
   console.log(`  ${item.view}  [${item.theme}]  ${item.problems.join("; ")}`);
 }
 for (const [theme, entry] of Object.entries(report.focus)) {
-  if (entry.missing.length > 0) {
-    console.log(`  ${theme}: ${entry.measured}/${entry.focusables} focusables painted a ring, missing ${entry.missing.join(", ")}`);
+  if (entry.missing.length > 0 || entry.rings !== entry.visited) {
+    console.log(`  ${theme}: ${entry.rings}/${entry.visited} visited elements painted a ring, missing ${entry.missing.join(", ")}`);
   }
 }
 
@@ -668,11 +856,17 @@ if (failure) {
 } else if (report.focusFailures.length > 0) {
   console.error("The contrast audit found a focus ring below 3:1.");
   process.exitCode = 1;
+} else if (report.themeFailures.length > 0) {
+  console.error("The page did not render the theme the audit asked for.");
+  process.exitCode = 1;
 } else if (report.viewFailures.length > 0) {
   console.error("A view did not render what it must contain.");
   process.exitCode = 1;
-} else if (Object.values(report.focus).some((entry) => entry.missing.length > 0 || entry.measured === 0)) {
-  console.error("A theme did not paint a ring on every focusable element.");
+} else if (Object.values(report.focus).some((entry) => entry.rings !== entry.visited || entry.visited === 0)) {
+  console.error("A theme did not paint a ring on every element the tab order visited.");
+  process.exitCode = 1;
+} else if (backgrounds.size !== THEMES.length) {
+  console.error("Two themes painted the same background. The theme loop measured one theme twice.");
   process.exitCode = 1;
 } else if (measured === 0) {
   console.error("The contrast audit measured no text. The page did not render.");
