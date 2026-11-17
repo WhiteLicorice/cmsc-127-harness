@@ -86,6 +86,37 @@ const VISIBILITY_RULE = `
     if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
   };
+  // Resolve any computed colour to sRGB. rgb()/rgba() are parsed directly; the
+  // other syntaxes (oklch, oklab, lab, lch, color, color-mix) go through a 1x1
+  // canvas, so a gradient stop is measured by its real alpha rather than being
+  // skipped.
+  const colourCache = new Map();
+  const resolveColour = (value) => {
+    if (!value || value === "none" || value === "transparent") return null;
+    const cached = colourCache.get(value);
+    if (cached !== undefined) return cached;
+    const parsed = parse(value);
+    if (parsed !== null) {
+      colourCache.set(value, parsed);
+      return parsed;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (context === null) {
+      colourCache.set(value, null);
+      return null;
+    }
+    context.clearRect(0, 0, 1, 1);
+    context.fillStyle = "#010203";
+    context.fillStyle = value;
+    context.fillRect(0, 0, 1, 1);
+    const data = context.getImageData(0, 0, 1, 1).data;
+    const colour = data[3] === 0 ? null : { r: data[0], g: data[1], b: data[2], a: data[3] / 255 };
+    colourCache.set(value, colour);
+    return colour;
+  };
   const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
   const visibleCache = new Map();
   const clipCache = new Map();
@@ -103,9 +134,9 @@ const VISIBILITY_RULE = `
     return null;
   };
   // What one painted layer contributes: its background image over its
-  // background colour, times its opacity. A gradient contributes the colour
-  // stop with the highest alpha, so a 2% gradient tint contributes 2% and an
-  // opaque gradient contributes 1. A url() image is treated as opaque.
+  // background colour, times its opacity. A gradient whose stops all agree
+  // contributes that colour; a gradient whose stops differ is a warning, not a
+  // cover, and the text is measured without it. A url() image is opaque.
   const px = (value) => {
     if (!value || value === "auto") return null;
     const number = Number.parseFloat(value);
@@ -113,44 +144,54 @@ const VISIBILITY_RULE = `
   };
   const imageLayer = (value) => {
     if (!value || value === "none") return null;
-    if (value.includes("url(")) return { r: 0, g: 0, b: 0, a: 1 };
-    let best = null;
-    const pattern = /rgba?\\(([^)]+)\\)/g;
+    if (value.includes("url(")) {
+      return { colour: { r: 0, g: 0, b: 0, a: 1 }, gradient: value, varying: false, highest: null };
+    }
+    const stops = [];
+    const pattern = /(rgba?|oklch|oklab|lab|lch|color|color-mix)\\(([^)]*)\\)/g;
     let match = pattern.exec(value);
     while (match !== null) {
-      const parts = match[1].split(/[,\\s/]+/).filter((part) => part.length > 0).map(Number);
-      if (parts.length >= 3 && !parts.some((part) => Number.isNaN(part))) {
-        const stop = { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
-        if (best === null || stop.a > best.a) best = stop;
-      }
+      const colour = resolveColour(match[0]);
+      if (colour !== null) stops.push(colour);
       match = pattern.exec(value);
     }
-    return best;
+    if (stops.length === 0) return null;
+    const first = stops[0];
+    const same = stops.every((stop) => Math.round(stop.r) === Math.round(first.r)
+      && Math.round(stop.g) === Math.round(first.g)
+      && Math.round(stop.b) === Math.round(first.b)
+      && Math.abs(stop.a - first.a) < 0.002);
+    const highest = stops.reduce((best, stop) => (stop.a > best.a ? stop : best));
+    return { colour: same ? first : null, gradient: value, varying: !same, highest };
   };
   const layerColour = (style) => {
     const image = imageLayer(style.backgroundImage);
-    const colour = parse(style.backgroundColor);
+    const colour = resolveColour(style.backgroundColor);
     let base = null;
-    if (image !== null && colour !== null) {
-      base = {
-        r: image.r * image.a + colour.r * (1 - image.a),
-        g: image.g * image.a + colour.g * (1 - image.a),
-        b: image.b * image.a + colour.b * (1 - image.a),
-        a: image.a + colour.a * (1 - image.a),
-      };
-    } else if (image !== null) {
-      base = image;
-    } else if (colour !== null) {
+    let warning = null;
+    if (image !== null && image.varying) {
+      warning = { gradient: image.gradient, highest: image.highest };
+      base = colour;
+    } else if (image !== null && image.colour !== null) {
+      base = colour === null
+        ? image.colour
+        : {
+            r: image.colour.r * image.colour.a + colour.r * (1 - image.colour.a),
+            g: image.colour.g * image.colour.a + colour.g * (1 - image.colour.a),
+            b: image.colour.b * image.colour.a + colour.b * (1 - image.colour.a),
+            a: image.colour.a + colour.a * (1 - image.colour.a),
+          };
+    } else {
       base = colour;
     }
-    if (base === null) return null;
+    if (base === null) return { layer: null, warning };
     const opacity = Number.parseFloat(style.opacity);
     const alpha = base.a * (Number.isFinite(opacity) ? opacity : 1);
-    if (alpha <= 0) return null;
-    return { r: base.r, g: base.g, b: base.b, a: Math.min(1, alpha) };
+    if (alpha <= 0) return { layer: null, warning };
+    return { layer: { r: base.r, g: base.g, b: base.b, a: Math.min(1, alpha) }, warning };
   };
-  // Where a pseudo-element paints, from its originating element's border box
-  // and the pseudo's computed offsets and size.
+  // Where a pseudo-element paints, from its originating element's border box,
+  // the pseudo's computed offsets and size, and its padding and border.
   const pseudoRect = (node, style) => {
     const box = node.getBoundingClientRect();
     const top = px(style.top);
@@ -159,19 +200,63 @@ const VISIBILITY_RULE = `
     const left = px(style.left);
     const width = px(style.width);
     const height = px(style.height);
-    const w = width ?? (left !== null && right !== null ? box.width - left - right : box.width);
-    const h = height ?? (top !== null && bottom !== null ? box.height - top - bottom : box.height);
+    const padX = (px(style.paddingLeft) ?? 0) + (px(style.paddingRight) ?? 0)
+      + (px(style.borderLeftWidth) ?? 0) + (px(style.borderRightWidth) ?? 0);
+    const padY = (px(style.paddingTop) ?? 0) + (px(style.paddingBottom) ?? 0)
+      + (px(style.borderTopWidth) ?? 0) + (px(style.borderBottomWidth) ?? 0);
+    const borderBox = style.boxSizing === "border-box";
+    const w = width !== null
+      ? (borderBox ? width : width + padX)
+      : left !== null && right !== null ? box.width - left - right : box.width;
+    const h = height !== null
+      ? (borderBox ? height : height + padY)
+      : top !== null && bottom !== null ? box.height - top - bottom : box.height;
     const x = left !== null ? box.left + left : right !== null ? box.right - right - w : box.left;
     const y = top !== null ? box.top + top : bottom !== null ? box.bottom - bottom - h : box.top;
-    return { left: x, top: y, right: x + w, bottom: y + h };
+    return { left: x, top: y, right: x + w, bottom: y + h, width: w, height: h };
+  };
+  const lengthValue = (value, basis) => {
+    if (!value) return 0;
+    if (value.endsWith("%")) return basis * (Number.parseFloat(value) / 100);
+    const number = Number.parseFloat(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const insideQuad = (point, quad) => {
+    let inside = false;
+    for (let index = 0, previous = quad.length - 1; index < quad.length; previous = index, index += 1) {
+      const current = quad[index];
+      const last = quad[previous];
+      if ((current.y > point.y) !== (last.y > point.y)
+        && point.x < (last.x - current.x) * (point.y - current.y) / (last.y - current.y) + current.x) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  };
+  const pseudoQuad = (rect, style) => {
+    if (!style.transform || style.transform === "none") return null;
+    const matrix = new DOMMatrix(style.transform);
+    const parts = style.transformOrigin.split(/\\s+/);
+    const originX = rect.left + lengthValue(parts[0], rect.width);
+    const originY = rect.top + lengthValue(parts[1], rect.height);
+    const full = new DOMMatrix().translate(originX, originY).multiply(matrix).translate(-originX, -originY);
+    return [
+      { x: rect.left, y: rect.top },
+      { x: rect.right, y: rect.top },
+      { x: rect.right, y: rect.bottom },
+      { x: rect.left, y: rect.bottom },
+    ].map((corner) => {
+      const mapped = full.transformPoint(new DOMPoint(corner.x, corner.y));
+      return { x: mapped.x, y: mapped.y };
+    });
   };
   // A pseudo-element paints above its originating element's content when it has
-  // content, is positioned, is not behind it, and its rectangle contains the
-  // sampled point. An inset:0 overlay covers; an underline or a corner dot does
-  // not.
+  // content, is positioned, is not behind it, and its mapped rectangle contains
+  // the sampled point. An inset:0 overlay covers; an underline, a corner dot, a
+  // scale(0) overlay, and a translated-away overlay do not.
   const pseudoLayers = (node, point) => {
     const cached = pseudoCache.get(node);
-    const layers = cached ?? [];
+    const descriptors = cached ?? [];
     if (cached === undefined) {
       for (const pseudo of ["::before", "::after"]) {
         const style = getComputedStyle(node, pseudo);
@@ -179,15 +264,26 @@ const VISIBILITY_RULE = `
         if (style.display === "none") continue;
         if (style.position === "static") continue;
         if (style.zIndex !== "auto" && Number(style.zIndex) < 0) continue;
-        const layer = layerColour(style);
-        if (layer !== null) layers.push({ rect: pseudoRect(node, style), layer });
+        const { layer, warning } = layerColour(style);
+        if (layer !== null || warning !== null) {
+          const rect = pseudoRect(node, style);
+          descriptors.push({ rect, quad: pseudoQuad(rect, style), layer, warning });
+        }
       }
-      pseudoCache.set(node, layers);
+      pseudoCache.set(node, descriptors);
     }
-    return layers
-      .filter(({ rect }) => point.x >= rect.left && point.x <= rect.right
-        && point.y >= rect.top && point.y <= rect.bottom)
-      .map(({ layer }) => layer);
+    const layers = [];
+    const warnings = [];
+    for (const descriptor of descriptors) {
+      const { rect, quad, layer, warning } = descriptor;
+      const contains = quad === null
+        ? point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
+        : insideQuad(point, quad);
+      if (!contains) continue;
+      if (layer !== null) layers.push(layer);
+      if (warning !== null) warnings.push(warning);
+    }
+    return { layers, warnings };
   };
   const hitState = (element, box) => {
     const stack = document.elementsFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
@@ -277,6 +373,7 @@ const VISIBILITY_RULE = `
     const cached = coverCache.get(element);
     if (cached !== undefined) return cached;
     const layers = [];
+    const warnings = [];
     const clipped = clippedBox(element);
     const box = element.getBoundingClientRect();
     const sampled = clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1;
@@ -290,22 +387,24 @@ const VISIBILITY_RULE = `
         for (let index = textIndex - 1; index >= 0; index -= 1) {
           const item = stack[index];
           if (item === element || item.contains(element) || element.contains(item)) continue;
-          const layer = layerColour(getComputedStyle(item));
+          const { layer, warning } = layerColour(getComputedStyle(item));
           if (layer !== null) layers.push(layer);
+          if (warning !== null) warnings.push(warning);
         }
       }
     }
     for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
-      for (const layer of pseudoLayers(node, point)) layers.push(layer);
+      const pseudo = pseudoLayers(node, point);
+      layers.push(...pseudo.layers);
+      warnings.push(...pseudo.warnings);
     }
-    coverCache.set(element, layers);
-    return layers;
+    const result = { layers, warnings };
+    coverCache.set(element, result);
+    return result;
   };
   const paintsText = (element) => {
-    const colour = /rgba?\\(([^)]+)\\)/.exec(getComputedStyle(element).color);
-    if (colour === null) return true;
-    const parts = colour[1].split(/[,\\s/]+/).filter(Boolean).map(Number);
-    return parts.length < 4 || parts[3] > 0;
+    const colour = resolveColour(getComputedStyle(element).color);
+    return colour === null || colour.a > 0;
   };
 `;
 
@@ -490,7 +589,7 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
   const hex = (colour) =>
     "#" + [colour.r, colour.g, colour.b].map((value) => Math.round(value).toString(16).padStart(2, "0")).join("");
 
-  const base = parse(getComputedStyle(document.body).backgroundColor) ?? { r: 255, g: 255, b: 255, a: 1 };
+  const base = resolveColour(getComputedStyle(document.body).backgroundColor) ?? { r: 255, g: 255, b: 255, a: 1 };
 
   const ancestorBackdrop = (element) => {
     const chain = [];
@@ -501,7 +600,7 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
     }
     let acc = base;
     for (const item of chain.reverse()) {
-      const colour = parse(getComputedStyle(item).backgroundColor);
+      const colour = resolveColour(getComputedStyle(item).backgroundColor);
       if (colour && colour.a > 0) acc = over(colour, acc);
     }
     return acc;
@@ -518,10 +617,10 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
       const tag = item.tagName.toLowerCase();
       if (item instanceof SVGElement) {
         if (!SHAPES.has(tag)) continue;
-        const fill = parse(getComputedStyle(item).fill);
+        const fill = resolveColour(getComputedStyle(item).fill);
         if (fill && fill.a > 0) acc = over(fill, acc);
       } else {
-        const colour = parse(getComputedStyle(item).backgroundColor);
+        const colour = resolveColour(getComputedStyle(item).backgroundColor);
         if (colour && colour.a > 0) acc = over(colour, acc);
       }
     }
@@ -548,17 +647,18 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
     const behind = backdrop(element);
     // Composite the layers painted above the text over both the text and the
     // backdrop. An opaque cover makes them equal and the ratio 1; a tint moves
-    // both slightly and leaves the ratio alone.
+    // both slightly and leaves the ratio alone. A varying gradient is not
+    // composited; it is reported as a warning at its highest-alpha stop.
     const cover = coverLayers(element);
-    const paintedText = cover.reduce((acc, layer) => over(layer, acc), colour);
-    const paintedBehind = cover.reduce((acc, layer) => over(layer, acc), behind);
+    const paintedText = cover.layers.reduce((acc, layer) => over(layer, acc), colour);
+    const paintedBehind = cover.layers.reduce((acc, layer) => over(layer, acc), behind);
     const style = getComputedStyle(element);
     const size = Number.parseFloat(style.fontSize);
     const weight = Number(style.fontWeight) || 400;
     const large = size >= 24 || (size >= 18.66 && weight >= 700);
     const floor = large ? 3 : 4.5;
     const value = ratio(paintedText, paintedBehind);
-    return {
+    const row = {
       where: name(element),
       text: text.replace(/\\s+/g, " ").trim().slice(0, 40),
       color: hex(paintedText),
@@ -569,6 +669,16 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
       weight,
       pass: value >= floor,
     };
+    if (cover.warnings.length > 0) {
+      const warning = cover.warnings[0];
+      row.warning = {
+        selector: name(element),
+        gradient: warning.gradient,
+        ratio: Number(ratio(over(warning.highest, colour), over(warning.highest, behind)).toFixed(3)),
+        more: cover.warnings.length - 1,
+      };
+    }
+    return row;
   };
 
   const rows = [];
@@ -579,7 +689,7 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
     );
     if (!hasText) continue;
     if (!isVisible(element) || !paintsText(element)) continue;
-    const colour = parse(getComputedStyle(element).color);
+    const colour = resolveColour(getComputedStyle(element).color);
     if (!colour || colour.a === 0) continue;
     rows.push(measure(element, element.textContent ?? "", colour));
   }
@@ -590,7 +700,7 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
     const option = select.selectedOptions[0];
     if (!option) continue;
     if (!isVisible(select) || !paintsText(select)) continue;
-    const colour = parse(getComputedStyle(select).color);
+    const colour = resolveColour(getComputedStyle(select).color);
     if (!colour || colour.a === 0) continue;
     rows.push(measure(select, option.textContent ?? "", colour));
   }
@@ -778,6 +888,7 @@ server.stderr.on("data", (chunk) => { serverOutput += chunk.toString(); });
 const report = {
   themes: {},
   textFailures: [],
+  warnings: [],
   focusFailures: [],
   viewFailures: [],
   themeFailures: [],
@@ -883,6 +994,9 @@ try {
       if (!report.labelCounts.includes(result.labelCount)) report.labelCounts.push(result.labelCount);
       for (const row of result.rows.filter((entry) => !entry.pass)) {
         report.textFailures.push({ theme, view: view.name, ...row });
+      }
+      for (const row of result.rows) {
+        if (row.warning) report.warnings.push({ theme, view: view.name, ...row.warning });
       }
       const problems = [];
       if (result.panelId !== view.panelId) {
@@ -1107,6 +1221,13 @@ for (const item of report.textFailures.slice(0, 40)) {
   console.log(
     `  ${item.ratio} < ${item.floor}  ${item.color} on ${item.bg}  ${item.size}px/${item.weight}  ` +
       `"${item.text}"  ${item.where}  [${item.theme} ${item.view}]`,
+  );
+}
+console.log(`gradient warnings: ${report.warnings.length}`);
+for (const item of report.warnings.slice(0, 40)) {
+  console.log(
+    `  warning: ${item.selector}  ${item.gradient}${item.more > 0 ? ` (+${item.more} more)` : ""}  ` +
+      `would read ${item.ratio} at its highest-alpha stop  [${item.theme} ${item.view}]`,
   );
 }
 console.log(`focus ring failures: ${report.focusFailures.length}`);
