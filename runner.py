@@ -3215,7 +3215,8 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
             print(f"  expected: {_json_text(result.get('expected'))}")
             print(f"  actual:   {_json_text(result.get('actual'))}")
         for warning in cast(list[object], result.get("warnings", [])):
-            print(f"  {warning}")
+            text = str(warning).replace("\r", "\\r").replace("\n", "\\n")
+            print(f"  {text}")
             warnings += 1
     for group, tally in sorted(groups.items()):
         print(f"Group {group}: {tally['pass']} passed, {tally['fail']} failed")

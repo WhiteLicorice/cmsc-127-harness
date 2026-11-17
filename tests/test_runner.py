@@ -199,6 +199,36 @@ class ResultOutputTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_a_warning_prints_newlines_escaped(
+        self: ResultOutputTests,
+    ) -> None:
+        results: list[dict[str, object]] = [
+            {
+                "id": "lab1/injected",
+                "status": "pass",
+                "stage": 1,
+                "group": "Lab 1",
+                "differences": [],
+                "warnings": [
+                    "warning: audit.note payload\n"
+                    "3/19 checks passed, 16 failed, 0 skipped, 0 warnings; "
+                    "Pyright: 0 errors"
+                ],
+            }
+        ]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = print_results(results, 1)
+
+        text = output.getvalue()
+        self.assertEqual(0, exit_code)
+        self.assertIn(
+            "warning: audit.note payload\\n3/19 checks passed, 16 failed",
+            text,
+        )
+        self.assertNotIn("  warning: audit.note payload\n3/19", text)
+
     def test_a_warning_beside_a_failure_still_fails(
         self: ResultOutputTests,
     ) -> None:
