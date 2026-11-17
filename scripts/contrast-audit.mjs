@@ -6,30 +6,37 @@
 // the ancestor background chain. Anything inside an SVG takes its backdrop from
 // the painted shapes under the point, because a <g> paints nothing.
 //
+// Visible means the browser says so. One rule, VISIBILITY_RULE below, is used
+// by the text walk, the select loop, the required selectors, the required text,
+// the connection message, and the tabbable set. An element is visible when
+// checkVisibility() is true and a hit test inside its clipped rectangle returns
+// the element or a descendant. Clipping intersects the viewport and every
+// ancestor whose overflow is not visible, so a 1px scroll container hides its
+// rows, and a covered element is not visible either.
+//
 // A closed <select> paints its selected option's text but the option has a 0x0
 // box, so the walk measures the select itself: its own box, colour, and
 // background, with the selected option's text. The open list is a native popup
 // outside the DOM and is not measured.
 //
-// Every view asserts what it must contain, and every assertion reads the page,
-// not the DOM. A required selector needs a visible match: display not none,
-// visibility not hidden, and a box of at least 1x1. Required text is read from
-// visible text nodes only. Required rows are counted as visible rows.
+// Every view asserts what it must contain, and every assertion reads the page.
+// Counts the fixture fixes are exact: rows, headers, result cells, table cards.
+// A count of 0 means exactly zero. Only Sessions and Roles keep a lower bound,
+// because their row counts follow the cluster.
 //
-// Each view also names the panel it measures. The panel id must match and the
-// panel must contain a marker only that panel renders, so a view cannot measure
-// a different panel's markup. A view whose marker was already on the page
-// before the click must see the panel text change.
+// Each view names the panel it measures. The panel id must match and the panel
+// must contain a marker only that panel renders, so a view cannot measure a
+// different panel's markup. A view that clicks a tab must see the panel change.
 //
 // The chrome baseline is 14 measured elements: the title, the byline, the two
 // control labels, the poll summary, the seven tabs, and the two closed select
-// values. Every minimum below is that baseline plus what the fixture puts in
-// the panel, so a panel that renders nothing cannot pass.
+// values. The lower bounds for Sessions and Roles are that baseline plus the
+// fixture's row.
 //
-// The tab order comes from the browser, not from a selector: the walk presses
-// Tab and records document.activeElement until focus cycles, then requires a
-// ring on every visited element. A focusable the selector would have missed is
-// visited and counted.
+// The tab order comes from the browser: the walk presses Tab and records
+// document.activeElement until focus cycles. An independent set of visible
+// tabbables comes from a broad selector. Every member of that set must be
+// visited, so a focus trap fails instead of shrinking the walk.
 import { spawn } from "node:child_process";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -50,6 +57,66 @@ const artifactRoot = resolve("audit-artifacts");
 const checkResultPath = resolve(projectRoot, ".cmsc127", "last-run.json");
 const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python");
 
+// The one visibility rule. It is injected into every page function so the walk,
+// the assertions, and the tabbable set cannot drift apart.
+const VISIBILITY_RULE = `
+  const visibleCache = new Map();
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const cached = visibleCache.get(element);
+    if (cached !== undefined) return cached;
+    let visible = true;
+    if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, contentVisibilityAuto: true })) {
+      visible = false;
+    } else {
+      const box = element.getBoundingClientRect();
+      if (box.width < 1 || box.height < 1) {
+        visible = false;
+      } else {
+        let left = 0;
+        let top = 0;
+        let right = window.innerWidth;
+        let bottom = window.innerHeight;
+        for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
+          if (node !== element) {
+            const style = getComputedStyle(node);
+            if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+              const rect = node.getBoundingClientRect();
+              left = Math.max(left, rect.left + node.clientLeft);
+              top = Math.max(top, rect.top + node.clientTop);
+              right = Math.min(right, rect.left + node.clientLeft + node.clientWidth);
+              bottom = Math.min(bottom, rect.top + node.clientTop + node.clientHeight);
+            }
+          }
+        }
+        left = Math.max(left, box.left);
+        top = Math.max(top, box.top);
+        right = Math.min(right, box.right);
+        bottom = Math.min(bottom, box.bottom);
+        if (right - left < 1 || bottom - top < 1) {
+          visible = false;
+        } else {
+          const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+          visible = hit !== null && (hit === element || element.contains(hit));
+        }
+      }
+    }
+    visibleCache.set(element, visible);
+    return visible;
+  };
+  const paintsText = (element) => {
+    const colour = /rgba?\\(([^)]+)\\)/.exec(getComputedStyle(element).color);
+    if (colour === null) return true;
+    const parts = colour[1].split(/[,\\s/]+/).filter(Boolean).map(Number);
+    return parts.length < 4 || parts[3] > 0;
+  };
+`;
+
+const TABBABLE_SELECTOR = [
+  "a[href]", "button", "select", "input", "textarea", "summary",
+  "[tabindex]", "[contenteditable='true']", "audio[controls]", "video[controls]",
+].join(",");
+
 // One pass, one fail, one skip, and one pass with a warning, so the Checks
 // panel paints every result cell and the warning note.
 const CHECK_RESULT = {
@@ -65,33 +132,31 @@ const CHECK_RESULT = {
   warnings: 1,
 };
 
-// `min` is CHROME_BASELINE plus the fixture's content for the panel. `needs`
-// counts visible matches. `text` is checked against visible text only.
+// `exact` counts the fixture-fixed parts of a view; a count of 0 means exactly
+// zero. `min` and `needs` are lower bounds only for Sessions and Roles, whose
+// row counts follow the cluster.
 const VIEWS = [
   {
     name: "initial",
     panelId: "tables",
-    min: 24,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 2, "thead th": 3 },
+    exact: { "tbody tr": 2, "thead th": 3, ".table-card": 1 },
     text: ["Rows use committed data", "audit_student"],
   },
   {
     name: "Changes",
     panel: "Changes",
     panelId: "changes",
-    min: 15,
     waitText: "No changes observed yet",
-    needs: { "p": 1 },
+    exact: { "tbody tr": 0 },
     text: ["No changes observed yet"],
   },
   {
     name: "Schema",
     panel: "Schema",
     panelId: "schema",
-    min: 36,
     waitSelector: ".mermaid svg",
-    needs: { ".mermaid svg": 2, ".mermaid p": 12 },
+    exact: { ".mermaid svg": 2, ".mermaid p": 12 },
     text: ["audit_student"],
   },
   {
@@ -100,16 +165,18 @@ const VIEWS = [
     panelId: "sessions",
     min: 26,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 1, "thead th": 6 },
+    needs: { "tbody tr": 1 },
+    exact: { "thead th": 6 },
     text: ["PostgreSQL limits which sessions a role can see.", "PID"],
   },
   {
     name: "Checks",
     panel: "Checks",
     panelId: "checks",
-    min: 40,
     waitSelector: ".result-pass",
-    needs: { "tbody tr": 4, ".result-pass": 1, ".result-fail": 1, ".result-skip": 1, ".warning-note": 1 },
+    exact: {
+      "tbody tr": 4, ".result-pass": 2, ".result-fail": 1, ".result-skip": 1, ".warning-note": 1,
+    },
     text: ["Case", "Result", "3 rows exceed the soft limit"],
   },
   {
@@ -118,55 +185,51 @@ const VIEWS = [
     panelId: "roles",
     min: 20,
     waitSelector: "tbody tr",
-    needs: { "tbody tr": 1, "thead th": 3 },
+    needs: { "tbody tr": 1 },
+    exact: { "thead th": 3 },
     text: ["Privileges"],
   },
   {
     name: "Status",
     panel: "Status",
     panelId: "status",
-    min: 22,
     waitSelector: "dl dt",
-    needs: { "dl dt": 4 },
+    exact: { "dl dt": 4 },
     text: ["Last poll"],
   },
   {
     name: "Status disconnected",
     panel: "Status",
     panelId: "status",
-    min: 15,
     route: "status-disconnected",
     waitSelector: ".error-message",
-    needs: { ".error-message": 1 },
+    exact: { ".error-message": 1, "tbody tr": 0 },
     text: ["PostgreSQL is unavailable"],
   },
   {
     name: "Checks empty",
     panel: "Checks",
     panelId: "checks",
-    min: 15,
     hideCheckResult: true,
     waitText: "No check result exists",
-    needs: { "tbody tr": 0 },
+    exact: { "tbody tr": 0 },
     text: ["No check result exists"],
   },
   {
     name: "Server unreachable",
     panel: "Tables",
     panelId: "tables",
-    min: 25,
     route: "tables-abort",
     waitConnection: "The harness server cannot be reached.",
-    needs: { "tbody tr": 2 },
+    exact: { "tbody tr": 2, ".table-card": 1 },
     text: ["Rows use committed data"],
   },
   {
     name: "Tables error",
     panelId: "tables",
-    min: 25,
     route: "tables-error",
     waitConnection: "The tables request failed.",
-    needs: { "tbody tr": 2 },
+    exact: { "tbody tr": 2, ".table-card": 1 },
     text: ["Rows use committed data"],
   },
   {
@@ -174,25 +237,23 @@ const VIEWS = [
     panel: "Tables",
     panelId: "tables",
     schema: EMPTY_SCHEMA,
-    min: 16,
     waitText: "No tables or views exist in this schema.",
-    needs: { "tbody tr": 0 },
+    exact: { "tbody tr": 0, ".table-card": 0 },
     text: ["No tables or views exist in this schema."],
   },
   {
     name: "Roles empty",
     panel: "Roles",
     panelId: "roles",
-    min: 15,
     waitText: "No tables or user roles exist in this schema.",
-    needs: { "tbody tr": 0 },
+    exact: { "tbody tr": 0 },
     text: ["No tables or user roles exist in this schema."],
   },
 ];
 
 const COUNTERS = [
   "tbody tr", "thead th", "p", "dl dt", ".result-pass", ".result-fail", ".result-skip",
-  ".warning-note", ".error-message", ".mermaid svg", ".mermaid p",
+  ".warning-note", ".error-message", ".mermaid svg", ".mermaid p", ".table-card",
 ];
 
 if (!process.env["CMSC127_DATABASE_URL"]) {
@@ -212,12 +273,12 @@ function runSql(statements) {
   });
 }
 
-function auditPage(counters) {
+const auditPage = new Function("counters", `${VISIBILITY_RULE}
   const parse = (value) => {
     if (!value || value === "none" || value === "transparent") return null;
-    const match = /rgba?\(([^)]+)\)/.exec(value);
+    const match = /rgba?\\(([^)]+)\\)/.exec(value);
     if (!match) return null;
-    const parts = match[1].split(/[,\s/]+/).filter((part) => part.length > 0).map(Number);
+    const parts = match[1].split(/[,\\s/]+/).filter((part) => part.length > 0).map(Number);
     if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
   };
@@ -242,15 +303,6 @@ function auditPage(counters) {
 
   const base = parse(getComputedStyle(document.body).backgroundColor) ?? { r: 255, g: 255, b: 255, a: 1 };
   const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
-
-  // A visible box: painted, not collapsed, and at least one pixel each way.
-  const isVisible = (element) => {
-    if (!(element instanceof Element)) return false;
-    const style = getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const box = element.getBoundingClientRect();
-    return box.width >= 1 && box.height >= 1;
-  };
 
   const ancestorBackdrop = (element) => {
     const chain = [];
@@ -295,8 +347,8 @@ function auditPage(counters) {
     let node = element;
     while (node && node !== document.documentElement && parts.length < 4) {
       let step = node.tagName.toLowerCase();
-      if (node.id) step += "#" + node.id.replace(/mermaid-\d+-/, "");
-      const classes = (node.getAttribute("class") ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
+      if (node.id) step += "#" + node.id.replace(/mermaid-\\d+-/, "");
+      const classes = (node.getAttribute("class") ?? "").trim().split(/\\s+/).filter(Boolean).slice(0, 2);
       if (classes.length) step += "." + classes.join(".");
       parts.unshift(step);
       node = node.parentElement;
@@ -314,7 +366,7 @@ function auditPage(counters) {
     const value = ratio(colour, behind);
     return {
       where: name(element),
-      text: text.replace(/\s+/g, " ").trim().slice(0, 40),
+      text: text.replace(/\\s+/g, " ").trim().slice(0, 40),
       color: hex(colour),
       bg: hex(behind),
       ratio: Number(value.toFixed(3)),
@@ -332,7 +384,7 @@ function auditPage(counters) {
       (node) => node.nodeType === 3 && (node.textContent ?? "").trim().length > 0,
     );
     if (!hasText) continue;
-    if (!isVisible(element)) continue;
+    if (!isVisible(element) || !paintsText(element)) continue;
     const colour = parse(getComputedStyle(element).color);
     if (!colour || colour.a === 0) continue;
     rows.push(measure(element, element.textContent ?? "", colour));
@@ -343,7 +395,7 @@ function auditPage(counters) {
   for (const select of document.querySelectorAll("select")) {
     const option = select.selectedOptions[0];
     if (!option) continue;
-    if (!isVisible(select)) continue;
+    if (!isVisible(select) || !paintsText(select)) continue;
     const colour = parse(getComputedStyle(select).color);
     if (!colour || colour.a === 0) continue;
     rows.push(measure(select, option.textContent ?? "", colour));
@@ -358,14 +410,14 @@ function auditPage(counters) {
       if ((node.textContent ?? "").trim().length === 0) continue;
       let visible = true;
       for (let element = node.parentElement; element && element !== root.parentElement; element = element.parentElement) {
-        if (!isVisible(element)) {
+        if (!isVisible(element) || !paintsText(element)) {
           visible = false;
           break;
         }
       }
       if (visible) parts.push(node.textContent ?? "");
     }
-    return parts.join(" ").replace(/\s+/g, " ").trim();
+    return parts.join(" ").replace(/\\s+/g, " ").trim();
   };
 
   const content = document.querySelector("#panel-content");
@@ -399,7 +451,19 @@ function auditPage(counters) {
       ? 0
       : [...content.querySelectorAll(".mermaid p")].filter(isVisible).length,
   };
-}
+`);
+
+const tagTabbables = new Function("selector", `${VISIBILITY_RULE}
+  const nodes = [...document.querySelectorAll(selector)].filter((node) => {
+    if (node.disabled) return false;
+    if (node.closest("[inert]")) return false;
+    const tabindex = node.getAttribute("tabindex");
+    if (tabindex !== null && Number(tabindex) < 0) return false;
+    return isVisible(node);
+  });
+  nodes.forEach((node, index) => node.setAttribute("data-audit-focus", String(index)));
+  return nodes.length;
+`);
 
 function focusRing() {
   const parse = (value) => {
@@ -622,12 +686,17 @@ try {
       if (result.panelId !== view.panelId) {
         problems.push(`the panel id is ${JSON.stringify(result.panelId)}, expected ${JSON.stringify(view.panelId)}`);
       }
-      if (result.rows.length < view.min) {
+      if (view.min !== undefined && result.rows.length < view.min) {
         problems.push(`measured ${result.rows.length} visible text elements, expected at least ${view.min}`);
+      }
+      for (const [selector, count] of Object.entries(view.exact ?? {})) {
+        const actual = result.counts[selector] ?? 0;
+        if (actual !== count) problems.push(`visible ${selector}: ${actual}, expected exactly ${count}`);
       }
       for (const [selector, count] of Object.entries(view.needs ?? {})) {
         const actual = result.counts[selector] ?? 0;
-        if (actual < count) problems.push(`visible ${selector}: ${actual}, expected at least ${count}`);
+        const ok = count === 0 ? actual === 0 : actual >= count;
+        if (!ok) problems.push(`visible ${selector}: ${actual}, expected ${count === 0 ? "exactly 0" : `at least ${count}`}`);
       }
       for (const text of view.text ?? []) {
         if (!result.panelText.includes(text)) problems.push(`visible panel text does not include ${JSON.stringify(text)}`);
@@ -644,27 +713,29 @@ try {
     // The initial view, where a scroll container is also focusable.
     await measureView(VIEWS[0]);
 
-    // The tab order from the browser: press Tab until focus cycles, and
-    // require a ring on every element that was visited.
+    // The tab order from the browser. The independent set comes from a broad
+    // selector; the walk must visit every member, so a trap fails instead of
+    // shrinking the walk.
+    const tabbables = await page.evaluate(tagTabbables, TABBABLE_SELECTOR);
     await page.locator("body").click({ position: { x: 5, y: 5 } });
     const visited = new Set();
-    const missing = [];
     let rings = 0;
-    for (let step = 0; step < 40; step += 1) {
+    for (let step = 0; step < tabbables + 4; step += 1) {
       await page.keyboard.press("Tab");
       await page.waitForTimeout(50);
       const id = await page.evaluate(tagFocused);
       if (id === null || visited.has(id)) break;
       visited.add(id);
       const ring = await page.evaluate(focusRing);
-      if (ring === null) {
-        missing.push(id);
-      } else {
+      if (ring !== null) {
         rings += 1;
         if (!ring.pass) report.focusFailures.push({ theme, ...ring });
       }
     }
-    report.focus[theme] = { visited: visited.size, rings, missing };
+    const missing = [...Array(tabbables).keys()]
+      .map(String)
+      .filter((id) => !visited.has(id));
+    report.focus[theme] = { tabbables, visited: visited.size, rings, missing };
 
     for (const view of VIEWS.slice(1)) {
       const before = await page.evaluate(() => ({
@@ -812,14 +883,21 @@ const range = (view) => {
   return counts.length === 0 ? "0" : `${Math.min(...counts)}-${Math.max(...counts)}`;
 };
 const ringCounts = Object.values(report.focus).map((entry) => entry.rings);
-const backgrounds = new Set(Object.values(report.themes).map((entry) => entry.bodyBg));
+const byBackground = new Map();
+for (const [theme, entry] of Object.entries(report.themes)) {
+  const group = byBackground.get(entry.bodyBg) ?? [];
+  group.push(theme);
+  byBackground.set(entry.bodyBg, group);
+}
+const shared = [...byBackground.entries()].filter(([, themes]) => themes.length > 1);
 
 console.log(`themes: ${THEMES.length}, views: ${VIEWS.length}`);
 console.log(`text elements measured: ${measured}`);
 console.log(`per view: ${VIEWS.map((view) => `${view.name} ${range(view.name)}`).join(", ")}`);
 console.log(`diagram label counts seen: ${report.labelCounts.join(", ")}`);
 console.log(`rendered themes: ${[...new Set(Object.values(report.themes).map((entry) => entry.renderedTheme))].join(", ")}`);
-console.log(`distinct body backgrounds: ${backgrounds.size}`);
+console.log(`distinct body backgrounds: ${byBackground.size}`);
+console.log(`tabbables: ${[...new Set(Object.values(report.focus).map((entry) => entry.tabbables))].join(", ")}`);
 console.log(`tabbables visited: ${[...new Set(Object.values(report.focus).map((entry) => entry.visited))].join(", ")}`);
 console.log(`focus rings per theme: ${ringCounts.length === 0 ? "0" : `${Math.min(...ringCounts)}-${Math.max(...ringCounts)}`}`);
 console.log(`text failures: ${report.textFailures.length}`);
@@ -837,13 +915,19 @@ console.log(`theme failures: ${report.themeFailures.length}`);
 for (const item of report.themeFailures) {
   console.log(`  ${item.theme}: ${item.problem}`);
 }
+for (const [background, themes] of shared) {
+  console.log(`  ${themes.join(" and ")} both paint ${background}; each theme must set its own --bg.`);
+}
 console.log(`view failures: ${report.viewFailures.length}`);
 for (const item of report.viewFailures.slice(0, 20)) {
   console.log(`  ${item.view}  [${item.theme}]  ${item.problems.join("; ")}`);
 }
 for (const [theme, entry] of Object.entries(report.focus)) {
   if (entry.missing.length > 0 || entry.rings !== entry.visited) {
-    console.log(`  ${theme}: ${entry.rings}/${entry.visited} visited elements painted a ring, missing ${entry.missing.join(", ")}`);
+    console.log(
+      `  ${theme}: ${entry.rings}/${entry.tabbables} tabbables painted a ring, ` +
+        `visited ${entry.visited}, missing ${entry.missing.join(", ")}`,
+    );
   }
 }
 
@@ -859,14 +943,14 @@ if (failure) {
 } else if (report.themeFailures.length > 0) {
   console.error("The page did not render the theme the audit asked for.");
   process.exitCode = 1;
+} else if (shared.length > 0) {
+  console.error("Two themes painted the same background. Each theme must set its own --bg.");
+  process.exitCode = 1;
 } else if (report.viewFailures.length > 0) {
   console.error("A view did not render what it must contain.");
   process.exitCode = 1;
-} else if (Object.values(report.focus).some((entry) => entry.rings !== entry.visited || entry.visited === 0)) {
-  console.error("A theme did not paint a ring on every element the tab order visited.");
-  process.exitCode = 1;
-} else if (backgrounds.size !== THEMES.length) {
-  console.error("Two themes painted the same background. The theme loop measured one theme twice.");
+} else if (Object.values(report.focus).some((entry) => entry.missing.length > 0 || entry.rings !== entry.visited || entry.visited === 0)) {
+  console.error("A theme did not paint a ring on every tabbable element.");
   process.exitCode = 1;
 } else if (measured === 0) {
   console.error("The contrast audit measured no text. The page did not render.");
