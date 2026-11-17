@@ -131,6 +131,7 @@ try {
   let schemaText = [];
   let schemaLabelFont = "";
   let schemaPageFont = "";
+  let schemaLabelColor = { actual: "", expected: "" };
   for (const panel of expectedPanels.slice(1)) {
     const button = page.getByRole("button", { name: panel, exact: true });
     await button.click();
@@ -160,6 +161,20 @@ try {
         .first()
         .evaluate((node) => getComputedStyle(node).fontFamily);
       schemaPageFont = await page.evaluate(() => getComputedStyle(document.body).fontFamily);
+      schemaLabelColor = await page.evaluate(() => {
+        const label = document.querySelector(".mermaid p");
+        if (label === null) {
+          return { actual: "", expected: "" };
+        }
+        const probe = document.createElement("span");
+        probe.style.color = getComputedStyle(document.documentElement)
+          .getPropertyValue("--text")
+          .trim();
+        document.body.append(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return { actual: getComputedStyle(label).color, expected };
+      });
     }
     const name = `${String(panelNumber).padStart(2, "0")}-${panel.toLowerCase()}.png`;
     panelNumber += 1;
@@ -184,6 +199,13 @@ try {
   }
   record(`schema label font: ${labelFont}`);
 
+  if (schemaLabelColor.actual !== schemaLabelColor.expected) {
+    throw new Error(
+      `A diagram label uses ${schemaLabelColor.actual}, not the text colour ${schemaLabelColor.expected}.`,
+    );
+  }
+  record(`schema label colour: ${schemaLabelColor.actual}`);
+
   const themes = [
     "upv-light", "upv-dark", "github-light", "github-dark", "one-dark", "nord",
     "solarized-light", "solarized-dark", "catppuccin-latte", "catppuccin-mocha",
@@ -195,6 +217,11 @@ try {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(
       () => document.querySelectorAll("#panels button").length === 7,
+      undefined,
+      { timeout: 10_000 },
+    );
+    await page.waitForFunction(
+      () => document.querySelectorAll("#panel-content tbody tr").length > 0,
       undefined,
       { timeout: 10_000 },
     );

@@ -173,49 +173,52 @@ describe("theme tokens", () => {
 });
 
 describe("theme contrast", () => {
-  const pairs: Array<[string, string, number]> = [
-    ["--text", "--surface", 4.5],
-    ["--text", "--bg", 4.5],
-    ["--text", "--surface-2", 4.5],
-    ["--text", "--code-bg", 4.5],
-    ["--muted", "--surface", 4.5],
-    ["--muted", "--bg", 4.5],
-    ["--accent", "--surface", 4.5],
-    ["--border", "--surface", 3],
-    ["--border", "--bg", 3],
-    ["--rule", "--surface", 1.25],
-    ["--pass", "--surface", 4.5],
-    ["--fail", "--surface", 4.5],
-    ["--warn", "--surface", 4.5],
-    ["--info", "--surface", 4.5],
-    ["--pass", "--pass-bg", 4.5],
-    ["--fail", "--fail-bg", 4.5],
-    ["--warn", "--warn-bg", 4.5],
-    ["--info", "--info-bg", 4.5],
-    ["--text", "--row-insert", 4.5],
-    ["--text", "--row-update", 4.5],
-    ["--text", "--row-delete", 4.5],
-    ["--header-text", "--header-bg", 4.5],
-    ["--header-muted", "--header-bg", 4.5],
-    ["--focus", "--bg", 3],
-    ["--focus", "--surface", 3],
-    ["--focus-header", "--header-bg", 3],
+  // Every foreground and background pair the page really renders, with the
+  // surface that carries it. A pair belongs here when a rule paints that
+  // foreground on that background somewhere in the page.
+  const pairs: Array<[string, string, number, string]> = [
+    ["--text", "--surface", 4.5, "panel body"],
+    ["--text", "--bg", 4.5, "page body"],
+    ["--text", "--surface-2", 4.5, "table head, diagram label, active tab"],
+    ["--text", "--code-bg", 4.5, "code block"],
+    ["--text", "--row-insert", 4.5, "insert row"],
+    ["--text", "--row-update", 4.5, "update row"],
+    ["--text", "--row-delete", 4.5, "delete row"],
+    ["--muted", "--surface", 4.5, "panel prose and table captions"],
+    ["--muted", "--bg", 4.5, "poll summary"],
+    ["--surface", "--accent", 4.5, "text selection"],
+    ["--border", "--surface", 3, "control edge"],
+    ["--border", "--bg", 3, "control edge on the page"],
+    ["--rule", "--surface", 1.25, "table rule"],
+    ["--pass", "--surface", 4.5, "pass status"],
+    ["--fail", "--surface", 4.5, "fail status and error message"],
+    ["--warn", "--surface", 4.5, "warning status"],
+    ["--info", "--surface", 4.5, "skip status"],
+    ["--pass", "--pass-bg", 4.5, "pass status cell"],
+    ["--fail", "--fail-bg", 4.5, "fail status cell and error message"],
+    ["--warn", "--warn-bg", 4.5, "warning note"],
+    ["--info", "--info-bg", 4.5, "skip status cell"],
+    ["--header-text", "--header-bg", 4.5, "header title"],
+    ["--header-muted", "--header-bg", 4.5, "header byline"],
+    ["--focus", "--bg", 3, "focus ring on the page"],
+    ["--focus", "--surface", 3, "focus ring on a panel"],
+    ["--focus-header", "--header-bg", 3, "focus ring in the header"],
   ];
 
-  it("meets the floor for text, muted text, borders, focus, and the four states in every theme", () => {
+  it("meets the floor for every pair the page renders in every theme", () => {
     const failures: string[] = [];
     for (const id of THEMES) {
       const tokens = readTokens(themeBlock(id));
-      for (const [foreground, background, floor] of pairs) {
+      for (const [foreground, background, floor, where] of pairs) {
         const first = tokens[foreground];
         const second = tokens[background];
         if (first === undefined || second === undefined) {
-          failures.push(`${id} ${foreground}/${background}: token missing`);
+          failures.push(`${id} ${foreground}/${background} (${where}): token missing`);
           continue;
         }
         const ratio = contrast(first, second);
         if (ratio < floor) {
-          failures.push(`${id} ${foreground}/${background} ${ratio.toFixed(2)} < ${floor}`);
+          failures.push(`${id} ${foreground}/${background} (${where}) ${ratio.toFixed(2)} < ${floor}`);
         }
       }
     }
@@ -261,6 +264,23 @@ describe("theme contrast", () => {
       }
     }
     expect(failures).toEqual([]);
+  });
+
+  // A new colour rule must arrive with a pair in the table above, or this fails.
+  it("covers every foreground colour the stylesheet paints", () => {
+    const declared = new Set(
+      [...css.matchAll(/(?<![-\w])color:\s*var\((--[a-z0-9-]+)\)/g)].map((match) => match[1] ?? ""),
+    );
+    const covered = new Set(pairs.map(([foreground]) => foreground));
+    const missing = [...declared].filter((token) => !covered.has(token));
+    expect(missing).toEqual([]);
+  });
+
+  // The diagram labels sit on --surface-2, not on --surface. A rule that lets
+  // the panel prose colour reach them drops five themes below 4.5:1.
+  it("paints the diagram label with the body text colour", () => {
+    const rule = /\.mermaid p\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/(?<![-\w])color:\s*var\(--text\)/);
   });
 });
 

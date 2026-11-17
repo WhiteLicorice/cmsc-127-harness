@@ -749,6 +749,12 @@ pre {
   white-space: pre;
 }
 
+/* The diagram labels sit on --surface-2, not on --surface. Keep them on the
+   body text colour so the panel prose colour cannot reach them. */
+.mermaid p {
+  color: var(--text);
+}
+
 dl {
   display: grid;
   grid-template-columns: minmax(8rem, 0.3fr) minmax(0, 1fr);
