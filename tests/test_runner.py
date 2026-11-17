@@ -12,7 +12,7 @@ import hashlib
 from io import StringIO
 from types import TracebackType
 from typing import Callable, Protocol, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 import psycopg
@@ -245,6 +245,23 @@ class ResultOutputTests(unittest.TestCase):
         self.assertEqual(
             ["warning: section.assistant_id agrees on 639 of 640 rows."], warnings
         )
+
+
+class ScratchDatabaseNameTests(unittest.TestCase):
+    def test_scratch_database_uses_course_prefix(self: ScratchDatabaseNameTests) -> None:
+        admin = MagicMock()
+        cursor = admin.cursor.return_value.__enter__.return_value
+        with (
+            patch.object(runner, "uuid4", return_value=Mock(hex="0123456789abcdef")),
+            patch.object(runner.psycopg, "connect", return_value=admin),
+        ):
+            name, connection = runner._create_database(  # pyright: ignore[reportPrivateUsage]
+                "postgresql://postgres@127.0.0.1/postgres"
+            )
+
+        self.assertEqual("cmsc127_race_0123456789abcdef", name)
+        self.assertIs(admin, connection)
+        cursor.execute.assert_called_once_with(f'CREATE DATABASE "{name}"', None)
 
 
 class ManifestTests(unittest.TestCase):

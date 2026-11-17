@@ -1518,7 +1518,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _create_database(base_url: str) -> tuple[str, _DbConnection]:
-    name = f"c127_t18_race_{uuid4().hex}"
+    name = f"cmsc127_race_{uuid4().hex}"
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
         with admin.cursor() as cursor:
