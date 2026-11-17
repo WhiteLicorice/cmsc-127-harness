@@ -1599,6 +1599,20 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertIn("warning: item.label is not validated.", output.getvalue())
             self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
 
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn("DESIGN.md: has no", output.getvalue())
+            self.assertIn("item.label", output.getvalue())
+            self.assertIn("the checker warning is not explained", output.getvalue())
+            self.assertNotIn("DESIGN.md line", output.getvalue())
+
     def test_all_case_kinds_pass_and_each_defect_fails(
         self: RunnerIntegrationTests,
     ) -> None:

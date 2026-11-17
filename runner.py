@@ -1537,10 +1537,21 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
         admin.close()
 
 
+def _migration_files(root: Path) -> list[Path]:
+    """The pair's migration files, whatever the case of their extension."""
+    migration_dir = root / "migrations"
+    if not migration_dir.is_dir():
+        return []
+    return sorted(
+        path
+        for path in migration_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".sql"
+    )
+
+
 def _migration_faults(root: Path) -> list[str]:
     """The name and order faults in the pair's migration folder."""
-    migration_dir = root / "migrations"
-    files = sorted(migration_dir.glob("*.sql")) if migration_dir.exists() else []
+    files = _migration_files(root)
     faults: list[str] = []
     expected = 1
     for path in files:
@@ -1567,9 +1578,7 @@ def _apply_migrations(root: Path, connection: _DbConnection) -> None:
     faults = _migration_faults(root)
     if faults:
         raise ValueError(faults[0])
-    migration_dir = root / "migrations"
-    files = sorted(migration_dir.glob("*.sql")) if migration_dir.exists() else []
-    for path in files:
+    for path in _migration_files(root):
         with connection.cursor() as cursor:
             _execute(cursor, path.read_text(encoding="utf-8"))
 
@@ -2084,24 +2093,31 @@ def _design_rows(
                     )
                     break
     warning_entry = bodies.get("Checker Warnings")
-    warning_body = warning_entry[0] if warning_entry is not None else ""
-    warning_line = warning_entry[1] if warning_entry is not None else 1
     entries: list[tuple[int, str, int]] = []
-    for offset, line in enumerate(warning_body.splitlines()):
-        heading = _HEADING.match(line)
-        if heading is not None:
-            subject = _heading_first_word(heading.group(2))
-            if _WARNING_SUBJECT.fullmatch(subject):
-                entries.append(
-                    (len(heading.group(1)), subject, warning_line + 1 + offset)
-                )
+    if warning_entry is not None:
+        warning_body, warning_line = warning_entry
+        for offset, line in enumerate(warning_body.splitlines()):
+            heading = _HEADING.match(line)
+            if heading is not None:
+                subject = _heading_first_word(heading.group(2))
+                if _WARNING_SUBJECT.fullmatch(subject):
+                    entries.append(
+                        (len(heading.group(1)), subject, warning_line + 1 + offset)
+                    )
     for column in warning_columns:
         matches = [(level, number) for level, word, number in entries if word == column]
         if not matches:
-            rows.append(
-                f'{file_name} line {warning_line}: has no "### {column}" entry under '
-                '"## Checker Warnings", so the checker warning is not explained.'
-            )
+            if warning_entry is None:
+                rows.append(
+                    f'{file_name}: has no "### {column}" entry under '
+                    '"## Checker Warnings", so the checker warning is not explained.'
+                )
+            else:
+                rows.append(
+                    f'{file_name} line {warning_entry[1]}: has no "### {column}" '
+                    'entry under "## Checker Warnings", so the checker warning is '
+                    "not explained."
+                )
         elif all(level != 3 for level, _ in matches):
             rows.append(
                 f'{file_name} line {matches[0][1]}: puts the "{column}" entry at '
@@ -3162,8 +3178,10 @@ PYRIGHT_STUB_RULES = {"reportMissingTypeStubs", "reportMissingModuleSource"}
 
 def _python_files(root: Path) -> list[Path]:
     files: list[Path] = []
-    for path in root.rglob("*.py"):
+    for path in root.rglob("*"):
         if any(part in PYRIGHT_SKIP_DIRS for part in path.relative_to(root).parts):
+            continue
+        if not path.is_file() or path.suffix.lower() != ".py":
             continue
         files.append(path)
     return sorted(files)

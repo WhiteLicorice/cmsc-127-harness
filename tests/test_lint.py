@@ -255,6 +255,84 @@ class LintTests(unittest.TestCase):
                 self.assertIn("DESIGN.md line 3: has nothing under", output)
                 self.assertIn('"## Tables"', output)
 
+    def test_a_missing_checker_warnings_heading_has_no_line_number(
+        self: LintTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_root(root, runner_dir)
+                write(
+                    root / "DESIGN.md",
+                    "# Design\n\n## Tables\n\n- item holds a name.\n\n"
+                    "## Keys and Links\n\n- item stands alone.\n",
+                )
+                write(
+                    root / ".cmsc127" / "last-run.json",
+                    json.dumps(
+                        {
+                            "results": [
+                                {
+                                    "warnings": [
+                                        "warning: item.price agrees with a copy"
+                                    ]
+                                }
+                            ]
+                        }
+                    ),
+                )
+
+                code, output, errors = run_lint(root, runner_dir)
+
+                self.assertEqual(1, code, output + errors)
+                self.assertIn(
+                    'DESIGN.md is missing the heading "## Checker Warnings".', output
+                )
+                self.assertIn(
+                    'DESIGN.md: has no "### item.price" entry under '
+                    '"## Checker Warnings"',
+                    output,
+                )
+                self.assertNotIn("DESIGN.md line 1:", output)
+
+    def test_an_uppercase_migration_extension_is_a_form_fault(
+        self: LintTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_root(root, runner_dir)
+                (root / "migrations" / "0001_create_item.sql").unlink()
+                write(root / "migrations" / "0001_create_item.SQL", "SELECT 1;\n")
+
+                code, output, errors = run_lint(root, runner_dir)
+
+                self.assertEqual(1, code, output + errors)
+                self.assertIn(
+                    "migrations/0001_create_item.SQL: the file name must read "
+                    "NNNN_lowercase_description.sql.",
+                    output,
+                )
+
+    def test_a_stray_file_fault_names_the_file_and_repair(
+        self: LintTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_root(root, runner_dir)
+                write(root / "notes.txt", "notes\n")
+
+                code, output, errors = run_lint(root, runner_dir)
+
+                self.assertEqual(1, code, output + errors)
+                self.assertIn(
+                    "notes.txt: this file is outside the writable paths.", output
+                )
+
     def test_a_migration_fault_names_the_file_and_repair(self: LintTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with tempfile.TemporaryDirectory() as runner_directory:
