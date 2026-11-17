@@ -28,6 +28,7 @@ it("successful Checks and Tables requests clear only their own error stream", as
     querySelector: (selector: string) => elements.get(selector),
     createElement: () => new ElementStub(),
     activeElement: null,
+    addEventListener: () => undefined,
   });
   vi.stubGlobal("window", { setInterval: (callback: () => void) => intervals.push(callback) });
   vi.stubGlobal("fetch", async (url: string) => {
