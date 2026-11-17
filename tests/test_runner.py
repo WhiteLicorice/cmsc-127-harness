@@ -1446,6 +1446,106 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(1, result["warnings"])
             self.assertEqual("pass", result["results"][0]["status"])
 
+    def test_a_query_case_warning_needs_a_design_entry(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = root / "cases"
+            cases.mkdir()
+            (root / "migrations").mkdir()
+            (cases / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/warn",
+                                "stage": 1,
+                                "kind": "query",
+                                "file": "cases/warn.sql",
+                            },
+                            {
+                                "id": "lab1/design",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/design.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "warn.sql").write_text(
+                "SELECT 'warning: item.label is not validated.' AS row;\n",
+                encoding="utf-8",
+            )
+            (cases / "warn.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (cases / "design.json").write_text(
+                json.dumps(
+                    {
+                        "file": "DESIGN.md",
+                        "headings": ["Tables", "Keys and Links", "Checker Warnings"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "design.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1, 'alpha'), (2, 'alpha');\n",
+                encoding="utf-8",
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$1\" = prepare ]; then\n"
+                "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            design_path = root / "DESIGN.md"
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+                encoding="utf-8",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn("DESIGN.md has no", output.getvalue())
+            self.assertIn("item.label", output.getvalue())
+            self.assertIn("the checker warning is not explained", output.getvalue())
+
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\n"
+                "### item.label\n\n"
+                "The column holds a separate fact.\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("warning: item.label is not validated.", output.getvalue())
+            self.assertIn("2/2 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+
     def test_all_case_kinds_pass_and_each_defect_fails(
         self: RunnerIntegrationTests,
     ) -> None:

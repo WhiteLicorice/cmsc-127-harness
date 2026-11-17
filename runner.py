@@ -2070,7 +2070,7 @@ def _run_case(
     case: Mapping[str, object],
     connection: _DbConnection,
     database_url: str,
-    feature_warning_subjects: Sequence[str] = (),
+    warning_subjects: Sequence[str] = (),
 ) -> dict[str, object]:
     case_id = str(case["id"])
     case_path = _case_file(root, case)
@@ -2092,7 +2092,7 @@ def _run_case(
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "document":
         body = _as_object(_read_json(case_path), f"case {case_id}")
-        warning_columns = list(feature_warning_subjects)
+        warning_columns = list(warning_subjects)
         warning_sql = body.get("warning_sql")
         if isinstance(warning_sql, str):
             warning_rows = _run_sql_file(connection, root / warning_sql).get("rows")
@@ -3392,17 +3392,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                         migration_indexes,
                         migration_views,
                     )
-                    feature_warning_rows: list[str] = []
+                    warning_rows: list[str] = []
+                    for case_result in results:
+                        raw_warnings = case_result.get("warnings")
+                        if isinstance(raw_warnings, list):
+                            warning_rows.extend(
+                                str(warning) for warning in cast(list[object], raw_warnings)
+                            )
                     for invariant_result in invariant_results:
                         if invariant_result.get("kind") != "feature":
                             continue
                         raw_warnings = invariant_result.get("warnings")
                         if isinstance(raw_warnings, list):
-                            feature_warning_rows.extend(
+                            warning_rows.extend(
                                 str(warning) for warning in cast(list[object], raw_warnings)
                             )
-                    feature_warning_subjects = _warning_columns(feature_warning_rows)
-                    if feature_warning_subjects:
+                    warning_subjects = _warning_columns(warning_rows)
+                    if warning_subjects:
                         for case_index, case in enumerate(selected):
                             if case.get("kind") != "document":
                                 continue
@@ -3412,7 +3418,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     case,
                                     connection,
                                     scratch_url,
-                                    feature_warning_subjects,
+                                    warning_subjects,
                                 )
                             except (
                                 OSError,
