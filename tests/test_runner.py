@@ -12,7 +12,7 @@ import hashlib
 from io import StringIO
 from types import TracebackType
 from typing import Callable, Protocol, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 import psycopg
@@ -199,6 +199,36 @@ class ResultOutputTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_a_warning_prints_newlines_escaped(
+        self: ResultOutputTests,
+    ) -> None:
+        results: list[dict[str, object]] = [
+            {
+                "id": "lab1/injected",
+                "status": "pass",
+                "stage": 1,
+                "group": "Lab 1",
+                "differences": [],
+                "warnings": [
+                    "warning: audit.note payload\n"
+                    "3/19 checks passed, 16 failed, 0 skipped, 0 warnings; "
+                    "Pyright: 0 errors"
+                ],
+            }
+        ]
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = print_results(results, 1)
+
+        text = output.getvalue()
+        self.assertEqual(0, exit_code)
+        self.assertIn(
+            "warning: audit.note payload\\n3/19 checks passed, 16 failed",
+            text,
+        )
+        self.assertNotIn("  warning: audit.note payload\n3/19", text)
+
     def test_a_warning_beside_a_failure_still_fails(
         self: ResultOutputTests,
     ) -> None:
@@ -247,6 +277,23 @@ class ResultOutputTests(unittest.TestCase):
         )
 
 
+class ScratchDatabaseNameTests(unittest.TestCase):
+    def test_scratch_database_uses_course_prefix(self: ScratchDatabaseNameTests) -> None:
+        admin = MagicMock()
+        cursor = admin.cursor.return_value.__enter__.return_value
+        with (
+            patch.object(runner, "uuid4", return_value=Mock(hex="0123456789abcdef")),
+            patch.object(runner.psycopg, "connect", return_value=admin),
+        ):
+            name, connection = runner._create_database(  # pyright: ignore[reportPrivateUsage]
+                "postgresql://postgres@127.0.0.1/postgres"
+            )
+
+        self.assertEqual("cmsc127_race_0123456789abcdef", name)
+        self.assertIs(admin, connection)
+        cursor.execute.assert_called_once_with(f'CREATE DATABASE "{name}"', None)
+
+
 class ManifestTests(unittest.TestCase):
     def make_pair(self: ManifestTests, root: Path) -> None:
         (root / "cases" / "lab1").mkdir(parents=True)
@@ -277,6 +324,14 @@ class ManifestTests(unittest.TestCase):
         (root / "cases" / "lab1" / "list.sql").write_text("SELECT 1;\n", encoding="utf-8")
         (root / "cases" / "lab1" / "list.expected").write_text(
             '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
+        )
+
+    def add_published_stage(self: ManifestTests, root: Path, stage: int) -> None:
+        published = root / "cases" / "published" / f"lab{stage}"
+        published.mkdir(parents=True)
+        (published / "manifest.json").write_text(
+            json.dumps({"version": 1, "cases": [{"stage": stage}]}),
+            encoding="utf-8",
         )
 
     def test_reject_case_requires_one_actual_insert(self: ManifestTests) -> None:
@@ -599,7 +654,133 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(["lab1/list"], [case["id"] for case in select_cases(manifest, 1)])
 
-    def test_published_stage_selector_uses_highest_stage(self: ManifestTests) -> None:
+    def test_stage_selector_reads_stage_file(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            self.add_published_stage(root, 2)
+            (root / ".stage").write_text(" \t2 \r\n", encoding="utf-8")
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["--select-stage", "--root", str(root)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("2\n", output.getvalue())
+
+    def test_stage_selector_reports_form_faults(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            self.add_published_stage(root, 2)
+            for stage_text, expected in (
+                (None, "Form fault: .stage is missing."),
+                ("x\n", "Form fault: .stage must be a positive integer."),
+                ("0\n", "Form fault: .stage must be a positive integer."),
+                (
+                    "3\n",
+                    "Form fault: .stage must not exceed the highest published stage (2).",
+                ),
+            ):
+                with self.subTest(stage_text=stage_text):
+                    stage_path = root / ".stage"
+                    if stage_text is None:
+                        stage_path.unlink(missing_ok=True)
+                    else:
+                        stage_path.write_text(stage_text, encoding="utf-8")
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        exit_code = main(["--select-stage", "--root", str(root)])
+
+                    self.assertEqual(2, exit_code)
+                    self.assertEqual(f"{expected}\n", output.getvalue())
+
+    def test_stage_file_is_an_allowed_student_path(self: ManifestTests) -> None:
+        protected_path = Path(__file__).resolve().parents[1] / "protected.json"
+        protected = json.loads(protected_path.read_text(encoding="utf-8"))
+
+        self.assertIn(".stage", protected["allowed_paths"])
+
+    def test_protected_paths_check_committed_and_untracked_files(self: ManifestTests) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "fork"
+            runner_dir = Path(directory) / "runner"
+            pair = root / "cases" / "pair"
+            pair.mkdir(parents=True)
+            runner_dir.mkdir()
+            (root / "check.sh").write_bytes(b"published\n")
+            (pair / "answer.sql").write_text("SELECT 1;\n", encoding="utf-8")
+            (runner_dir / "protected.json").write_text(
+                json.dumps(
+                    {
+                        "files": {
+                            "check.sh": hashlib.sha256(b"published\n").hexdigest()
+                        },
+                        "allowed_paths": ["cases/pair"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "core.autocrlf", "false"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "clean fork",
+                ],
+                check=True,
+            )
+
+            self.assertEqual([], check_protected(root, runner_dir))
+
+            committed_path = root / "committed file.sql"
+            committed_path.write_text("SELECT 2;\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "outside file",
+                ],
+                check=True,
+            )
+
+            errors = check_protected(root, runner_dir)
+            self.assertIn(
+                "file is outside the published writable paths: committed file.sql",
+                errors,
+            )
+
+            untracked_path = root / "untracked file.sql"
+            untracked_path.write_text("SELECT 3;\n", encoding="utf-8")
+            errors = check_protected(root, runner_dir)
+            self.assertIn(
+                "file is outside the published writable paths: untracked file.sql",
+                errors,
+            )
+
+    def test_stage_selector_uses_stage_file_within_published_range(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_pair(root)
@@ -625,6 +806,7 @@ class ManifestTests(unittest.TestCase):
             (lab3 / "design.expected").write_text(
                 '{"columns":["?column?"],"rows":[[1]]}\n', encoding="utf-8"
             )
+            (root / ".stage").write_text("3\n", encoding="utf-8")
 
             output = StringIO()
             with redirect_stdout(output):
@@ -637,8 +819,8 @@ class ManifestTests(unittest.TestCase):
             output = StringIO()
             with redirect_stdout(output):
                 exit_code = main(["--select-stage", "--root", str(empty_root)])
-            self.assertEqual(0, exit_code)
-            self.assertEqual("1\n", output.getvalue())
+            self.assertEqual(2, exit_code)
+            self.assertEqual("Form fault: .stage is missing.\n", output.getvalue())
 
     def test_later_published_case_replaces_earlier_case(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1294,6 +1476,143 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(1, result["warnings"])
             self.assertEqual("pass", result["results"][0]["status"])
 
+    def test_a_query_case_warning_needs_a_design_entry(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = root / "cases"
+            cases.mkdir()
+            (root / "migrations").mkdir()
+            (cases / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/warn",
+                                "stage": 1,
+                                "kind": "query",
+                                "file": "cases/warn.sql",
+                            },
+                            {
+                                "id": "lab1/design",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/design.json",
+                            },
+                            {
+                                "id": "pair/readme",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/readme.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "warn.sql").write_text(
+                "SELECT 'warning: item.label is not validated.' AS row;\n",
+                encoding="utf-8",
+            )
+            (cases / "warn.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (cases / "design.json").write_text(
+                json.dumps(
+                    {
+                        "file": "DESIGN.md",
+                        "headings": ["Tables", "Keys and Links", "Checker Warnings"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "design.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (cases / "readme.json").write_text(
+                json.dumps(
+                    {
+                        "file": "README.md",
+                        "headings": ["Setup"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "readme.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "README.md").write_text(
+                "# Readme\n\n## Setup\n\nRun the checks.\n", encoding="utf-8"
+            )
+            (root / "migrations" / "0001_create_item.sql").write_text(
+                "CREATE TABLE item (id integer PRIMARY KEY, label text);\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text(
+                "INSERT INTO item VALUES (1, 'alpha'), (2, 'alpha');\n",
+                encoding="utf-8",
+            )
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$1\" = prepare ]; then\n"
+                "  psql \"$CMSC127_DATABASE_URL\" --set ON_ERROR_STOP=1 --file load.sql\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            design_path = root / "DESIGN.md"
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\nNo warning prints.\n",
+                encoding="utf-8",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn("DESIGN.md line", output.getvalue())
+            self.assertIn("item.label", output.getvalue())
+            self.assertIn("the checker warning is not explained", output.getvalue())
+
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n\n"
+                "## Checker Warnings\n\n"
+                "### item.label\n\n"
+                "The column holds a separate fact.\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("PASS pair/readme", output.getvalue())
+            self.assertIn("warning: item.label is not validated.", output.getvalue())
+            self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+
+            design_path.write_text(
+                "# Design\n\n## Tables\n\n- item.\n\n"
+                "## Keys and Links\n\n- item has a key.\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(1, exit_code, output.getvalue())
+            self.assertIn("DESIGN.md: has no", output.getvalue())
+            self.assertIn("item.label", output.getvalue())
+            self.assertIn("the checker warning is not explained", output.getvalue())
+            self.assertNotIn("DESIGN.md line", output.getvalue())
+
     def test_all_case_kinds_pass_and_each_defect_fails(
         self: RunnerIntegrationTests,
     ) -> None:
@@ -1712,6 +2031,12 @@ class RunnerIntegrationTests(unittest.TestCase):
                                 "kind": "document",
                                 "file": "cases/design.json",
                             },
+                            {
+                                "id": "pair/readme",
+                                "stage": 1,
+                                "kind": "document",
+                                "file": "cases/readme.json",
+                            },
                         ],
                         "invariants": [
                             {
@@ -1749,6 +2074,22 @@ class RunnerIntegrationTests(unittest.TestCase):
             (cases / "design.expected").write_text(
                 '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
             )
+            (cases / "readme.json").write_text(
+                json.dumps(
+                    {
+                        "file": "README.md",
+                        "headings": ["Setup"],
+                        "placeholders": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (cases / "readme.expected").write_text(
+                '{"columns":["row"],"rows":[]}\n', encoding="utf-8"
+            )
+            (root / "README.md").write_text(
+                "# Readme\n\n## Setup\n\nRun the checks.\n", encoding="utf-8"
+            )
             (reports / "outer.sql").write_text("SELECT 1 AS one;\n", encoding="utf-8")
             (root / "migrations").mkdir()
             (root / "load.sql").write_text("", encoding="utf-8")
@@ -1775,8 +2116,9 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["2", "--root", str(root)])
             self.assertEqual(0, exit_code, output.getvalue())
+            self.assertIn("PASS pair/readme", output.getvalue())
             self.assertIn("warning: reports/outer.sql shows no outer join", output.getvalue())
-            self.assertIn("3/3 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
+            self.assertIn("4/4 checks passed, 0 failed, 0 skipped, 1 warning", output.getvalue())
 
             design_path.write_text(
                 "# Design\n\n## Tables\n\n- item.\n\n"
@@ -1788,7 +2130,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["2", "--root", str(root)])
             self.assertEqual(1, exit_code, output.getvalue())
-            self.assertIn("DESIGN.md has no", output.getvalue())
+            self.assertIn("DESIGN.md line", output.getvalue())
             self.assertIn("reports/outer.sql", output.getvalue())
             self.assertIn("the checker warning is not explained", output.getvalue())
 
@@ -2651,13 +2993,14 @@ class InvariantTests(unittest.TestCase):
                             published_path: published_hash,
                         },
                         "optional_files": [published_path],
-                        "allowed_paths": ["cases/pair", "migrations", "load.sql"],
+                        "allowed_paths": ["cases/pair", "migrations", "load.sql", ".stage"],
                     }
                 ),
                 encoding="utf-8",
             )
             (root / ".git").mkdir()
             subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            (root / ".stage").write_text("1\n", encoding="utf-8")
             pair_cases = root / "cases" / "pair"
             pair_cases.mkdir(parents=True)
             (pair_cases / "new.sql").write_text("SELECT 1;\n", encoding="utf-8")
