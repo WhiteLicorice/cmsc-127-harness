@@ -64,8 +64,13 @@ const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.ex
 // Content the user can scroll to is painted: a container whose overflow is auto
 // or scroll and whose content overflows it does not clip the hit test. Content
 // below the fold is handled by sizing the viewport to the document before each
-// view. A cover is the topmost element that paints a fully opaque background;
-// a transparent or near-transparent layer is not a cover.
+// view.
+//
+// A cover is not a yes-or-no test. coverLayers() returns the layers painted
+// above the text, and measure() composites them over both the text colour and
+// the backdrop, so the contrast ratio falls in proportion to what the cover
+// paints. A 2% tint barely moves it; a 90% scrim drops it to about 1.16; an
+// opaque layer makes the two colours equal and the ratio 1.
 const VISIBILITY_RULE = `
   const parse = (value) => {
     if (!value || value === "none" || value === "transparent") return null;
@@ -77,6 +82,9 @@ const VISIBILITY_RULE = `
   };
   const SHAPES = new Set(["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"]);
   const visibleCache = new Map();
+  const clipCache = new Map();
+  const coverCache = new Map();
+  const pseudoCache = new Map();
   const scrollableAncestor = (element) => {
     for (let node = element.parentElement; node && node !== document.documentElement; node = node.parentElement) {
       const style = getComputedStyle(node);
@@ -88,29 +96,42 @@ const VISIBILITY_RULE = `
     }
     return null;
   };
-  // A pseudo-element paints above its originating element's children. A fully
-  // opaque one is a cover; a tint is not.
-  const pseudoCovers = (element) => {
+  // What one painted layer contributes: its background colour times its
+  // opacity. A background-image is treated as an opaque cover; a gradient made
+  // to look transparent therefore fails, which is the cost of not sampling it.
+  const layerColour = (style) => {
+    if (style.backgroundImage !== "none") return { r: 0, g: 0, b: 0, a: 1 };
+    const colour = parse(style.backgroundColor);
+    if (colour === null) return null;
+    const opacity = Number.parseFloat(style.opacity);
+    const alpha = colour.a * (Number.isFinite(opacity) ? opacity : 1);
+    if (alpha <= 0) return null;
+    return { r: colour.r, g: colour.g, b: colour.b, a: Math.min(1, alpha) };
+  };
+  // A pseudo-element paints above its originating element's content when it has
+  // content, is positioned, and is not behind it.
+  const pseudoLayers = (node) => {
+    const cached = pseudoCache.get(node);
+    if (cached !== undefined) return cached;
+    const layers = [];
     for (const pseudo of ["::before", "::after"]) {
-      const style = getComputedStyle(element, pseudo);
+      const style = getComputedStyle(node, pseudo);
       if (style.content === "none" || style.content === "normal") continue;
-      const colour = parse(style.backgroundColor);
-      if (colour !== null && colour.a === 1) return true;
+      if (style.position === "static") continue;
+      if (style.zIndex !== "auto" && Number(style.zIndex) < 0) continue;
+      const layer = layerColour(style);
+      if (layer !== null) layers.push(layer);
     }
-    return false;
+    pseudoCache.set(node, layers);
+    return layers;
   };
   const hitState = (element, box) => {
     const stack = document.elementsFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
-    const textIndex = stack.findIndex((item) => item === element || element.contains(item));
-    if (textIndex < 0) return "missing";
-    for (let index = 0; index < textIndex; index += 1) {
-      const item = stack[index];
-      const related = item === element || item.contains(element) || element.contains(item);
-      if (!related || pseudoCovers(item)) return "covered";
-    }
-    return "visible";
+    return stack.some((item) => item === element || element.contains(item)) ? "visible" : "missing";
   };
   const clippedBox = (element) => {
+    const cached = clipCache.get(element);
+    if (cached !== undefined) return cached;
     const box = element.getBoundingClientRect();
     let left = 0;
     let top = 0;
@@ -137,12 +158,14 @@ const VISIBILITY_RULE = `
         }
       }
     }
-    return {
+    const clipped = {
       left: Math.max(left, box.left),
       top: Math.max(top, box.top),
       right: Math.min(right, box.right),
       bottom: Math.min(bottom, box.bottom),
     };
+    clipCache.set(element, clipped);
+    return clipped;
   };
   const isVisible = (element) => {
     if (!(element instanceof Element)) return false;
@@ -168,6 +191,7 @@ const VISIBILITY_RULE = `
             const savedTop = scroller.scrollTop;
             const savedLeft = scroller.scrollLeft;
             element.scrollIntoView({ block: "nearest", inline: "nearest" });
+            clipCache.delete(element);
             clipped = clippedBox(element);
             if (clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1) {
               state = hitState(element, clipped);
@@ -181,6 +205,35 @@ const VISIBILITY_RULE = `
     }
     visibleCache.set(element, visible);
     return visible;
+  };
+  // The layers painted above the text, bottom to top: non-ancestor items the
+  // hit stack returns above it, then the positioned pseudo-elements of the text
+  // and of each ancestor.
+  const coverLayers = (element) => {
+    const cached = coverCache.get(element);
+    if (cached !== undefined) return cached;
+    const layers = [];
+    const clipped = clippedBox(element);
+    if (clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1) {
+      const stack = document.elementsFromPoint(
+        (clipped.left + clipped.right) / 2,
+        (clipped.top + clipped.bottom) / 2,
+      );
+      const textIndex = stack.findIndex((item) => item === element || element.contains(item));
+      if (textIndex > 0) {
+        for (let index = textIndex - 1; index >= 0; index -= 1) {
+          const item = stack[index];
+          if (item === element || item.contains(element) || element.contains(item)) continue;
+          const layer = layerColour(getComputedStyle(item));
+          if (layer !== null) layers.push(layer);
+        }
+      }
+    }
+    for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
+      for (const layer of pseudoLayers(node)) layers.push(layer);
+    }
+    coverCache.set(element, layers);
+    return layers;
   };
   const paintsText = (element) => {
     const colour = /rgba?\\(([^)]+)\\)/.exec(getComputedStyle(element).color);
@@ -427,17 +480,23 @@ const auditPage = new Function("counters", `${VISIBILITY_RULE}
 
   const measure = (element, text, colour) => {
     const behind = backdrop(element);
+    // Composite the layers painted above the text over both the text and the
+    // backdrop. An opaque cover makes them equal and the ratio 1; a tint moves
+    // both slightly and leaves the ratio alone.
+    const cover = coverLayers(element);
+    const paintedText = cover.reduce((acc, layer) => over(layer, acc), colour);
+    const paintedBehind = cover.reduce((acc, layer) => over(layer, acc), behind);
     const style = getComputedStyle(element);
     const size = Number.parseFloat(style.fontSize);
     const weight = Number(style.fontWeight) || 400;
     const large = size >= 24 || (size >= 18.66 && weight >= 700);
     const floor = large ? 3 : 4.5;
-    const value = ratio(colour, behind);
+    const value = ratio(paintedText, paintedBehind);
     return {
       where: name(element),
       text: text.replace(/\\s+/g, " ").trim().slice(0, 40),
-      color: hex(colour),
-      bg: hex(behind),
+      color: hex(paintedText),
+      bg: hex(paintedBehind),
       ratio: Number(value.toFixed(3)),
       floor,
       size: Number(size.toFixed(1)),
