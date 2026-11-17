@@ -71,6 +71,12 @@ const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.ex
 // the backdrop, so the contrast ratio falls in proportion to what the cover
 // paints. A 2% tint barely moves it; a 90% scrim drops it to about 1.16; an
 // opaque layer makes the two colours equal and the ratio 1.
+//
+// A pseudo-element is a cover only where it paints: its rectangle is derived
+// from the originating element's border box and the pseudo's computed offsets
+// and size, and the layer counts only when that rectangle contains the sampled
+// point. A gradient contributes its highest-alpha colour stop; a url() image is
+// opaque, which is a named limit.
 const VISIBILITY_RULE = `
   const parse = (value) => {
     if (!value || value === "none" || value === "transparent") return null;
@@ -96,34 +102,92 @@ const VISIBILITY_RULE = `
     }
     return null;
   };
-  // What one painted layer contributes: its background colour times its
-  // opacity. A background-image is treated as an opaque cover; a gradient made
-  // to look transparent therefore fails, which is the cost of not sampling it.
+  // What one painted layer contributes: its background image over its
+  // background colour, times its opacity. A gradient contributes the colour
+  // stop with the highest alpha, so a 2% gradient tint contributes 2% and an
+  // opaque gradient contributes 1. A url() image is treated as opaque.
+  const px = (value) => {
+    if (!value || value === "auto") return null;
+    const number = Number.parseFloat(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const imageLayer = (value) => {
+    if (!value || value === "none") return null;
+    if (value.includes("url(")) return { r: 0, g: 0, b: 0, a: 1 };
+    let best = null;
+    const pattern = /rgba?\\(([^)]+)\\)/g;
+    let match = pattern.exec(value);
+    while (match !== null) {
+      const parts = match[1].split(/[,\\s/]+/).filter((part) => part.length > 0).map(Number);
+      if (parts.length >= 3 && !parts.some((part) => Number.isNaN(part))) {
+        const stop = { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+        if (best === null || stop.a > best.a) best = stop;
+      }
+      match = pattern.exec(value);
+    }
+    return best;
+  };
   const layerColour = (style) => {
-    if (style.backgroundImage !== "none") return { r: 0, g: 0, b: 0, a: 1 };
+    const image = imageLayer(style.backgroundImage);
     const colour = parse(style.backgroundColor);
-    if (colour === null) return null;
+    let base = null;
+    if (image !== null && colour !== null) {
+      base = {
+        r: image.r * image.a + colour.r * (1 - image.a),
+        g: image.g * image.a + colour.g * (1 - image.a),
+        b: image.b * image.a + colour.b * (1 - image.a),
+        a: image.a + colour.a * (1 - image.a),
+      };
+    } else if (image !== null) {
+      base = image;
+    } else if (colour !== null) {
+      base = colour;
+    }
+    if (base === null) return null;
     const opacity = Number.parseFloat(style.opacity);
-    const alpha = colour.a * (Number.isFinite(opacity) ? opacity : 1);
+    const alpha = base.a * (Number.isFinite(opacity) ? opacity : 1);
     if (alpha <= 0) return null;
-    return { r: colour.r, g: colour.g, b: colour.b, a: Math.min(1, alpha) };
+    return { r: base.r, g: base.g, b: base.b, a: Math.min(1, alpha) };
+  };
+  // Where a pseudo-element paints, from its originating element's border box
+  // and the pseudo's computed offsets and size.
+  const pseudoRect = (node, style) => {
+    const box = node.getBoundingClientRect();
+    const top = px(style.top);
+    const right = px(style.right);
+    const bottom = px(style.bottom);
+    const left = px(style.left);
+    const width = px(style.width);
+    const height = px(style.height);
+    const w = width ?? (left !== null && right !== null ? box.width - left - right : box.width);
+    const h = height ?? (top !== null && bottom !== null ? box.height - top - bottom : box.height);
+    const x = left !== null ? box.left + left : right !== null ? box.right - right - w : box.left;
+    const y = top !== null ? box.top + top : bottom !== null ? box.bottom - bottom - h : box.top;
+    return { left: x, top: y, right: x + w, bottom: y + h };
   };
   // A pseudo-element paints above its originating element's content when it has
-  // content, is positioned, and is not behind it.
-  const pseudoLayers = (node) => {
+  // content, is positioned, is not behind it, and its rectangle contains the
+  // sampled point. An inset:0 overlay covers; an underline or a corner dot does
+  // not.
+  const pseudoLayers = (node, point) => {
     const cached = pseudoCache.get(node);
-    if (cached !== undefined) return cached;
-    const layers = [];
-    for (const pseudo of ["::before", "::after"]) {
-      const style = getComputedStyle(node, pseudo);
-      if (style.content === "none" || style.content === "normal") continue;
-      if (style.position === "static") continue;
-      if (style.zIndex !== "auto" && Number(style.zIndex) < 0) continue;
-      const layer = layerColour(style);
-      if (layer !== null) layers.push(layer);
+    const layers = cached ?? [];
+    if (cached === undefined) {
+      for (const pseudo of ["::before", "::after"]) {
+        const style = getComputedStyle(node, pseudo);
+        if (style.content === "none" || style.content === "normal") continue;
+        if (style.display === "none") continue;
+        if (style.position === "static") continue;
+        if (style.zIndex !== "auto" && Number(style.zIndex) < 0) continue;
+        const layer = layerColour(style);
+        if (layer !== null) layers.push({ rect: pseudoRect(node, style), layer });
+      }
+      pseudoCache.set(node, layers);
     }
-    pseudoCache.set(node, layers);
-    return layers;
+    return layers
+      .filter(({ rect }) => point.x >= rect.left && point.x <= rect.right
+        && point.y >= rect.top && point.y <= rect.bottom)
+      .map(({ layer }) => layer);
   };
   const hitState = (element, box) => {
     const stack = document.elementsFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
@@ -214,11 +278,13 @@ const VISIBILITY_RULE = `
     if (cached !== undefined) return cached;
     const layers = [];
     const clipped = clippedBox(element);
-    if (clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1) {
-      const stack = document.elementsFromPoint(
-        (clipped.left + clipped.right) / 2,
-        (clipped.top + clipped.bottom) / 2,
-      );
+    const box = element.getBoundingClientRect();
+    const sampled = clipped.right - clipped.left >= 1 && clipped.bottom - clipped.top >= 1;
+    const point = sampled
+      ? { x: (clipped.left + clipped.right) / 2, y: (clipped.top + clipped.bottom) / 2 }
+      : { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+    if (sampled) {
+      const stack = document.elementsFromPoint(point.x, point.y);
       const textIndex = stack.findIndex((item) => item === element || element.contains(item));
       if (textIndex > 0) {
         for (let index = textIndex - 1; index >= 0; index -= 1) {
@@ -230,7 +296,7 @@ const VISIBILITY_RULE = `
       }
     }
     for (let node = element; node && node !== document.documentElement; node = node.parentElement) {
-      for (const layer of pseudoLayers(node)) layers.push(layer);
+      for (const layer of pseudoLayers(node, point)) layers.push(layer);
     }
     coverCache.set(element, layers);
     return layers;
