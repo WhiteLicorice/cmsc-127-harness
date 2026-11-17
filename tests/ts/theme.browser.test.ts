@@ -134,7 +134,7 @@ describe("theme picker", () => {
     }
   }, 60_000);
 
-  it("keeps the header on one line at 360 px", async () => {
+  it("keeps the header within 360 px", async () => {
     const context = await browser.newContext({ colorScheme: "light", viewport: { width: 360, height: 800 } });
     try {
       const page = await openPage(context);

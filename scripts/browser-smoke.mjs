@@ -129,6 +129,8 @@ try {
   let panelNumber = 2;
   let schemaSvgs = [];
   let schemaText = [];
+  let schemaLabelFont = "";
+  let schemaPageFont = "";
   for (const panel of expectedPanels.slice(1)) {
     const button = page.getByRole("button", { name: panel, exact: true });
     await button.click();
@@ -153,6 +155,11 @@ try {
       );
       schemaSvgs = schemaNodes.map((node) => node.svgs);
       schemaText = schemaNodes.map((node) => node.text);
+      schemaLabelFont = await page
+        .locator(".mermaid .nodeLabel")
+        .first()
+        .evaluate((node) => getComputedStyle(node).fontFamily);
+      schemaPageFont = await page.evaluate(() => getComputedStyle(document.body).fontFamily);
     }
     const name = `${String(panelNumber).padStart(2, "0")}-${panel.toLowerCase()}.png`;
     panelNumber += 1;
@@ -169,6 +176,36 @@ try {
     throw new Error(`A schema diagram did not draw the expected entity: ${JSON.stringify(schemaText)}`);
   }
   record(`schema diagrams: ${JSON.stringify(schemaSvgs)}`);
+
+  const pageFont = schemaPageFont;
+  const labelFont = schemaLabelFont;
+  if (labelFont !== pageFont) {
+    throw new Error(`A schema label uses ${labelFont}, not the page font ${pageFont}.`);
+  }
+  record(`schema label font: ${labelFont}`);
+
+  const themes = [
+    "upv-light", "upv-dark", "github-light", "github-dark", "one-dark", "nord",
+    "solarized-light", "solarized-dark", "catppuccin-latte", "catppuccin-mocha",
+    "tokyo-night", "gruvbox-light", "gruvbox-dark",
+  ];
+  await page.setViewportSize({ width: 360, height: 800 });
+  for (const theme of themes) {
+    await page.evaluate((value) => localStorage.setItem("cmsc127-theme", value), theme);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => document.querySelectorAll("#panels button").length === 7,
+      undefined,
+      { timeout: 10_000 },
+    );
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth,
+    );
+    if (overflow > 0) {
+      throw new Error(`The ${theme} theme overflows 360 px by ${overflow} px.`);
+    }
+  }
+  record(`360 px: ${themes.length} themes, no horizontal overflow`);
 
   if (browserErrors.length > 0) {
     throw new Error(`Browser errors: ${browserErrors.join(" | ")}`);

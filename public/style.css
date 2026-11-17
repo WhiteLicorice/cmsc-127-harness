@@ -186,7 +186,7 @@
   --muted: #d8dee9;
   --border: #81a1c1;
   --rule: #57687e;
-  --header-bg: #2e3440;
+  --header-bg: #3b4252;
   --header-text: #eceff4;
   --header-muted: #d8dee9;
   --focus: #88c0d0;
@@ -211,8 +211,8 @@
   --surface: #fdf6e3;
   --surface-2: #eee8d5;
   --code-bg: #eee8d5;
-  --text: #566c73;
-  --muted: #586c73;
+  --text: #4a5f66;
+  --muted: #5d7277;
   --border: #849191;
   --rule: #cdcec2;
   --header-bg: #073642;
@@ -240,7 +240,7 @@
   --surface: #073642;
   --surface-2: #0b3f4d;
   --code-bg: #00252f;
-  --text: #98a6a6;
+  --text: #9aa8a8;
   --muted: #8c9b9d;
   --border: #607f89;
   --rule: #2b535e;
@@ -476,10 +476,13 @@
   box-sizing: border-box;
 }
 
-body {
-  margin: 0;
+:root {
   font-family: "Segoe UI", system-ui, sans-serif;
   line-height: 1.5;
+}
+
+body {
+  margin: 0;
   color: var(--text);
   background: var(--bg);
 }
@@ -734,6 +737,11 @@ pre {
   padding: 0.75rem;
   background: var(--code-bg);
   white-space: pre-wrap;
+}
+
+.warning-note {
+  color: var(--warn);
+  background: var(--warn-bg);
 }
 
 .mermaid {

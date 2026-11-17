@@ -234,6 +234,34 @@ describe("theme contrast", () => {
     }
     expect(failures).toEqual([]);
   });
+
+  // 1.15 is the smallest step the published palettes reach. Nord's own pair,
+  // nord6 on nord4, sits at 1.17, so a higher floor would force an invented tone.
+  it("keeps muted text visibly apart from body text in every theme", () => {
+    const failures: string[] = [];
+    for (const id of THEMES) {
+      const tokens = readTokens(themeBlock(id));
+      const ratio = contrast(tokens["--muted"] ?? "", tokens["--text"] ?? "");
+      if (ratio < 1.15) {
+        failures.push(`${id} ${ratio.toFixed(2)} < 1.15`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  // 1.06 is the smallest band the published themes already use. Catppuccin
+  // Mocha and Tokyo Night sit at 1.07.
+  it("separates the header band from the page in every theme", () => {
+    const failures: string[] = [];
+    for (const id of THEMES) {
+      const tokens = readTokens(themeBlock(id));
+      const ratio = contrast(tokens["--header-bg"] ?? "", tokens["--bg"] ?? "");
+      if (ratio < 1.06) {
+        failures.push(`${id} ${ratio.toFixed(2)} < 1.06`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
 });
 
 describe("page header", () => {
