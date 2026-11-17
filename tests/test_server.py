@@ -191,11 +191,23 @@ class HarnessPageTests(unittest.TestCase):
 
     def test_startup_uses_and_prints_a_free_port(self) -> None:
         self.load_server()
+        # Hold a free port from the range server.py accepts, so a busy 55440 on the runner
+        # can't break the test.
         held_socket = socket.socket()
-        held_socket.bind(("127.0.0.1", 55440))
+        held_port = 0
+        for candidate in (55440, 55441, 55442, 55443, 55444, 55446, 55447, 55448, 55449):
+            try:
+                held_socket.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            held_port = candidate
+            break
+        if held_port == 0:
+            held_socket.close()
+            self.skipTest("Every port from 55440 to 55449 is busy.")
         held_socket.listen()
         environment = os.environ.copy()
-        environment["CMSC127_PORT"] = "55440"
+        environment["CMSC127_PORT"] = str(held_port)
         environment.pop("CMSC127_DATABASE_URL", None)
         process = subprocess.Popen(
             [sys.executable, str(REPOSITORY_ROOT / "server.py"), "--no-browser"],
@@ -225,9 +237,9 @@ class HarnessPageTests(unittest.TestCase):
                 output = drain_server_output(output_lines, output_queue, reader)
             if process.stdout is not None:
                 process.stdout.close()
-        self.assertIn("Port 55440 is busy", output)
+        self.assertIn(f"Port {held_port} is busy", output)
         if selected_port is not None:
-            self.assertNotEqual(55440, selected_port)
+            self.assertNotEqual(held_port, selected_port)
             self.assertIn(f":{selected_port}/", output)
         self.assertIsNotNone(selected_port, output)
 
