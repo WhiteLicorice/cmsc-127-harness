@@ -1537,19 +1537,38 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
         admin.close()
 
 
-def _apply_migrations(root: Path, connection: _DbConnection) -> None:
+def _migration_faults(root: Path) -> list[str]:
+    """The name and order faults in the pair's migration folder."""
     migration_dir = root / "migrations"
     files = sorted(migration_dir.glob("*.sql")) if migration_dir.exists() else []
-    numbers: list[int] = []
+    faults: list[str] = []
+    expected = 1
     for path in files:
         match = MIGRATION_NAME.fullmatch(path.name)
         if match is None:
-            raise ValueError(
-                f"invalid migration name {path.name!r}; use NNNN_lowercase_description.sql"
+            faults.append(
+                f"migrations/{path.name}: the file name must read "
+                "NNNN_lowercase_description.sql."
             )
-        numbers.append(int(match.group("number")))
-    if numbers != list(range(1, len(numbers) + 1)):
-        raise ValueError("migration numbers must start at 0001 and have no gaps")
+            continue
+        number = int(match.group("number"))
+        if number != expected:
+            faults.append(
+                f"migrations/{path.name}: the numbers must start at 0001 and have "
+                f"no gaps or repeats; expected {expected:04d}."
+            )
+            expected = number + 1
+        else:
+            expected += 1
+    return faults
+
+
+def _apply_migrations(root: Path, connection: _DbConnection) -> None:
+    faults = _migration_faults(root)
+    if faults:
+        raise ValueError(faults[0])
+    migration_dir = root / "migrations"
+    files = sorted(migration_dir.glob("*.sql")) if migration_dir.exists() else []
     for path in files:
         with connection.cursor() as cursor:
             _execute(cursor, path.read_text(encoding="utf-8"))
@@ -1962,22 +1981,24 @@ def _heading_first_word(title: str) -> str:
     return words[0].strip(_HEADING_MARKS)
 
 
-def _document_sections(text: str) -> list[tuple[int, str, str]]:
-    """The level, title, and body of every Markdown heading."""
+def _document_sections(text: str) -> list[tuple[int, str, str, int]]:
+    """The level, title, body, and line of every Markdown heading."""
     lines = text.splitlines()
     headings: list[tuple[int, int, str]] = []
     for number, line in enumerate(lines):
         match = _HEADING.match(line)
         if match is not None:
             headings.append((number, len(match.group(1)), match.group(2)))
-    sections: list[tuple[int, str, str]] = []
+    sections: list[tuple[int, str, str, int]] = []
     for index, (number, level, title) in enumerate(headings):
         end = len(lines)
         for later_number, later_level, _ in headings[index + 1 :]:
             if later_level <= level:
                 end = later_number
                 break
-        sections.append((level, title, "\n".join(lines[number + 1 : end])))
+        sections.append(
+            (level, title, "\n".join(lines[number + 1 : end]), number + 1)
+        )
     return sections
 
 
@@ -1990,8 +2011,14 @@ def _design_rows(
     root: Path,
     config: Mapping[str, object],
     warning_columns: Sequence[str],
+    *,
+    check_placeholders: bool = True,
 ) -> list[str]:
-    """The structural faults in a student's design record."""
+    """The structural faults in a student's design record.
+
+    ``./lint`` passes ``check_placeholders=False`` so the starter's own
+    template passes the form check before a pair edits it.
+    """
     file_name = config.get("file")
     headings = config.get("headings")
     placeholders = config.get("placeholders")
@@ -2010,10 +2037,12 @@ def _design_rows(
         return [f"{file_name} is not UTF-8 text, so the design record cannot be read."]
     placeholder_text = cast(dict[str, object], placeholders)
     level_two = [
-        (title, body) for level, title, body in _document_sections(text) if level == 2
+        (title, body, number)
+        for level, title, body, number in _document_sections(text)
+        if level == 2
     ]
-    titles = [title for title, _ in level_two]
-    bodies = dict(level_two)
+    titles = [title for title, _, _ in level_two]
+    bodies = {title: (body, number) for title, body, number in level_two}
     expected_titles = [str(heading) for heading in cast(list[object], headings)]
     rows: list[str] = []
     for title in expected_titles:
@@ -2021,46 +2050,63 @@ def _design_rows(
             rows.append(f'{file_name} is missing the heading "## {title}".')
     present = [title for title in titles if title in expected_titles]
     if present != [title for title in expected_titles if title in present]:
+        first_wrong = next(
+            title
+            for title, expected in zip(present, expected_titles, strict=False)
+            if title != expected
+        )
         rows.append(
-            f"{file_name} puts the headings out of order: it reads "
+            f"{file_name} line {bodies[first_wrong][1]}: puts the headings out of "
+            "order: it reads "
             + ", ".join(f'"{title}"' for title in present)
             + "."
         )
     for title in expected_titles:
-        body = bodies.get(title)
-        if body is None:
+        entry = bodies.get(title)
+        if entry is None:
             continue
+        body, number = entry
         if not body.strip():
-            rows.append(f'{file_name} has nothing under "## {title}".')
+            rows.append(
+                f'{file_name} line {number}: has nothing under "## {title}".'
+            )
+            continue
+        if not check_placeholders:
             continue
         placeholder = placeholder_text.get(title)
         if isinstance(placeholder, str):
             wanted = _normalized_line(placeholder)
-            if wanted and any(
-                _normalized_line(line) == wanted for line in body.splitlines()
-            ):
-                rows.append(
-                    f'{file_name} still holds the placeholder line under "## {title}".'
-                )
-    warning_body = bodies.get("Checker Warnings", "")
-    entries: list[tuple[int, str]] = []
-    for line in warning_body.splitlines():
+            for offset, line in enumerate(body.splitlines()):
+                if wanted and _normalized_line(line) == wanted:
+                    rows.append(
+                        f"{file_name} line {number + 1 + offset}: still holds the "
+                        f'placeholder line under "## {title}".'
+                    )
+                    break
+    warning_entry = bodies.get("Checker Warnings")
+    warning_body = warning_entry[0] if warning_entry is not None else ""
+    warning_line = warning_entry[1] if warning_entry is not None else 1
+    entries: list[tuple[int, str, int]] = []
+    for offset, line in enumerate(warning_body.splitlines()):
         heading = _HEADING.match(line)
         if heading is not None:
             subject = _heading_first_word(heading.group(2))
             if _WARNING_SUBJECT.fullmatch(subject):
-                entries.append((len(heading.group(1)), subject))
+                entries.append(
+                    (len(heading.group(1)), subject, warning_line + 1 + offset)
+                )
     for column in warning_columns:
-        levels = [level for level, word in entries if word == column]
-        if not levels:
+        matches = [(level, number) for level, word, number in entries if word == column]
+        if not matches:
             rows.append(
-                f'{file_name} has no "### {column}" entry under "## Checker Warnings", '
-                "so the checker warning is not explained."
+                f'{file_name} line {warning_line}: has no "### {column}" entry under '
+                '"## Checker Warnings", so the checker warning is not explained.'
             )
-        elif 3 not in levels:
+        elif all(level != 3 for level, _ in matches):
             rows.append(
-                f'{file_name} puts the "{column}" entry at heading level {levels[0]}, '
-                f'but a Checker Warnings entry is a level-3 heading ("### {column}").'
+                f'{file_name} line {matches[0][1]}: puts the "{column}" entry at '
+                f'heading level {matches[0][0]}, but a Checker Warnings entry is a '
+                f'level-3 heading ("### {column}").'
             )
     return rows
 
@@ -2833,6 +2879,163 @@ def _check_protected(root: Path, runner_dir: Path) -> list[str]:
     return errors
 
 
+REQUIRED_STARTER_FILES = (
+    "README.md",
+    "DESIGN.md",
+    "load.sql",
+    "answers/nosql.md",
+    "answers/operations.py",
+    "race/race.py",
+)
+REQUIRED_STARTER_DIRS = ("migrations", "cases/pair")
+
+
+def _protected_lint_message(error: str) -> str:
+    """Turn a protected-file fault into the file, then the repair."""
+    repairs = {
+        "protected file changed: ": (
+            "the protected file changed. Restore it from the starter you received."
+        ),
+        "protected file is missing: ": (
+            "the protected file is missing. Restore it from the starter you received."
+        ),
+        "file is outside the published writable paths: ": (
+            "this file is outside the writable paths. Move it into a writable "
+            "folder or delete it."
+        ),
+    }
+    for prefix, repair in repairs.items():
+        if error.startswith(prefix):
+            return f"{error[len(prefix) :]}: {repair}"
+    return error
+
+
+def _design_config(root: Path) -> dict[str, object] | None:
+    """The Lab 1 design case, whose headings every lab shares."""
+    path = root / "cases" / "published" / "lab1" / "design.json"
+    if not path.is_file():
+        return None
+    try:
+        return _as_object(_read_json(path), path.relative_to(root).as_posix())
+    except (OSError, ValueError):
+        return None
+
+
+def _result_warning_columns(root: Path, stage: int | None) -> tuple[list[str], str | None]:
+    """The warned subjects in the last result, or the line that says why not."""
+    path = root / ".cmsc127" / "last-run.json"
+    if not path.is_file():
+        run_text = (
+            f"Run bash check.sh {stage} once to write it."
+            if stage is not None
+            else "Run bash check.sh once to write it."
+        )
+        return [], (
+            "DESIGN.md: the checker warning entries were skipped because "
+            f".cmsc127/last-run.json does not exist. {run_text}"
+        )
+    try:
+        document = _as_object(_read_json(path), ".cmsc127/last-run.json")
+    except (OSError, ValueError) as error:
+        return [], (
+            "DESIGN.md: the checker warning entries were skipped because "
+            f".cmsc127/last-run.json could not be read: {error}"
+        )
+    results = document.get("results")
+    rows: list[str] = []
+    if isinstance(results, list):
+        for result in cast(list[object], results):
+            if not isinstance(result, dict):
+                continue
+            warnings = cast(dict[str, object], result).get("warnings")
+            if isinstance(warnings, list):
+                rows.extend(str(warning) for warning in cast(list[object], warnings))
+    return _warning_columns(rows), None
+
+
+def _required_file_faults(
+    root: Path,
+    manifest: Mapping[str, object],
+    stage: int,
+) -> list[str]:
+    """The starter files and stage case files that must exist, by name."""
+    faults: list[str] = []
+    for relative in REQUIRED_STARTER_FILES:
+        if not (root / relative).is_file():
+            faults.append(f"{relative}: the file is missing.")
+    for relative in REQUIRED_STARTER_DIRS:
+        if not (root / relative).is_dir():
+            faults.append(f"{relative}/: the folder is missing.")
+    for case in select_cases(manifest, stage):
+        case_id = str(case.get("id"))
+        path = _case_file(root, case)
+        if not path.is_file():
+            faults.append(
+                f"{path.relative_to(root).as_posix()}: the case file for "
+                f"{case_id} is missing."
+            )
+        expected = _case_expected_file(root, case)
+        if not expected.is_file():
+            faults.append(
+                f"{expected.relative_to(root).as_posix()}: the expected result "
+                f"for {case_id} is missing."
+            )
+    return faults
+
+
+def _lint(root: Path, runner_dir: Path) -> int:
+    """Run the form checks that need no database and reveal no answer."""
+    faults: list[str] = []
+    skips: list[str] = []
+    manifest: dict[str, object] | None = None
+    try:
+        manifest = load_manifest(root)
+    except ValueError as error:
+        faults.append(str(error))
+    stage: int | None = None
+    try:
+        stage = selected_published_stage(root)
+    except ValueError as error:
+        message = str(error)
+        if message.startswith("Form fault: "):
+            message = message[len("Form fault: ") :]
+        if message.startswith(".stage"):
+            message = message[len(".stage") :].lstrip(": ").strip()
+        faults.append(f".stage: {message}")
+    for error in _check_protected(root, runner_dir):
+        faults.append(_protected_lint_message(error))
+    design_config = _design_config(root)
+    if design_config is not None:
+        warning_columns, skip = _result_warning_columns(root, stage)
+        if skip is not None:
+            skips.append(skip)
+        faults.extend(
+            _design_rows(
+                root,
+                design_config,
+                warning_columns,
+                check_placeholders=False,
+            )
+        )
+    faults.extend(_migration_faults(root))
+    if manifest is not None and stage is not None:
+        faults.extend(_required_file_faults(root, manifest, stage))
+    if faults:
+        print("== form ==")
+        for fault in faults:
+            print(f"  {fault}")
+        print()
+        print("Those are form faults, not wrong answers. Fix them first.")
+        for skip in skips:
+            print(skip)
+        return 1
+    print("The form is clean.")
+    print("This read the form only. It says nothing about whether an answer is right.")
+    for skip in skips:
+        print(skip)
+    return 0
+
+
 def _schema_snapshot(connection: _DbConnection) -> dict[str, list[tuple[object, ...]]]:
     with connection.cursor() as cursor:
         _execute(
@@ -3301,7 +3504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--runner-dir", type=Path, default=None)
     parser.add_argument("--case", dest="case_id", default=None)
-    parser.add_argument("--form-lint", action="store_true")
+    parser.add_argument("--lint", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--select-stage", action="store_true")
     arguments = parser.parse_args(argv)
@@ -3322,15 +3525,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.runner_dir is not None
         else Path(__file__).resolve().parent
     )
+    if arguments.lint:
+        return _lint(root, runner_dir)
     try:
         manifest = load_manifest(root)
     except ValueError as error:
         print("== form fault ==")
         print(str(error))
         return 2
-    if arguments.form_lint:
-        print("Form is valid.")
-        return 0
     database_url = os.environ.get("CMSC127_DATABASE_URL")
     if not database_url:
         print("CMSC127_DATABASE_URL is not set. Set it to the local PostgreSQL connection URL.")

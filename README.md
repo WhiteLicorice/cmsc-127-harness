@@ -312,9 +312,9 @@ page. A form fault, a file with the wrong structure, stops the run before it
 creates a database and reports the file, line, and column.
 
 Run one case with `bash check.sh --case CASE_ID`. Run the form check without a
-database with `bash check.sh --form-lint`. Both commands exit 0 on success, 1
-on a failed check, and 2 on a form fault or a usage error. The form check
-prints no expected answer.
+database with `./lint`. `./lint` exits 0 when the form is clean and 1 when it
+finds a fault. `bash check.sh` runs the same form checks first and prints them
+under a `== form ==` heading. The form check prints no expected answer.
 
 ### Run a Doctor
 

@@ -1579,7 +1579,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["1", "--root", str(root)])
             self.assertEqual(1, exit_code, output.getvalue())
-            self.assertIn("DESIGN.md has no", output.getvalue())
+            self.assertIn("DESIGN.md line", output.getvalue())
             self.assertIn("item.label", output.getvalue())
             self.assertIn("the checker warning is not explained", output.getvalue())
 
@@ -2116,7 +2116,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = main(["2", "--root", str(root)])
             self.assertEqual(1, exit_code, output.getvalue())
-            self.assertIn("DESIGN.md has no", output.getvalue())
+            self.assertIn("DESIGN.md line", output.getvalue())
             self.assertIn("reports/outer.sql", output.getvalue())
             self.assertIn("the checker warning is not explained", output.getvalue())
 

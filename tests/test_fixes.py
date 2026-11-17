@@ -230,24 +230,6 @@ class FormFaultTests(unittest.TestCase):
             self.assertIn("manifest.json: line 1, column 1", message)
             self.assertIn("normal_form needs a mapping object", message)
 
-    def test_form_lint_needs_no_database_and_hides_answers(self: FormFaultTests) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            make_pair(root)
-            write(
-                root / "cases" / "lab1" / "one.expected",
-                '{"columns":["value"],"rows":[[424242]]}\n',
-            )
-            output = StringIO()
-            with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("CMSC127_DATABASE_URL", None)
-                with redirect_stdout(output):
-                    exit_code = main(["--form-lint", "--root", str(root)])
-
-            self.assertEqual(0, exit_code, output.getvalue())
-            self.assertIn("Form is valid.", output.getvalue())
-            self.assertNotIn("424242", output.getvalue())
-
     def test_form_fault_stops_before_setup(self: FormFaultTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
