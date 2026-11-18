@@ -265,19 +265,22 @@ uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
 unless the manifest sets `ordered` to `false`. The runner compares duplicate
 rows. A failed comparison prints the expected rows and the actual rows.
 
-The runner supports nine case kinds. `output` calls the pair's `./run` command.
+The runner supports ten case kinds. `output` calls the pair's `./run` command.
 `schema` compares ERD text with PostgreSQL. `reject` checks that SQL fails.
+`allow` checks that SQL succeeds under a named role, then rolls it back.
 `state` checks rows after an operation. `race` runs SQL steps on two sessions
 in the manifest order. `query` runs a SQL file directly. `document` checks the
 structure of a Markdown file and the entries for each warning row. `report` runs
 a report SQL file named in a JSON body. `view` reads the catalog to prove that a
 report reads a required view.
 
-For a restricted-role check, add a lowercase `role` field to a `reject` case
-and set its expected SQLSTATE to `42501`. The runner creates a temporary probe
-role, grants it membership in the named role, and runs the insert as that probe.
-It removes the probe role after the check. The named role must exist in the
-database created by the pair's migrations.
+For a restricted-role check, add a lowercase `role` field and set the expected
+SQLSTATE. A `reject` case expects `42501`, the insufficient-privilege code. An
+`allow` case expects `00000`, the success code, and the runner supplies that
+code when the case omits it. The runner creates a temporary probe role, grants
+it membership in the named role, and runs the insert as that probe. An `allow`
+case rolls its insert back. The runner removes the probe role after the check.
+The named role must exist in the database created by the pair's migrations.
 
 A `state` body can set `operation` to `restore`. The runner calls the pair's
 backup and restore commands, then compares `check_sql` rows with the expected
