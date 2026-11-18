@@ -47,7 +47,8 @@ function showMessage(message: string, source: "tables" | "panel" = "panel"): voi
   connectionMessage.hidden = visibleMessage.length === 0;
 }
 
-const SERVER_UNREACHABLE = "The page cannot reach its server. Run bash <path to the Block 1 bundle>/start.sh from the folder you started the page in.";
+const SERVER_UNREACHABLE =
+  'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.';
 
 function describeRequestError(error: unknown): string {
   if (error instanceof TypeError) {
