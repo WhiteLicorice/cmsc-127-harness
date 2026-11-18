@@ -2098,6 +2098,67 @@ def _mapping_rows(
         }
 
 
+def _document_faults(
+    connection: _DbConnection,
+    mapping: Mapping[str, tuple[str | None, str | None]] | None,
+) -> list[str]:
+    """The fault when the document fact has no stored JSONB value, if any."""
+    if mapping is None:
+        return [
+            "the database has no column_mapping view, so the document fact "
+            "cannot be checked. Create the view in a migration, then run the "
+            "checks again."
+        ]
+    entry = mapping.get("document")
+    table = entry[0] if entry is not None else None
+    column = entry[1] if entry is not None else None
+    if table is None or column is None:
+        return [
+            "the document fact has no table and column. Store one entity as a "
+            "JSONB document in a migration, then add a row to the "
+            "column_mapping view that maps the document fact to that column."
+        ]
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            """SELECT data_type FROM information_schema.columns
+               WHERE table_schema = 'public'
+                 AND table_name = %s
+                 AND column_name = %s""",
+            (table, column),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return [
+            f"the document fact maps to {table}.{column}, and that table or "
+            "column does not exist. Create the JSONB document column in a "
+            "migration and map the document fact to it."
+        ]
+    data_type = str(row[0])
+    if data_type != "jsonb":
+        return [
+            f"the document fact maps to {table}.{column}, and that column is "
+            f"{data_type}. Store the document in a JSONB column and map the "
+            "document fact to it."
+        ]
+    with connection.cursor() as cursor:
+        _execute(
+            cursor,
+            "SELECT EXISTS (SELECT 1 FROM public."
+            + _quote_identifier(table)
+            + " WHERE "
+            + _quote_identifier(column)
+            + " IS NOT NULL)",
+        )
+        found = cursor.fetchone()
+    if found is None or not found[0]:
+        return [
+            f"the document column {table}.{column} holds no non-null value. "
+            "Store one document in that column, then run the checks again."
+        ]
+    return []
+
+
 def _resolve_mapped_reject(
     connection: _DbConnection, statement: str
 ) -> tuple[str, str | None]:
@@ -2195,6 +2256,8 @@ def _run_case(
         actual = _run_sql_file(connection, case_path)
         actual, warnings = _split_warnings(actual)
         problems = compare_dataset(expected, actual, ordered=ordered)
+        if case.get("document") is True:
+            problems.extend(_document_faults(connection, _mapping_rows(connection)))
     elif kind == "document":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         warning_columns = list(warning_subjects)
@@ -3105,11 +3168,25 @@ def _required_file_faults(
     return faults
 
 
+def _cached_warning_advice(
+    columns: Sequence[str], stage: int | None
+) -> list[str]:
+    """The previous run's warning subjects, as advice, never as form faults."""
+    run_text = f"bash check.sh {stage}" if stage is not None else "bash check.sh"
+    return [
+        f"DESIGN.md: the last run printed a warning about {column}. This check "
+        f"reads the previous result, so {run_text} checks the Checker Warnings "
+        "entry against the warnings its own run prints."
+        for column in columns
+    ]
+
+
 def _form_faults(
     root: Path, runner_dir: Path
-) -> tuple[list[str], list[str], int | None]:
-    """The form faults and skips, plus the published stage, without printing."""
+) -> tuple[list[str], list[str], list[str], int | None]:
+    """The form faults, advice, and skips, plus the published stage."""
     faults: list[str] = []
+    advice: list[str] = []
     skips: list[str] = []
     manifest: dict[str, object] | None = None
     try:
@@ -3131,34 +3208,39 @@ def _form_faults(
         warning_columns, skip = _result_warning_columns(root, stage)
         if skip is not None:
             skips.append(skip)
+        advice.extend(_cached_warning_advice(warning_columns, stage))
         faults.extend(
             _design_rows(
                 root,
                 design_config,
-                warning_columns,
+                (),
                 check_placeholders=False,
             )
         )
     faults.extend(_migration_faults(root))
     if manifest is not None and stage is not None:
         faults.extend(_required_file_faults(root, manifest, stage))
-    return faults, skips, stage
+    return faults, advice, skips, stage
 
 
 def _lint(root: Path, runner_dir: Path) -> int:
     """Run the form checks that need no database and reveal no answer."""
-    faults, skips, _stage = _form_faults(root, runner_dir)
+    faults, advice, skips, _stage = _form_faults(root, runner_dir)
     if faults:
         print("== form ==")
         for fault in faults:
             print(f"  {fault}")
         print()
         print("Those are form faults, not wrong answers. Fix them first.")
+        for line in advice:
+            print(line)
         for skip in skips:
             print(skip)
         return 1
     print("The form is clean.")
     print("This read the form only. It says nothing about whether an answer is right.")
+    for line in advice:
+        print(line)
     for skip in skips:
         print(skip)
     return 0

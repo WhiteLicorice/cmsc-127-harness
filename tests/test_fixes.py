@@ -69,6 +69,12 @@ contribution_table = cast(
     Callable[[Path], str], getattr(runner, "_contribution_table")
 )
 extract_erd = cast(Callable[[str], str], getattr(runner, "_extract_erd"))
+document_faults = cast(
+    Callable[
+        [object, Mapping[str, tuple[str | None, str | None]] | None], list[str]
+    ],
+    getattr(runner, "_document_faults"),
+)
 print_results = cast(
     Callable[[Sequence[Mapping[str, object]], int], int],
     getattr(runner, "_print_results"),
@@ -1081,6 +1087,59 @@ class CatalogCheckTests(unittest.TestCase):
             )
             errors = check_index(root, self.connection, item, set())
             self.assertTrue(any("migration" in error for error in errors))
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class StoredDocumentTests(unittest.TestCase):
+    connection: _TestConnection
+    table: str
+
+    def setUp(self: StoredDocumentTests) -> None:
+        self.connection = cast(
+            _TestConnection,
+            psycopg.connect(os.environ["CMSC127_DATABASE_URL"], autocommit=True),
+        )
+        self.table = f"t13_doc_{uuid4().hex[:10]}"
+        with self.connection.cursor() as cursor:
+            cursor.execute(f'CREATE TABLE public."{self.table}" (payload jsonb)')
+
+    def tearDown(self: StoredDocumentTests) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(f'DROP TABLE IF EXISTS public."{self.table}"')
+        self.connection.close()
+
+    def test_a_stored_jsonb_document_passes(self: StoredDocumentTests) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                f'INSERT INTO public."{self.table}" '
+                "VALUES ('{\"phone\": \"0917\"}'::jsonb)"
+            )
+
+        faults = document_faults(
+            self.connection, {"document": (self.table, "payload")}
+        )
+
+        self.assertEqual([], faults)
+
+    def test_a_missing_document_names_the_migration(
+        self: StoredDocumentTests,
+    ) -> None:
+        faults = document_faults(self.connection, {})
+
+        self.assertEqual(1, len(faults))
+        self.assertIn("document fact has no table and column", faults[0])
+        self.assertIn("migration", faults[0])
+        self.assertIn("JSONB", faults[0])
+
+    def test_an_empty_document_column_names_the_store(
+        self: StoredDocumentTests,
+    ) -> None:
+        faults = document_faults(
+            self.connection, {"document": (self.table, "payload")}
+        )
+
+        self.assertEqual(1, len(faults))
+        self.assertIn("holds no non-null value", faults[0])
 
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")

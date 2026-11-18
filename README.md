@@ -283,6 +283,10 @@ A `state` body can set `operation` to `restore`. The runner calls the pair's
 backup and restore commands, then compares `check_sql` rows with the expected
 rows. Other `state` operations still run as SQL.
 
+A `query` case may set `document` to `true` when it owns the `document` fact.
+The runner then checks that the pair's `column_mapping` view maps that fact to a
+`jsonb` column that holds at least one non-null value.
+
 A row whose first cell starts with `warning:` is a warning, not a failure. The
 runner prints it under its case and counts it on the count line, so a case with
 only warnings passes.
@@ -315,7 +319,9 @@ Run one case with `bash check.sh STAGE --case CASE_ID`, where `STAGE` is the
 stage that lists the case. Run the form check without a database with `./lint`.
 `./lint` exits 0 when the form is clean and 1 when it finds a fault.
 `bash check.sh` runs the same form checks first and prints them under a
-`== form ==` heading. The form check prints no expected answer.
+`== form ==` heading. The form check prints no expected answer. It prints a
+cached warning subject as advice, because the run that follows checks the entry
+against its own warnings.
 
 ### Run a Doctor
 

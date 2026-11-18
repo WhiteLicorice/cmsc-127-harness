@@ -290,10 +290,9 @@ class LintTests(unittest.TestCase):
                     'DESIGN.md is missing the heading "## Checker Warnings".', output
                 )
                 self.assertIn(
-                    'DESIGN.md: has no "### item.price" entry under '
-                    '"## Checker Warnings"',
-                    output,
+                    "the last run printed a warning about item.price", output
                 )
+                self.assertNotIn('has no "### item.price" entry', output)
                 self.assertNotIn("DESIGN.md line 1:", output)
 
     def test_an_uppercase_migration_extension_is_a_form_fault(
@@ -381,7 +380,7 @@ class LintTests(unittest.TestCase):
                     output,
                 )
 
-    def test_warning_entries_are_checked_from_the_result_file(
+    def test_a_cached_warning_is_advice_not_a_form_fault(
         self: LintTests,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -406,9 +405,13 @@ class LintTests(unittest.TestCase):
 
                 code, output, errors = run_lint(root, runner_dir)
 
-                self.assertEqual(1, code, output + errors)
-                self.assertIn('"### item.price"', output)
-                self.assertIn("no", output)
+                self.assertEqual(0, code, output + errors)
+                self.assertIn("The form is clean.", output)
+                self.assertIn(
+                    "the last run printed a warning about item.price", output
+                )
+                self.assertIn("bash check.sh 1 checks", output)
+                self.assertNotIn("== form ==", output)
 
 
 if __name__ == "__main__":

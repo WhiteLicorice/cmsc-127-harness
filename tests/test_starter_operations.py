@@ -41,6 +41,27 @@ CREATE TABLE enrollment (
     enrolled_on date NOT NULL
 );
 
+CREATE TABLE course_choice (
+    student_id integer NOT NULL REFERENCES student (student_id),
+    term text NOT NULL,
+    course_id integer NOT NULL,
+    PRIMARY KEY (student_id, term, course_id)
+);
+
+CREATE FUNCTION record_course_choice() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO course_choice (student_id, term, course_id)
+    VALUES (NEW.student_id, NEW.term, 3);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER enrollment_course_choice
+BEFORE INSERT ON enrollment
+FOR EACH ROW EXECUTE FUNCTION record_course_choice();
+
 INSERT INTO student (student_id) VALUES (834), (835);
 
 INSERT INTO section (term, instructor_id, section_id, section_capacity)
@@ -187,6 +208,26 @@ class StarterLockTimeoutTests(unittest.TestCase):
         self.assertEqual("", completed.stdout, completed.stderr)
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(LOCK_MESSAGE, completed.stderr)
+
+    def test_a_repeat_enrollment_reports_the_section(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        starter = starter_root()
+        if starter is None:
+            self.skipTest("set CMSC127_STARTER_DIR to the starter repository")
+        work = operations_workdir(starter, STATEMENT_TIMEOUT)
+        self.addCleanup(shutil.rmtree, work, True)
+
+        first = self.enroll(work)
+        self.assertEqual(0, first.returncode, first.stderr)
+
+        second = self.enroll(work)
+
+        self.assertEqual(1, second.returncode, second.stderr)
+        self.assertEqual(
+            "The student is already enrolled in this section.\n", second.stderr
+        )
+        self.assertNotIn("already takes this course", second.stderr)
 
     def test_a_statement_timeout_keeps_its_own_message(
         self: StarterLockTimeoutTests,
