@@ -1,10 +1,10 @@
 {
   "files": {
     ".gitattributes": "4ad4ec36f3651d644cc8d5136289c90652160936e279827259e7272915b2dafd",
-    ".github/workflows/check.yml": "8df7684141337bfd978af28b940ff4e7f981fadfd4056cc49bacc0e6f9dfb768",
+    ".github/workflows/check.yml": "685f0468cde0e7b3df5ed6a28cf11adad5c6440824e8296ae6ba438f606e2e6c",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "check.sh": "c55554c850a70816ef8f64f2a5133a1d4430d9109f01c061bb0ef0fa12fe78e4",
+    "check.sh": "225ad27629f3c820f81b958e988bd7a00b3cd3a60a23e530ca7762351258983d",
     "lint": "e67938cc3630c9768e487983edf8d54f27faa4a9c9f3bb689625d19d35d27531",
     "OPERATIONS.md": "c056e27ef7f633c7c677dd886d39b13c363a3e3ff2e5d36a62fe2b07ca382eb4",
     "RESTORE.md": "219bdc0f11f1e7c41deb7261cc61856ac1e22559b5fa652860ba106c86b7543e",
@@ -60,7 +60,7 @@
     "cases/published/lab2/top_open_seats.json": "bd18976bf7a652294ce4cd958bf4911cd6494a79e020e569c4b84481c96543da",
     "cases/published/lab2/view_bypass.expected": "d03c573aaaffe9a45edea954459342923fcd99c92bf7e8bee90e42c67a8f0e86",
     "cases/published/lab2/view_bypass.json": "21a76e9c55511078e440fcd0bb6df34993b6e6168677df5bd1d4024060d7d91c",
-    "cases/published/lab3/cashier-cannot-enroll.sql": "2d5f9003c4bec34e64d20f3620db15ea4e4a0d0f65960debae0b6ffe460488b1",
+    "cases/published/lab3/cashier-cannot-enroll.sql": "2be7c206a8d515b0588f70ced7e085fb72f5109975730b579ed175e8b6eca9df",
     "cases/published/lab3/cashier-cannot-enroll.expected": "bb66817be4d34630f2da2818c88469676158221eff3b89101b92b8c35458a439",
     "cases/published/lab3/design.expected": "f19f182daef27c1c61f4bdf965c446205c6d2d606a0864f3ca3b500f42c295ee",
     "cases/published/lab3/design.json": "d2f6359eba8740a9740bab3e73e07ee23bb43fd4806c2a6488faad65a93f9425",
@@ -72,15 +72,15 @@
     "cases/published/lab3/race-driver.expected": "189a4da2fae7bc34a4e73196325cd23b3d81deb4d5cd69cf3048ef51dabd6eb3",
     "cases/published/lab3/race-driver.sql": "1433d33b82c13e2ffb1f64ce6114fcef734efa8a10b1710eefa2d04f5e542e49",
     "cases/published/lab3/receipt-format.expected": "56afa76c5892d5e76a546d2f67fdcea3e2c824b0b11fa3aa6a33c55693ab302e",
-    "cases/published/lab3/receipt-format.sql": "d6e20f7e7f46b00d2668f95501fd3174b91aa2d35eccaaec94fe3667dc816560",
+    "cases/published/lab3/receipt-format.sql": "62f47f412226f977c2efed0ae921d96c4ec91ca1827f3f06561082e8c6d0f551",
     "cases/published/lab3/receipt-required.expected": "09ee042acff3dba0ea15d6ac66ceaa97904ab86a1653e439ff16f8b43ec934fa",
-    "cases/published/lab3/receipt-required.sql": "3efc4c16173d9780fc3745561e9d46490a5229a52915f486a9245c36c9ba999c",
+    "cases/published/lab3/receipt-required.sql": "6bf590abe3a33286f0ce676049227e858e308e9391a50c5beae85f55092147d6",
     "cases/published/lab3/receipt-unique.expected": "8c6358e3002abff57cf671c270c2f71261456a10fc07d7d8181ba0ab025d878a",
-    "cases/published/lab3/receipt-unique.sql": "f147a095dc9e60fdfb2ea6c28d4cb15bfee1582749a85b7ba2bdf680fca1aa71",
+    "cases/published/lab3/receipt-unique.sql": "e47439b49a97937deddf61d2fdf53c3506425130f057a46fee0df899460b4aa8",
     "cases/published/lab3/registrar-cannot-pay.expected": "bb66817be4d34630f2da2818c88469676158221eff3b89101b92b8c35458a439",
-    "cases/published/lab3/registrar-cannot-pay.sql": "9c3afa304103f36a88648e4d457367ef1b64f354b7bb4e9cd1b48053a3a4ec38",
-    "cases/published/lab3/restore-state.expected": "f20fb22c76d22041ffabc5ed9f0bb74fa10508b83171e995f45cdf34e5dbbb21",
-    "cases/published/lab3/restore-state.json": "84d9d808cbc2261a3edc5847332086b4d199557124f36353da8c13687c2765ce"
+    "cases/published/lab3/registrar-cannot-pay.sql": "b90ef0379f93ca49a6f14acbc46fea2d71a7223a77f5df0155b6568c74181fa9",
+    "cases/published/lab3/restore-state.expected": "b65dbfcd35488e19c787ff593f1e99a3ac5e5f28710f808bcef0126995ffcc82",
+    "cases/published/lab3/restore-state.json": "2eac0cea905522171a98f11aa28b259a515b523e12f55e1b9564696052c5c758"
   },
   "allowed_paths": [
     "README.md",
