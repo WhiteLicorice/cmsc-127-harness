@@ -346,10 +346,11 @@ bash doctor.sh
 ```
 
 The PowerShell doctor checks Python 3.15.2, the pinned drivers, PostgreSQL
-18.x tools, Git, the PostgreSQL 18 service, port 5432, and a database
-connection. The Bash doctor checks Python, the pinned drivers, PostgreSQL
-tools, Git, and a database connection. Each doctor ends with a step count.
-It returns zero only when every step passes.
+18.x tools, Git, the PostgreSQL 18 service, the port in
+`CMSC127_DATABASE_URL`, and a database connection. The port is 5432 when the
+variable is absent or holds no port. The Bash doctor checks Python, the
+pinned drivers, PostgreSQL tools, Git, and a database connection. Each doctor
+ends with a step count. It returns zero only when every step passes.
 
 The doctors read `CMSC127_DATABASE_URL`. They do not print its password.
 Keep the password out of screenshots and shared logs.

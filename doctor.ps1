@@ -5,6 +5,8 @@
 #
 # It reads tool versions and connects to the database in
 # CMSC127_DATABASE_URL. It does not install software or change settings.
+# It checks the port in CMSC127_DATABASE_URL. The port is 5432 when the
+# variable is absent or holds none.
 
 $script:passed = 0
 $script:failed = 0
@@ -25,6 +27,31 @@ function Report-Result($passed, $successMessage, $failureMessage, $repair) {
 function Find-Application($name) {
     return Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
+}
+
+function Get-DatabasePort {
+    $url = $env:CMSC127_DATABASE_URL
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        return 5432
+    }
+
+    $authority = $url
+    $schemeEnd = $url.IndexOf('://')
+    if ($schemeEnd -ge 0) {
+        $authority = $url.Substring($schemeEnd + 3)
+    }
+    $authority = [regex]::Split($authority, '[/?#]')[0]
+    $hostPort = $authority.Substring($authority.LastIndexOf('@') + 1)
+    $portMatch = [regex]::Match($hostPort, ':(\d+)$')
+    if (-not $portMatch.Success) {
+        return 5432
+    }
+
+    $port = [int]$portMatch.Groups[1].Value
+    if ($port -lt 1 -or $port -gt 65535) {
+        return 5432
+    }
+    return $port
 }
 
 Write-Host "Checking the Windows toolchain."
@@ -135,12 +162,13 @@ Report-Result $serviceOk 'The PostgreSQL 18 service is running.' `
     'The PostgreSQL 18 service is not running.' `
     'Start the postgresql-x64-18 service. If the installer returned to the prompt at once, check the newest %TEMP%\installbuilder_installer*.log. Run the installer with Start-Process -Wait when the prompt must wait.'
 
-$listener = Get-NetTCPConnection -LocalPort 5432 -State Listen -ErrorAction SilentlyContinue |
+$databasePort = Get-DatabasePort
+$listener = Get-NetTCPConnection -LocalPort $databasePort -State Listen -ErrorAction SilentlyContinue |
     Select-Object -First 1
 $portOk = $null -ne $listener
-Report-Result $portOk 'A server listens on port 5432.' `
-    'No server listens on port 5432.' `
-    'Run Get-NetTCPConnection -LocalPort 5432. If WSL holds the port, run pg_lsclusters in WSL. Select a free port for one server.'
+Report-Result $portOk "A server listens on port $databasePort." `
+    "No server listens on port $databasePort." `
+    "Run Get-NetTCPConnection -LocalPort $databasePort. If WSL holds the port, run pg_lsclusters in WSL. Select a free port for one server."
 
 if ($pythonOk) {
     $databaseOk = $false
