@@ -256,6 +256,68 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
+    def test_unique_subset_of_composite_foreign_key_allows_at_most_one_child(
+        self: ComparatorTests,
+    ) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE TABLE t04_compare.parent (a integer, b integer, PRIMARY KEY (a, b))"
+            )
+            cursor.execute("""CREATE TABLE t04_compare.child (
+                id integer PRIMARY KEY,
+                a integer,
+                b integer,
+                UNIQUE (a),
+                FOREIGN KEY (a, b) REFERENCES t04_compare.parent (a, b)
+            )""")
+
+        differences = self.compare("""erDiagram
+            parent |o--o| child : fk_child_a_b
+
+            parent {
+                int a PK
+                int b PK
+            }
+            child {
+                int id PK
+                int a FK
+                int b FK
+            }
+        """)
+
+        self.assertEqual([], differences)
+
+    def test_reordered_unique_of_composite_foreign_key_allows_at_most_one_child(
+        self: ComparatorTests,
+    ) -> None:
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE TABLE t04_compare.parent (a integer, b integer, PRIMARY KEY (a, b))"
+            )
+            cursor.execute("""CREATE TABLE t04_compare.child (
+                id integer PRIMARY KEY,
+                a integer,
+                b integer,
+                UNIQUE (b, a),
+                FOREIGN KEY (a, b) REFERENCES t04_compare.parent (a, b)
+            )""")
+
+        differences = self.compare("""erDiagram
+            parent |o--o| child : fk_child_a_b
+
+            parent {
+                int a PK
+                int b PK
+            }
+            child {
+                int id PK
+                int a FK
+                int b FK
+            }
+        """)
+
+        self.assertEqual([], differences)
+
     def test_many_to_many_uses_two_lines_to_the_associative_table(self: ComparatorTests) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.student (student_id integer PRIMARY KEY)")

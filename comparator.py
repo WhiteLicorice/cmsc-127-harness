@@ -154,7 +154,10 @@ def _read_schema(connection: _Connection, schema: str) -> dict[str, _Table]:
                 columns=child_columns,
                 parent=parent_name,
                 required=all(table.columns[name].not_null for name in child_columns),
-                unique=frozenset(child_numbers) in unique_numbers[table_name],
+                unique=any(
+                    unique_key <= frozenset(child_numbers)
+                    for unique_key in unique_numbers[table_name]
+                ),
             )
         )
 

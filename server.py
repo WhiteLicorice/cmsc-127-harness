@@ -135,7 +135,7 @@ SELECT child.relname AS child,
            FROM pg_catalog.pg_constraint AS key_constraint
            WHERE key_constraint.conrelid = child.oid
              AND key_constraint.contype IN ('p', 'u')
-             AND key_constraint.conkey = constraint_row.conkey
+             AND key_constraint.conkey <@ constraint_row.conkey
        ) AS unique
 FROM pg_catalog.pg_constraint AS constraint_row
 JOIN pg_catalog.pg_class AS child ON child.oid = constraint_row.conrelid

@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import dict_row
 
 
 DATABASE_URL = os.environ.get("CMSC127_DATABASE_URL")
@@ -456,6 +457,54 @@ class HarnessPageTests(unittest.TestCase):
         self.assertTrue({"PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK"}.issubset(constraint_types))
         self.assertTrue(any("missing" in item["message"] for item in payload["differences"]))
         self.assertTrue(any(column["notNull"] for table in payload["tables"] for column in table["columns"]))
+
+    def test_relationship_query_counts_a_unique_subset_in_any_order(self) -> None:
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires an isolated PostgreSQL service")
+        schema = f"t12_{uuid4().hex[:10]}"
+        try:
+            with psycopg.connect(DATABASE_URL) as connection:
+                connection.execute(
+                    sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema))
+                )
+                connection.execute(
+                    sql.SQL(
+                        "CREATE TABLE {}.parent ("
+                        "a integer, b integer, PRIMARY KEY (a, b))"
+                    ).format(sql.Identifier(schema))
+                )
+                connection.execute(
+                    sql.SQL(
+                        "CREATE TABLE {}.child_a ("
+                        "id integer PRIMARY KEY, a integer, b integer, "
+                        "UNIQUE (a), "
+                        "FOREIGN KEY (a, b) REFERENCES {}.parent (a, b))"
+                    ).format(sql.Identifier(schema), sql.Identifier(schema))
+                )
+                connection.execute(
+                    sql.SQL(
+                        "CREATE TABLE {}.child_ba ("
+                        "id integer PRIMARY KEY, a integer, b integer, "
+                        "UNIQUE (b, a), "
+                        "FOREIGN KEY (a, b) REFERENCES {}.parent (a, b))"
+                    ).format(sql.Identifier(schema), sql.Identifier(schema))
+                )
+            with psycopg.connect(
+                DATABASE_URL, row_factory=cast(Any, dict_row)
+            ) as connection:
+                rows = server_module._fetch_rows(
+                    connection, server_module._RELATIONSHIPS_SQL, (schema,)
+                )
+        finally:
+            with psycopg.connect(DATABASE_URL) as connection:
+                connection.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+        unique_by_child = {
+            str(row["child"]): bool(row["unique"]) for row in rows
+        }
+        self.assertEqual({"child_a": True, "child_ba": True}, unique_by_child)
 
     def test_sessions_catalog_query_reports_an_open_transaction(self) -> None:
         self.load_server()
