@@ -30,8 +30,15 @@ jobs:
       PGPORT: 55445
       PGUSER: postgres
       PGDATABASE: postgres
+      CMSC127_STARTER_DIR: ${{ github.workspace }}/starter
     steps:
       - uses: actions/checkout@v7
+      - name: Check out the starter
+        uses: actions/checkout@v7
+        with:
+          repository: WhiteLicorice/cmsc-127-lab-starter
+          ref: main
+          path: starter
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
@@ -104,8 +111,15 @@ jobs:
       PGPORT: 55445
       PGUSER: postgres
       PGDATABASE: postgres
+      CMSC127_STARTER_DIR: ${{ github.workspace }}/starter
     steps:
       - uses: actions/checkout@v7
+      - name: Check out the starter
+        uses: actions/checkout@v7
+        with:
+          repository: WhiteLicorice/cmsc-127-lab-starter
+          ref: main
+          path: starter
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
