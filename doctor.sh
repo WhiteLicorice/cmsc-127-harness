@@ -54,7 +54,7 @@ case "$(uname -s 2>/dev/null)" in
 esac
 
 if command -v python >/dev/null 2>&1 \
-    && [ "$(python --version 2>&1)" = "$python_expected" ]; then
+    && [ "$(python --version 2>&1 | tr -d '\r')" = "$python_expected" ]; then
     python_prefix=(python)
 fi
 
@@ -109,7 +109,7 @@ run_python() {
 
 python_ok=false
 if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
-    python_version=$(run_python --version 2>&1 | tr '\n' ' ')
+    python_version=$(run_python --version 2>&1 | tr -d '\r' | tr '\n' ' ')
     python_exit=$?
     python_version=${python_version% }
     python_version=${python_version%.}
@@ -146,7 +146,7 @@ fi
 postgres_major="${postgres_expected%%.*}"
 for tool in psql pg_dump pg_ctl; do
     if command -v "$tool" >/dev/null 2>&1; then
-        tool_version=$($tool --version 2>&1 | head -n 1)
+        tool_version=$($tool --version 2>&1 | tr -d '\r' | head -n 1)
         tool_exit=$?
         if [ -z "$tool_version" ] || [ "$tool_exit" -ne 0 ]; then
             bad "$tool did not report a version." \
@@ -167,7 +167,7 @@ if ! command -v git >/dev/null 2>&1; then
     bad 'Git is not on PATH.' \
         "$git_fix"
 else
-    git_version=$(git --version 2>&1 | tr '\n' ' ')
+    git_version=$(git --version 2>&1 | tr -d '\r' | tr '\n' ' ')
     git_exit=$?
     git_version=${git_version% }
     if [ -z "$git_version" ] || [ "$git_exit" -ne 0 ]; then
