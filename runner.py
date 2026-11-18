@@ -2143,6 +2143,101 @@ def _document_file(root: Path, case: Mapping[str, object]) -> str | None:
     return file_name if isinstance(file_name, str) else None
 
 
+MAPPED_TABLE = "mapped_table"
+
+
+def _mapping_rows(
+    connection: _DbConnection,
+) -> dict[str, tuple[str | None, str | None]] | None:
+    """The pair's fact, table, and column rows, or None without the view."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT to_regclass('public.column_mapping') IS NOT NULL")
+        found = cursor.fetchone()
+    if found is None or not found[0]:
+        return None
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT fact, table_name, column_name FROM column_mapping")
+        return {
+            str(entry[0]): (
+                None if entry[1] is None else str(entry[1]),
+                None if entry[2] is None else str(entry[2]),
+            )
+            for entry in cursor.fetchall()
+        }
+
+
+def _resolve_mapped_reject(
+    connection: _DbConnection, statement: str
+) -> tuple[str, str | None]:
+    """Resolve a published reject case's table and columns through the mapping.
+
+    The case writes ``INSERT INTO mapped_table (<fact>, ...) VALUES (...)``,
+    and each column names its mapping fact, so the pair's own table and
+    column names apply. A statement that names a table is returned unchanged.
+    """
+    tokens = _reject_tokens(statement)
+    if (
+        tokens is None
+        or len(tokens) < 3
+        or tokens[0][0] != "word"
+        or tokens[0][1].upper() != "INSERT"
+        or tokens[1][0] != "word"
+        or tokens[1][1].upper() != "INTO"
+        or tokens[2][0] != "word"
+        or tokens[2][1].lower() != MAPPED_TABLE
+    ):
+        return statement, None
+    position = 3
+    if position >= len(tokens) or tokens[position] != ("punct", "("):
+        return statement, None
+    position += 1
+    columns: list[str] = []
+    while position < len(tokens) and tokens[position][0] in {"word", "ident"}:
+        columns.append(tokens[position][1])
+        position += 1
+        if position < len(tokens) and tokens[position] == ("punct", ","):
+            position += 1
+            continue
+        break
+    if (
+        not columns
+        or position >= len(tokens)
+        or tokens[position] != ("punct", ")")
+    ):
+        return statement, None
+    mapping = _mapping_rows(connection)
+    if mapping is None:
+        return statement, (
+            "the case reads its table and column names from "
+            "answers/column_mapping.sql, and this database has no "
+            "column_mapping view. Create the view in a migration, then run the "
+            "checks again."
+        )
+    tables: set[str] = set()
+    resolved: list[str] = []
+    for fact in columns:
+        entry = mapping.get(fact)
+        if entry is None or entry[0] is None or entry[1] is None:
+            return statement, (
+                f"the case names the fact {fact}, and answers/column_mapping.sql "
+                "does not map it to a table and column. Fill that row, then run "
+                "the checks again."
+            )
+        tables.add(entry[0])
+        resolved.append(entry[1])
+    if len(tables) > 1:
+        return statement, (
+            "the case's facts map to more than one table, "
+            f"{', '.join(sorted(tables))}, and one insert needs one table. "
+            "Map every named fact to the table that holds it, then run the "
+            "checks again."
+        )
+    table = next(iter(tables))
+    names = ", ".join(_quote_identifier(name) for name in resolved)
+    values = " ".join(text for _, text in tokens[position + 1 :])
+    return f"INSERT INTO {_quote_identifier(table)} ({names}) {values}", None
+
+
 def _run_case(
     root: Path,
     case: Mapping[str, object],
@@ -2187,15 +2282,23 @@ def _run_case(
         problems = compare_dataset(expected, actual, ordered=ordered)
     elif kind == "reject":
         statement = case_path.read_text(encoding="utf-8")
+        statement, mapping_problem = _resolve_mapped_reject(connection, statement)
         target = _reject_insert_target(statement)
         role = _case_role(case)
-        error = _sql_error(
-            connection,
-            statement,
-            role if isinstance(role, str) else None,
+        error = (
+            None
+            if mapping_problem is not None
+            else _sql_error(
+                connection,
+                statement,
+                role if isinstance(role, str) else None,
+            )
         )
         expected_code = expected.get("sqlstate")
-        if error is None:
+        if mapping_problem is not None:
+            actual = {"sqlstate": None}
+            problems = [mapping_problem]
+        elif error is None:
             actual = {"sqlstate": None}
             problems = [
                 "statement succeeded, but the case requires rejection. Change "

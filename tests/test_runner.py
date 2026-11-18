@@ -1320,6 +1320,83 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(0, exit_code, output.getvalue())
             restore.assert_called_once()
 
+    def test_mapped_reject_reads_the_table_and_columns_from_the_mapping(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cases" / "lab1").mkdir(parents=True)
+            (root / "migrations").mkdir()
+            (root / "cases" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "id": "lab1/receipt",
+                                "stage": 1,
+                                "kind": "reject",
+                                "file": "cases/lab1/receipt.sql",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "receipt.sql").write_text(
+                "-- The checks read the names from answers/column_mapping.sql.\n"
+                "INSERT INTO mapped_table (shelf_id, shelf_code) VALUES (1, NULL);\n",
+                encoding="utf-8",
+            )
+            (root / "cases" / "lab1" / "receipt.expected").write_text(
+                '{"sqlstate":"23502"}\n', encoding="utf-8"
+            )
+            migration = root / "migrations" / "0001_create_storage.sql"
+            migration.write_text(
+                "CREATE TABLE storage (shelf integer PRIMARY KEY, code text NOT NULL);\n"
+                "CREATE VIEW column_mapping AS\n"
+                "SELECT * FROM (VALUES\n"
+                "    ('shelf_id', 'storage', 'shelf'),\n"
+                "    ('shelf_code', 'storage', 'code')\n"
+                ") AS mapping (fact, table_name, column_name);\n",
+                encoding="utf-8",
+            )
+            (root / "load.sql").write_text("", encoding="utf-8")
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'if [ "$1" = prepare ]; then\n'
+                '  psql "$CMSC127_DATABASE_URL" --set ON_ERROR_STOP=1 --file load.sql\n'
+                "fi\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+            self.assertEqual(0, exit_code, output.getvalue())
+
+            migration.write_text(
+                "CREATE TABLE storage (shelf integer PRIMARY KEY, code text NOT NULL);\n"
+                "CREATE VIEW column_mapping AS\n"
+                "SELECT * FROM (VALUES\n"
+                "    ('shelf_id', 'storage', 'shelf')\n"
+                ") AS mapping (fact, table_name, column_name);\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = main(["1", "--root", str(root)])
+
+            self.assertEqual(1, exit_code, output.getvalue())
+            result = json.loads(
+                (root / ".cmsc127" / "last-run.json").read_text(encoding="utf-8")
+            )
+            rows = cast(list[dict[str, object]], result["results"])
+            differences = cast(list[str], rows[0]["differences"])
+            self.assertIn("shelf_code", " ".join(differences))
+
     def test_each_run_uses_a_scratch_database_and_repeats_the_result(
         self: RunnerIntegrationTests,
     ) -> None:
