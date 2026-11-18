@@ -34,7 +34,7 @@ line.
   Windows, `py -3.15 --version` selects an installed 3.15, and step 1 uses
   `py -3.15` to create the environment. After step 2 activates it, `python`
   means the environment's interpreter. If `python` still reports the system
-  version, the environment is not active. Rerun the activation command from
+  version, the environment isn't active. Rerun the activation command from
   step 2.
 
 In PowerShell, replace the activation command with
@@ -58,6 +58,8 @@ PowerShell may find a different `bash`.
    Replace `your_user`, `your_password`, and `your_database` with your
    PostgreSQL role, its password, and your database. The password is the one
    you set for the role when you installed PostgreSQL.
+   If the password contains URL punctuation, percent-encode it before putting
+   it in the URL. For example, write `@` as `%40`.
 5. Start the page. Run `bash start.sh`. The first run builds the page, then the
    script prints the address and opens your browser. The page is ready when the
    Status panel lists the server and the database.
@@ -85,7 +87,7 @@ server. When npm is missing, it prints the Node.js 26.13.1 install route and
 stops with a nonzero status.
 
 The script starts the server and opens the default browser. It prints the
-address, usually `http://127.0.0.1:55440/`. If the browser does not open, open
+address, usually `http://127.0.0.1:55440/`. If the browser doesn't open, open
 the address that the script prints. Press Ctrl+C in the terminal to stop the
 server. A file from a zip archive may have no executable bit. Run the script
 through `bash` in that case.
@@ -172,7 +174,7 @@ started it on Windows with the network disconnected.
 
 The page ran in Edge on Windows. The GitHub workflow loads it in Chromium
 without a visible window on Ubuntu, macOS, and Windows. The default browser on
-macOS and Linux remains unchecked. The workflow does not prove that the default
+macOS and Linux remains unchecked. The workflow doesn't prove that the default
 browser opens and draws the page.
 
 ### Compare an ERD
@@ -202,14 +204,14 @@ for difference in differences:
 ```
 
 The schema argument defaults to `public`. The comparator reads that schema
-from PostgreSQL's catalog. It does not use the connection's `search_path`.
+from PostgreSQL's catalog. It doesn't use the connection's `search_path`.
 Each `Difference` has a property, subject, ERD value, schema value, and message.
 
 The comparator checks table identifiers, column identifiers, primary keys,
 foreign keys, and relationship endpoints. It reads cardinality, how many rows
 sit on each side of a relationship, from foreign keys, column nullability, and
-unique constraints. It does not compare types, indexes, defaults, or `CHECK`
-constraints. It does not count stored rows.
+unique constraints. It doesn't compare types, indexes, defaults, or `CHECK`
+constraints. It doesn't count stored rows.
 
 When the selected schema has no tables, the comparator returns one message.
 The message includes the schema identifier and asks whether your migrations
@@ -239,11 +241,11 @@ PostgreSQL role that can create and drop databases. The runner creates a new
 scratch database for each run. A scratch database is a temporary database for
 one run. The runner applies migrations in filename order, then calls
 `./run prepare` to load data. It drops the scratch database after the run. It
-does not use or change the database named in the URL.
+doesn't use or change the database named in the URL.
 
 Use `NNNN_lowercase_description.sql` for migration files. Start with `0001` and
 use consecutive numbers. The runner stops when a number is missing or a file
-does not use this form. Keep schema changes in these committed SQL files. Keep
+doesn't use this form. Keep schema changes in these committed SQL files. Keep
 the loader in `load.sql`.
 
 A stage is one group of checks, one for each lab. The runner reads
@@ -257,7 +259,7 @@ Stage 2 includes stage 1. `./check.sh --select-stage` prints the stage in
 A pair adds its own cases in `cases/pair/manifest.json`. The pair manifest uses
 the same fields. Its files stay inside `cases/pair/`. The starter holds each
 lab's published files under `cases/published/<lab>/`. Those folders are
-protected, and they do not replace the pair manifest.
+protected. Pair checks belong in the pair manifest.
 
 Result data uses a JSON object with `columns` and `rows` fields. SQL `NULL`
 uses JSON `null`. Numeric values compare by numeric value, so `1`, `1.0`, and
@@ -309,9 +311,9 @@ list runs after the cases. Each invariant checks one property.
 | `contribution` | Prints commits and changed lines by member and week. | The table is information and does not enter the count. |
 | `pyright` | Runs strict Pyright and rejects a `# pyright: ignore` directive. | When Pyright is absent, the check fails with the pip repair. |
 
-Each result line identifies a case or invariant. A failed group does not hide
-the other group results. A `SKIP` line gives a reason and does not count as a
-pass. An `INFO` line carries the contribution table and does not count. The
+Each result line identifies a case or invariant. A failed group doesn't hide
+the other group results. A `SKIP` line gives a reason and doesn't count as a
+pass. An `INFO` line carries the contribution table and doesn't count. The
 final count follows `== result ==` and includes the Pyright result.
 
 The runner writes the last result to `.cmsc127/last-run.json` for the harness
@@ -323,15 +325,15 @@ stage that lists the case. Run the form check without a database with `./lint`.
 `./lint` exits 0 when the form is clean and 1 when it finds a fault.
 `bash check.sh` runs the same form checks first and prints them under a
 `== form ==` heading. The form check prints no expected answer. It prints a
-cached warning subject as advice, because the run that follows checks the entry
-against its own warnings.
+cached warning subject as advice. The next run checks the entry against its own
+warnings.
 
 ### Run a Doctor
 
 A doctor is a script that checks your setup and reports a missing tool. Start
 PostgreSQL first. Set `CMSC127_DATABASE_URL` to a database that the installed
 PostgreSQL driver can read. The doctor only opens and closes a connection. It
-does not run a query or change files or settings. Activate the Python
+doesn't run a query or change files or settings. Activate the Python
 environment before you run a doctor. This makes it use the installed drivers.
 
 In PowerShell, run:
@@ -355,7 +357,7 @@ variable is absent or holds no port. The Bash doctor checks Python, the
 pinned drivers, PostgreSQL tools, Git, and a database connection. Each doctor
 ends with a step count. It returns zero only when every step passes.
 
-The doctors read `CMSC127_DATABASE_URL`. They do not print its password.
+The doctors read `CMSC127_DATABASE_URL`. They don't print its password.
 Keep the password out of screenshots and shared logs.
 
 ### For Developers
