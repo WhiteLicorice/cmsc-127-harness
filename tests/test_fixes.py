@@ -19,6 +19,7 @@ import psycopg
 import runner
 
 from runner import load_manifest, main
+from tests.test_lint import make_root as make_starter_root
 
 
 class _TestCursor(Protocol):
@@ -258,6 +259,113 @@ class FormFaultTests(unittest.TestCase):
             self.assertEqual(2, exit_code, output.getvalue())
             self.assertIn("== form fault ==", output.getvalue())
             self.assertFalse((root / ".cmsc127" / "last-run.json").exists())
+
+    def test_migration_name_fault_exits_two_before_the_database(
+        self: FormFaultTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_starter_root(root, runner_dir)
+                write(root / "migrations" / "0002_Bad_Name.sql", "SELECT 1;\n")
+                output = StringIO()
+                create_database = mock.Mock(
+                    side_effect=AssertionError("database was created")
+                )
+                with mock.patch.object(runner, "_create_database", create_database):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "CMSC127_DATABASE_URL": (
+                                "postgresql://postgres@127.0.0.1:1/postgres"
+                            )
+                        },
+                    ):
+                        with redirect_stdout(output):
+                            exit_code = main(
+                                [
+                                    "1",
+                                    "--root",
+                                    str(root),
+                                    "--runner-dir",
+                                    str(runner_dir),
+                                ]
+                            )
+
+                self.assertEqual(2, exit_code, output.getvalue())
+                self.assertIn("== form fault ==", output.getvalue())
+                self.assertIn(
+                    "NNNN_lowercase_description.sql", output.getvalue()
+                )
+                create_database.assert_not_called()
+                self.assertFalse((root / ".cmsc127" / "last-run.json").exists())
+
+    def test_malformed_manifest_exits_two_before_the_database(
+        self: FormFaultTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_starter_root(root, runner_dir)
+                write(root / "cases" / "manifest.json", '{"version": 1, "cases": [}\n')
+                output = StringIO()
+                create_database = mock.Mock(
+                    side_effect=AssertionError("database was created")
+                )
+                with mock.patch.object(runner, "_create_database", create_database):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "CMSC127_DATABASE_URL": (
+                                "postgresql://postgres@127.0.0.1:1/postgres"
+                            )
+                        },
+                    ):
+                        with redirect_stdout(output):
+                            exit_code = main(
+                                [
+                                    "1",
+                                    "--root",
+                                    str(root),
+                                    "--runner-dir",
+                                    str(runner_dir),
+                                ]
+                            )
+
+                self.assertEqual(2, exit_code, output.getvalue())
+                self.assertIn("== form fault ==", output.getvalue())
+                self.assertIn("manifest.json: line 1, column", output.getvalue())
+                create_database.assert_not_called()
+                self.assertFalse((root / ".cmsc127" / "last-run.json").exists())
+
+    def test_lint_keeps_status_one_for_a_migration_name_fault(
+        self: FormFaultTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as runner_directory:
+                root = Path(directory)
+                runner_dir = Path(runner_directory)
+                make_starter_root(root, runner_dir)
+                write(root / "migrations" / "0002_Bad_Name.sql", "SELECT 1;\n")
+                output = StringIO()
+                with redirect_stdout(output):
+                    exit_code = main(
+                        [
+                            "--lint",
+                            "--root",
+                            str(root),
+                            "--runner-dir",
+                            str(runner_dir),
+                        ]
+                    )
+
+                self.assertEqual(1, exit_code, output.getvalue())
+                self.assertIn("== form ==", output.getvalue())
+                self.assertIn(
+                    "NNNN_lowercase_description.sql", output.getvalue()
+                )
 
     def assert_malformed_field_fault(
         self: FormFaultTests,

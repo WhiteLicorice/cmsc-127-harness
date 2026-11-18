@@ -66,6 +66,10 @@ check_normal_form = cast(
     Callable[[object, Mapping[str, object]], list[str]],
     getattr(runner, "_check_normal_form"),
 )
+plan_indexes = cast(
+    Callable[[object], set[tuple[str | None, str]]],
+    getattr(runner, "_plan_indexes"),
+)
 check_protected = cast(
     Callable[[Path, Path], list[str]], getattr(runner, "_check_protected")
 )
@@ -412,6 +416,48 @@ class ManifestTests(unittest.TestCase):
             case = select_cases(load_manifest(root), 1)[-1]
             with patch.dict(os.environ, {"CMSC127_ROLE_CASHIER": "c127_verify_cashier"}):
                 self.assertEqual("c127_verify_cashier", runner._case_role(case))  # pyright: ignore[reportPrivateUsage]
+
+    def test_allow_case_needs_a_role_and_a_success_sqlstate(
+        self: ManifestTests,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_pair(root)
+            manifest_path = root / "cases" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["cases"].append(
+                {
+                    "id": "lab1/role-allow",
+                    "stage": 1,
+                    "kind": "allow",
+                    "file": "cases/lab1/allow.sql",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            allow_path = root / "cases" / "lab1" / "allow.sql"
+            allow_path.write_text(
+                "INSERT INTO item (id) VALUES (1);\n", encoding="utf-8"
+            )
+            allow_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"00000"}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "allow case needs a role"):
+                load_manifest(root)
+
+            manifest["cases"][-1]["role"] = "cashier"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            allow_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"42501"}\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "00000"):
+                load_manifest(root)
+
+            allow_path.with_suffix(".expected").write_text(
+                '{"sqlstate":"00000"}\n', encoding="utf-8"
+            )
+            case = select_cases(load_manifest(root), 1)[-1]
+            self.assertEqual("lab1/role-allow", case.get("id"))
 
     def test_reject_case_requires_one_plain_row(self: ManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1231,6 +1277,94 @@ class RunnerIntegrationTests(unittest.TestCase):
                 )
                 rows = cast(list[dict[str, object]], result["results"])
                 self.assertEqual("fail", rows[0]["status"])
+        finally:
+            with psycopg.connect(database_url, autocommit=True) as admin:
+                with admin.cursor() as cursor:
+                    cursor.execute(
+                        psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
+                            psycopg_sql.Identifier(group_role)
+                        )
+                    )
+
+    def test_allow_case_checks_the_granted_insert_and_rolls_back(
+        self: RunnerIntegrationTests,
+    ) -> None:
+        group_role = f"c127_allow_group_{uuid4().hex[:12]}"
+        table = f"t13_allow_{uuid4().hex[:8]}"
+        database_url = os.environ["CMSC127_DATABASE_URL"]
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        psycopg_sql.Identifier(group_role)
+                    )
+                )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "cases" / "lab1").mkdir(parents=True)
+                case_path = root / "cases" / "lab1" / "role-allow.sql"
+                case_path.write_text(
+                    f'INSERT INTO "{table}" (id) VALUES (1);\n',
+                    encoding="utf-8",
+                )
+                case_path.with_suffix(".expected").write_text(
+                    '{"sqlstate":"00000"}\n', encoding="utf-8"
+                )
+                case = {
+                    "id": "lab1/role-allow",
+                    "stage": 1,
+                    "kind": "allow",
+                    "file": "cases/lab1/role-allow.sql",
+                    "role": group_role,
+                    "role_env": "CMSC127_ROLE_ALLOW_TEST",
+                }
+                connection = cast(
+                    runner._DbConnection,  # pyright: ignore[reportPrivateUsage]
+                    psycopg.connect(database_url, autocommit=True),
+                )
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            f'CREATE TABLE "{table}" (id integer PRIMARY KEY)'
+                        )
+                        cursor.execute(
+                            f'GRANT INSERT ON "{table}" TO "{group_role}"'
+                        )
+                    with patch.dict(
+                        os.environ, {"CMSC127_ROLE_ALLOW_TEST": group_role}
+                    ):
+                        result = runner._run_case(  # pyright: ignore[reportPrivateUsage]
+                            root, case, connection, database_url
+                        )
+                    self.assertEqual("pass", result["status"], result)
+                    with connection.cursor() as cursor:
+                        cursor.execute(f'SELECT count(*) FROM "{table}"')
+                        row = cursor.fetchone()
+                    self.assertEqual((0,), row)
+
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            f'REVOKE INSERT ON "{table}" FROM "{group_role}"'
+                        )
+                    with patch.dict(
+                        os.environ, {"CMSC127_ROLE_ALLOW_TEST": group_role}
+                    ):
+                        result = runner._run_case(  # pyright: ignore[reportPrivateUsage]
+                            root, case, connection, database_url
+                        )
+                    self.assertEqual("fail", result["status"], result)
+                    self.assertTrue(
+                        any(
+                            "needs the grant" in str(difference)
+                            for difference in cast(
+                                list[object], result["differences"]
+                            )
+                        ),
+                        result,
+                    )
+                finally:
+                    connection.close()
         finally:
             with psycopg.connect(database_url, autocommit=True) as admin:
                 with admin.cursor() as cursor:
@@ -2932,6 +3066,69 @@ class InvariantTests(unittest.TestCase):
                     for error in errors
                 ),
                 errors,
+            )
+
+    def test_index_check_accepts_a_composite_index_that_applies_the_key(
+        self: InvariantTests,
+    ) -> None:
+        required = f"t13_index_{uuid4().hex[:8]}"
+        composite = f"t13_composite_{uuid4().hex[:8]}"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "report.sql").write_text(
+                f'SELECT paid_on, COUNT(*) FROM "{self.schema}".payment\n'
+                "WHERE term = '2024-1S'\n"
+                "  AND paid_on >= DATE '2024-09-01'\n"
+                "  AND paid_on <= DATE '2024-12-08'\n"
+                "GROUP BY paid_on;\n",
+                encoding="utf-8",
+            )
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    f'CREATE TABLE "{self.schema}".payment '
+                    "(student_id integer, term text, seq smallint, "
+                    "amount numeric(10, 2), paid_on date)"
+                )
+                cursor.execute(
+                    f'INSERT INTO "{self.schema}".payment '
+                    "SELECT g, (ARRAY['2024-1S', '2024-2S', '2025-1S', "
+                    "'2025-2S', '2026-1S', '2026-2S', '2027-1S', "
+                    "'2027-2S'])[1 + (g % 8)], 1, 10, "
+                    "DATE '2024-09-01' + ((g % 460)::integer) "
+                    "FROM generate_series(1, 40000) AS g"
+                )
+                cursor.execute(
+                    f'CREATE INDEX "{required}" ON "{self.schema}".payment '
+                    "(paid_on)"
+                )
+                cursor.execute(
+                    f'CREATE INDEX "{composite}" ON "{self.schema}".payment '
+                    "(term, paid_on)"
+                )
+                cursor.execute(f'ANALYZE "{self.schema}".payment')
+                cursor.execute("SET enable_seqscan = off")
+                cursor.execute(
+                    "EXPLAIN (FORMAT JSON, COSTS OFF) "
+                    + (root / "report.sql").read_text(encoding="utf-8")
+                )
+                row = cursor.fetchone()
+                cursor.execute("SET enable_seqscan = on")
+            self.assertIsNotNone(row)
+            plan = row[0] if row is not None else None
+            used = plan_indexes(plan)
+            self.assertIn(composite, {name for _, name in used})
+            self.assertEqual(
+                [],
+                check_index(
+                    root,
+                    self.connection,
+                    {
+                        "file": "report.sql",
+                        "index": required,
+                        "key_column": "paid_on",
+                    },
+                    {(self.schema, required), (self.schema, composite)},
+                ),
             )
 
     def test_feature_check_reads_a_report_file(self: InvariantTests) -> None:

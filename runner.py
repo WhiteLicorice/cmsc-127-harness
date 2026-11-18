@@ -32,6 +32,7 @@ CASE_KINDS = {
     "output",
     "schema",
     "reject",
+    "allow",
     "state",
     "race",
     "query",
@@ -393,6 +394,16 @@ def _validate_expected(path: Path, expected: Mapping[str, object], kind: str) ->
         sqlstate = expected.get("sqlstate")
         if sqlstate is not None and not isinstance(sqlstate, str):
             raise fault("sqlstate must be a string.", ("sqlstate",))
+        return
+    if kind == "allow":
+        sqlstate = expected.get("sqlstate", "00000")
+        if not isinstance(sqlstate, str):
+            raise fault("sqlstate must be a string.", ("sqlstate",))
+        if sqlstate != "00000":
+            raise fault(
+                "an allow case must expect SQLSTATE 00000, the success code.",
+                ("sqlstate",),
+            )
         return
     _validate_dataset(expected, fault, ())
 
@@ -802,6 +813,7 @@ def _validate_case(
         "output": {".json", ".sql", ".sh"},
         "schema": {".erd", ".md"},
         "reject": {".sql"},
+        "allow": {".sql"},
         "state": {".json"},
         "race": {".json"},
         "query": {".sql"},
@@ -814,14 +826,14 @@ def _validate_case(
             f"case {case_id}: {kind} needs a supported case-file type.",
             (*location, "file"),
         )
-    if kind == "reject" and not _is_single_insert_statement(
+    if kind in {"reject", "allow"} and not _is_single_insert_statement(
         case_path.read_text(encoding="utf-8")
     ):
         raise FormFault(
             case_path,
             1,
             1,
-            "a reject case must be one plain `INSERT ... VALUES` row of "
+            f"a {kind} case must be one plain `INSERT ... VALUES` row of "
             "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
             "second row.",
             root=root,
@@ -859,8 +871,8 @@ def _validate_case(
     _validate_expected(expected_path, expected, str(kind))
     if "role" in case or "role_env" in case:
         role = case.get("role")
-        if kind != "reject":
-            raise fault(f"case {case_id}: role is only valid for a reject case.", (*location, "role"))
+        if kind not in {"reject", "allow"}:
+            raise fault(f"case {case_id}: role is only valid for a reject or an allow case.", (*location, "role"))
         if not isinstance(role, str) or ROLE_NAME.fullmatch(role) is None:
             raise fault(f"case {case_id}: role must be a lowercase PostgreSQL role name.", (*location, "role"))
         role_env = case.get("role_env")
@@ -872,8 +884,10 @@ def _validate_case(
                 f"case {case_id}: role_env must be an environment variable name.",
                 (*location, "role_env"),
             )
-        if expected.get("sqlstate") != "42501":
+        if kind == "reject" and expected.get("sqlstate") != "42501":
             raise fault(f"case {case_id}: role reject cases must expect SQLSTATE 42501.", (*location, "role"))
+    elif kind == "allow":
+        raise fault(f"case {case_id}: an allow case needs a role.", (*location, "role"))
     exit_path = case_path.with_suffix(".exit")
     if exit_path.exists():
         try:
@@ -2283,6 +2297,34 @@ def _run_case(
                         "the constraint refuses the row only after a user trigger "
                         "runs. The same insert must fail with user triggers off."
                     )
+    elif kind == "allow":
+        statement = case_path.read_text(encoding="utf-8")
+        statement, mapping_problem = _resolve_mapped_reject(connection, statement)
+        role = _case_role(case)
+        error = (
+            None
+            if mapping_problem is not None
+            else _sql_error(
+                connection,
+                statement,
+                role if isinstance(role, str) else None,
+            )
+        )
+        if mapping_problem is not None:
+            actual = {"sqlstate": None}
+            problems = [mapping_problem]
+        elif error is None:
+            actual = {"sqlstate": "00000"}
+            problems = []
+        else:
+            error_code = error[0]
+            actual = {"sqlstate": error_code}
+            problems = [
+                f"the statement failed with SQLSTATE {error_code}. The {role} "
+                "role needs the grant that this insert reads or writes. Check "
+                "every table in the statement and the schema, then grant the "
+                "missing privilege."
+            ]
     elif kind == "state":
         body = _as_object(_read_json(case_path), f"case {case_id}")
         operation = body.get("operation")
@@ -2836,20 +2878,31 @@ def _check_index(
         resolved = _resolve_index(connection, plan_name)
         if resolved is not None:
             used.add(resolved)
+    conditions = _plan_index_conditions(plan)
+    pattern = (
+        re.compile(rf"\b{re.escape(key_column)}\b")
+        if isinstance(key_column, str)
+        else None
+    )
     if identity not in used:
         names = ", ".join(sorted(name for _, name in used_names)) or "none"
+        if pattern is not None and any(
+            pattern.search(condition) for _, condition in conditions
+        ):
+            # A composite index can lead with term and still restrict paid_on
+            # as an index condition. That reads the same rows, so accept it.
+            return []
         return [
             f"the query plan does not use index {index_name}. It uses: {names}. "
             f"Rewrite the query so it uses index {index_name}."
         ]
-    if isinstance(key_column, str):
-        conditions = [
+    if pattern is not None:
+        own_conditions = [
             condition
-            for condition_name, condition in _plan_index_conditions(plan)
+            for condition_name, condition in conditions
             if condition_name == index_name
         ]
-        pattern = re.compile(rf"\b{re.escape(key_column)}\b")
-        if not any(pattern.search(condition) for condition in conditions):
+        if not any(pattern.search(condition) for condition in own_conditions):
             return [
                 f"the query plan does not filter on {key_column} through index "
                 f"{index_name}. Add a filter on {key_column}."
@@ -3052,8 +3105,10 @@ def _required_file_faults(
     return faults
 
 
-def _lint(root: Path, runner_dir: Path) -> int:
-    """Run the form checks that need no database and reveal no answer."""
+def _form_faults(
+    root: Path, runner_dir: Path
+) -> tuple[list[str], list[str], int | None]:
+    """The form faults and skips, plus the published stage, without printing."""
     faults: list[str] = []
     skips: list[str] = []
     manifest: dict[str, object] | None = None
@@ -3087,6 +3142,12 @@ def _lint(root: Path, runner_dir: Path) -> int:
     faults.extend(_migration_faults(root))
     if manifest is not None and stage is not None:
         faults.extend(_required_file_faults(root, manifest, stage))
+    return faults, skips, stage
+
+
+def _lint(root: Path, runner_dir: Path) -> int:
+    """Run the form checks that need no database and reveal no answer."""
+    faults, skips, _stage = _form_faults(root, runner_dir)
     if faults:
         print("== form ==")
         for fault in faults:
@@ -3605,6 +3666,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as error:
         print("== form fault ==")
         print(str(error))
+        return 2
+    form_faults = _migration_faults(root)
+    if form_faults:
+        print("== form fault ==")
+        for fault in form_faults:
+            print(fault)
         return 2
     database_url = os.environ.get("CMSC127_DATABASE_URL")
     if not database_url:
