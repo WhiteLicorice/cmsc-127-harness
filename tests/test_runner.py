@@ -509,9 +509,7 @@ class ManifestTests(unittest.TestCase):
                                 "stage": 1,
                                 "kind": "schema",
                                 "file": "cases/pair/erd.md",
-                                "alternate_file": "cases/pair/erd-alt.md",
                                 "expected_file": "cases/published/lab1/erd.expected",
-                                "alternate_expected_file": "cases/published/lab1/erd-alt.expected",
                             }
                         ],
                     }
@@ -535,11 +533,7 @@ class ManifestTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (pair / "erd.md").write_text("```mermaid\nerDiagram\n```\n", encoding="utf-8")
-            (pair / "erd-alt.md").write_text("```mermaid\nerDiagram\n    class ||--o{ registration : has\n```\n", encoding="utf-8")
             (lab1 / "erd.expected").write_text(
-                '{"columns":["difference"],"rows":[]}\n', encoding="utf-8"
-            )
-            (lab1 / "erd-alt.expected").write_text(
                 '{"columns":["difference"],"rows":[]}\n', encoding="utf-8"
             )
             (lab2 / "report.sql").write_text("SELECT 2;\n", encoding="utf-8")
@@ -565,15 +559,6 @@ class ManifestTests(unittest.TestCase):
                 lab1 / "erd.expected",
                 runner._case_expected_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
             )
-            with patch.dict(os.environ, {"CMSC127_SCHEMA": "alt"}):
-                self.assertEqual(
-                    root / "cases/pair/erd-alt.md",
-                    runner._case_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
-                )
-                self.assertEqual(
-                    lab1 / "erd-alt.expected",
-                    runner._case_expected_file(root, erd_case),  # pyright: ignore[reportPrivateUsage]
-                )
             self.assertTrue(
                 {"lab1/erd", "lab2/published", "pair/later"}
                 <= {str(case["id"]) for case in cast(list[dict[str, object]], manifest["cases"])}

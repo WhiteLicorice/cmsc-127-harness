@@ -74,9 +74,7 @@ FRAGMENT_PATTERNS = [
     r"^key_column$",
     r"^sections$",
     r"^replaces$",
-    r"^alternate_file$",
     r"^expected_file$",
-    r"^alternate_expected_file$",
     r"^role_env$",
     r"^(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH)\b",
     # Machine-readable lines printed by the runner and the server.

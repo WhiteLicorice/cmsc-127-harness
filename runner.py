@@ -814,50 +814,11 @@ def _validate_case(
             f"case {case_id}: {kind} needs a supported case-file type.",
             (*location, "file"),
         )
-    alternate_file = case.get("alternate_file")
-    alternate_case_path: Path | None = None
-    if alternate_file is not None:
-        if not isinstance(alternate_file, str) or not alternate_file:
-            raise fault(
-                f"case {case_id}: alternate_file must be a relative path.",
-                (*location, "alternate_file"),
-            )
-        alternate_case_path = (root / alternate_file).resolve()
-        try:
-            alternate_case_path.relative_to(case_root.resolve())
-        except ValueError as error:
-            raise fault(
-                f"case {case_id}: alternate_file must be inside cases/.",
-                (*location, "alternate_file"),
-            ) from error
-        if alternate_case_path.suffix not in allowed_suffixes[str(kind)]:
-            raise fault(
-                f"case {case_id}: alternate_file has an unsupported type for {kind}.",
-                (*location, "alternate_file"),
-            )
-        if not alternate_case_path.is_file():
-            raise fault(
-                f"case {case_id}: alternate case file is missing: {alternate_file}.",
-                (*location, "alternate_file"),
-            )
-        listed.add(alternate_case_path)
     if kind == "reject" and not _is_single_insert_statement(
         case_path.read_text(encoding="utf-8")
     ):
         raise FormFault(
             case_path,
-            1,
-            1,
-            "a reject case must be one plain `INSERT ... VALUES` row of "
-            "literals: no `WITH`, `SELECT`, function call, cast, subquery, or "
-            "second row.",
-            root=root,
-        )
-    if kind == "reject" and alternate_case_path is not None and not _is_single_insert_statement(
-        alternate_case_path.read_text(encoding="utf-8")
-    ):
-        raise FormFault(
-            alternate_case_path,
             1,
             1,
             "a reject case must be one plain `INSERT ... VALUES` row of "
@@ -896,38 +857,6 @@ def _validate_case(
         )
     expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
     _validate_expected(expected_path, expected, str(kind))
-    alternate_expected_file = case.get("alternate_expected_file")
-    alternate_expected_path: Path | None = None
-    if alternate_expected_file is not None:
-        if not isinstance(alternate_expected_file, str) or not alternate_expected_file:
-            raise fault(
-                f"case {case_id}: alternate_expected_file must be a relative path.",
-                (*location, "alternate_expected_file"),
-            )
-        alternate_expected_path = (root / alternate_expected_file).resolve()
-        try:
-            alternate_expected_path.relative_to(case_root.resolve())
-        except ValueError as error:
-            raise fault(
-                f"case {case_id}: alternate_expected_file must be inside cases/.",
-                (*location, "alternate_expected_file"),
-            ) from error
-        if alternate_expected_path.suffix != ".expected":
-            raise fault(
-                f"case {case_id}: alternate_expected_file must end in .expected.",
-                (*location, "alternate_expected_file"),
-            )
-        listed.add(alternate_expected_path)
-        if not alternate_expected_path.is_file():
-            raise fault(
-                f"case {case_id}: the alternate .expected file is missing.",
-                (*location, "alternate_expected_file"),
-            )
-        alternate_expected = _as_object(
-            _read_json(alternate_expected_path),
-            f"case {case_id} alternate .expected",
-        )
-        _validate_expected(alternate_expected_path, alternate_expected, str(kind))
     if "role" in case or "role_env" in case:
         role = case.get("role")
         if kind != "reject":
@@ -955,25 +884,14 @@ def _validate_case(
             raise FormFault(exit_path, 1, 1, "The .exit file must contain a number zero or greater.", root=root)
     if kind in {"state", "race", "document", "report", "view"}:
         _validate_case_body(case_path, str(kind), case_id)
-        if alternate_case_path is not None:
-            _validate_case_body(alternate_case_path, str(kind), case_id)
     return case
 
 
 def _case_file(root: Path, case: Mapping[str, object]) -> Path:
-    alternate_file = case.get("alternate_file")
-    if os.environ.get("CMSC127_SCHEMA") == "alt" and isinstance(alternate_file, str):
-        return root / alternate_file
     return root / str(case["file"])
 
 
 def _case_expected_file(root: Path, case: Mapping[str, object]) -> Path:
-    alternate_expected_file = case.get("alternate_expected_file")
-    if (
-        os.environ.get("CMSC127_SCHEMA") == "alt"
-        and isinstance(alternate_expected_file, str)
-    ):
-        return root / alternate_expected_file
     expected_file = case.get("expected_file")
     if isinstance(expected_file, str):
         return root / expected_file
