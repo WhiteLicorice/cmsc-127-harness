@@ -311,8 +311,8 @@ The runner writes the last result to `.cmsc127/last-run.json` for the harness
 page. A form fault, a file with the wrong structure, stops the run before it
 creates a database and reports the file, line, and column.
 
-Run one case with `bash check.sh 2 --case CASE_ID`, where `2` is the stage
-that lists the case. Run the form check without a database with `./lint`.
+Run one case with `bash check.sh STAGE --case CASE_ID`, where `STAGE` is the
+stage that lists the case. Run the form check without a database with `./lint`.
 `./lint` exits 0 when the form is clean and 1 when it finds a fault.
 `bash check.sh` runs the same form checks first and prints them under a
 `== form ==` heading. The form check prints no expected answer.
