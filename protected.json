@@ -1,12 +1,12 @@
 {
   "files": {
     ".gitattributes": "4ad4ec36f3651d644cc8d5136289c90652160936e279827259e7272915b2dafd",
-    ".github/workflows/check.yml": "685f0468cde0e7b3df5ed6a28cf11adad5c6440824e8296ae6ba438f606e2e6c",
+    ".github/workflows/check.yml": "a9cbea60a5761aec17398491e698d3a2c6902ca601cdd461767c5c74497cb780",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "check.sh": "225ad27629f3c820f81b958e988bd7a00b3cd3a60a23e530ca7762351258983d",
+    "check.sh": "45a28b717666ca0c2520b5b5fbc368d9ccfe79a6d77ecdc140c9f1a690f2520d",
     "lint": "e67938cc3630c9768e487983edf8d54f27faa4a9c9f3bb689625d19d35d27531",
-    "OPERATIONS.md": "c056e27ef7f633c7c677dd886d39b13c363a3e3ff2e5d36a62fe2b07ca382eb4",
+    "OPERATIONS.md": "3a21714f850238fa07c9320e3216faf501a4a93697fabe678837983cfcac63e4",
     "RESTORE.md": "219bdc0f11f1e7c41deb7261cc61856ac1e22559b5fa652860ba106c86b7543e",
     "registration_export.csv": "ef472b556dc852617be0495313605165565983e202f8869b5dd6adb823268fe2",
     "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
