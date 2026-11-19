@@ -1454,7 +1454,16 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _create_database(base_url: str) -> tuple[str, _DbConnection]:
+def _create_database(
+    base_url: str, guard: _StopGuard
+) -> tuple[str, _DbConnection]:
+    """Create the race database while the guard holds a stop signal.
+
+    The guard stays latched after this call returns. The caller unlatches it
+    only after it owns the name and the connection, so a signal in this
+    section cannot arrive before cleanup can drop the database.
+    """
+    guard.latch()
     name = f"cmsc127_race_{uuid4().hex}"
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
@@ -1474,39 +1483,72 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
         admin.close()
 
 
-def _stop_signal(signum: int, frame: object) -> None:
-    """End the run through SystemExit, so its finally blocks run."""
-    raise SystemExit(128 + signum)
-
-
-def _hold_stop_signals() -> dict[int, Any]:
-    """Make SIGTERM and SIGHUP raise SystemExit. Return the old handlers.
+class _StopGuard:
+    """Turn SIGTERM and SIGHUP into SystemExit, except during cleanup.
 
     Python ends the process on SIGTERM and SIGHUP with no handler installed,
-    and the run's finally block never drops its database. Windows has no
-    SIGHUP, so the loop names only the signals the platform has.
+    so the run's finally block never drops its database. The guard installs
+    a handler that raises SystemExit.
+
+    A latched guard holds the signal instead. It records the first signal and
+    returns, so a cleanup section can finish. stop_if_pending raises that
+    signal after cleanup, and the exit code still names the signal.
+
+    Windows has no SIGHUP, so install names only the signals the platform has.
     """
-    previous: dict[int, Any] = {}
-    if threading.current_thread() is not threading.main_thread():
-        return previous
-    for name in ("SIGTERM", "SIGHUP"):
-        number = getattr(signal, name, None)
-        if number is None:
-            continue
-        try:
-            previous[number] = signal.signal(number, _stop_signal)
-        except (OSError, ValueError):
-            continue
-    return previous
 
+    def __init__(self) -> None:
+        self.previous: dict[int, Any] = {}
+        self.pending: int | None = None
+        self.latched = False
 
-def _release_stop_signals(previous: Mapping[int, Any]) -> None:
-    """Restore the handlers that _hold_stop_signals replaced."""
-    for number, handler in previous.items():
-        try:
-            signal.signal(number, handler)
-        except (OSError, ValueError):
-            continue
+    def handle(self, signum: int, frame: object) -> None:
+        if self.latched:
+            if self.pending is None:
+                self.pending = signum
+            return
+        # Hold the next signal, so a second one during cleanup cannot cut the
+        # drop short while this one unwinds the stack.
+        self.latched = True
+        raise SystemExit(128 + signum)
+
+    def install(self) -> None:
+        """Replace the SIGTERM and SIGHUP handlers and keep the old ones."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for name in ("SIGTERM", "SIGHUP"):
+            number = getattr(signal, name, None)
+            if number is None:
+                continue
+            try:
+                self.previous[number] = signal.signal(number, self.handle)
+            except (OSError, ValueError):
+                continue
+
+    def restore(self) -> None:
+        """Put back the handlers that install replaced."""
+        for number, handler in self.previous.items():
+            try:
+                signal.signal(number, handler)
+            except (OSError, ValueError):
+                continue
+        self.previous.clear()
+
+    def latch(self) -> None:
+        """Hold a stop signal until the caller finishes cleanup."""
+        self.latched = True
+
+    def unlatch(self) -> None:
+        """Let a stop signal end the run at once."""
+        self.latched = False
+
+    def stop_if_pending(self) -> None:
+        """Raise the held stop signal. Call this after cleanup."""
+        if self.pending is None:
+            return
+        signum = self.pending
+        self.pending = None
+        raise SystemExit(128 + signum)
 
 
 def _migration_files(root: Path) -> list[Path]:
@@ -3714,9 +3756,12 @@ def _self_test() -> int:
         return 2
     name = ""
     admin: _DbConnection | None = None
-    previous = _hold_stop_signals()
+    guard = _StopGuard()
+    guard.install()
     try:
-        name, admin = _create_database(base_url)
+        name, admin = _create_database(base_url, guard)
+        guard.unlatch()
+        guard.stop_if_pending()
         test_url = _database_url(base_url, name)
         settings = conninfo_to_dict(test_url)
         environment = os.environ.copy()
@@ -3748,9 +3793,13 @@ def _self_test() -> int:
         print(f"Self-test setup failed. {detail}.")
         return 1
     finally:
-        if admin is not None and name:
-            _drop_database(name, admin)
-        _release_stop_signals(previous)
+        try:
+            guard.latch()
+            if admin is not None and name:
+                _drop_database(name, admin)
+        finally:
+            guard.restore()
+        guard.stop_if_pending()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -3816,9 +3865,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     database_name = ""
     admin: _DbConnection | None = None
     results: list[dict[str, object]] = []
-    previous = _hold_stop_signals()
+    guard = _StopGuard()
+    guard.install()
     try:
-        database_name, admin = _create_database(database_url)
+        database_name, admin = _create_database(database_url, guard)
+        guard.unlatch()
+        guard.stop_if_pending()
         scratch_url = _database_url(database_url, database_name)
         connection = cast(_DbConnection, psycopg.connect(scratch_url, autocommit=True))
         try:
@@ -3923,9 +3975,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Runner setup failed. {detail}.")
         return 1
     finally:
-        if admin is not None and database_name:
-            _drop_database(database_name, admin)
-        _release_stop_signals(previous)
+        try:
+            guard.latch()
+            if admin is not None and database_name:
+                _drop_database(database_name, admin)
+        finally:
+            guard.restore()
+        guard.stop_if_pending()
     skipped = manifest.get("skips", [])
     if arguments.case_id is None and isinstance(skipped, list):
         for index, raw_skip in enumerate(cast(list[object], skipped), start=1):
