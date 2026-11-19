@@ -10,3 +10,9 @@ audit-artifacts/
 audit-project/
 __pycache__/
 *.py[cod]
+
+# Offline build outputs. `npm run build:offline` writes these three files and no
+# branch tracks them, so a gate run leaves no untracked noise behind.
+public/offline-manifest.json
+public/service-worker.js
+public/service-worker.kill-switch.js
