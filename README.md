@@ -56,9 +56,9 @@ PowerShell may find a different `bash`.
    you set for the role when you installed PostgreSQL.
    If the password contains URL punctuation, percent-encode it before putting
    it in the URL. For example, write `@` as `%40`.
-5. Start the page. Run `bash start.sh`. The first run builds the page, then the
-   script prints the address and opens your browser. The page is ready when the
-   Status panel lists the server and the database.
+5. Start the page. Run `bash start.sh`. The script prints the address and opens
+   your browser. The page is ready when the Status panel lists the server and
+   the database.
 
 ## The Details
 
@@ -77,10 +77,11 @@ terminal.
 The Quick Start sets up and starts the page. This section covers what the
 script does.
 
-`start.sh` builds the page on the first run, when `public/app.js` is missing.
-It prints one line, runs `npm ci` and `npm run build`, and then starts the
-server. When npm is missing, it prints the Node.js 26.13.1 install route and
-stops with a nonzero status.
+The folder holds the built page, so `start.sh` doesn't build it. If
+`public/app.js` is missing, the script builds the page first. It prints one
+line, runs `npm ci` and `npm run build`, and then starts the server. When npm
+is missing, it prints the Node.js 26.13.1 install route and stops with a
+nonzero status.
 
 The script starts the server and opens the default browser. It prints the
 address, usually `http://127.0.0.1:55440/`. If the browser doesn't open, open
