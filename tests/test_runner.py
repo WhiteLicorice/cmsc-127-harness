@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
@@ -20,6 +23,7 @@ from psycopg import sql as psycopg_sql
 import runner
 
 from runner import compare_dataset, load_manifest, main, select_cases
+from tests.test_lint import make_root as make_starter_root
 
 
 class _TestCursor(Protocol):
@@ -3442,6 +3446,139 @@ class InvariantTests(unittest.TestCase):
 
             self.assertEqual("fail", results[0]["status"])
             self.assertIn("must be a SQL file", str(results[0]["differences"]))
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class StopSignalCleanupTests(unittest.TestCase):
+    """A stop signal during a run leaves no race database behind."""
+
+    def race_databases(self: StopSignalCleanupTests, url: str) -> set[str]:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT datname FROM pg_database "
+                    "WHERE datname LIKE 'cmsc127\\_race\\_%'"
+                )
+                return {row[0] for row in cursor.fetchall()}
+
+    def drop(self: StopSignalCleanupTests, url: str, names: set[str]) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                for name in names:
+                    cursor.execute(
+                        psycopg_sql.SQL(
+                            "DROP DATABASE IF EXISTS {} WITH (FORCE)"
+                        ).format(psycopg_sql.Identifier(name))
+                    )
+
+    def assert_signal_drops_the_database(
+        self: StopSignalCleanupTests, name: str
+    ) -> None:
+        url = os.environ["CMSC127_DATABASE_URL"]
+        before = self.race_databases(url)
+        leftover: set[str] = set()
+        output = ""
+        returncode = -1
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            # Hold the run open, so the race database lives while it is signalled.
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nsleep 10\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(runner.__file__).resolve()),
+                    "1",
+                    "--root",
+                    str(root),
+                    "--runner-dir",
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                created: set[str] = set()
+                deadline = time.monotonic() + 60
+                while not created and time.monotonic() < deadline:
+                    created = self.race_databases(url) - before
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertTrue(created, "the run made no race database")
+                process.send_signal(getattr(signal, name))
+                returncode = process.wait(timeout=60)
+                leftover = self.race_databases(url) - before
+                if process.stdout is not None:
+                    output = process.stdout.read()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    process.stdout.close()
+                self.drop(url, self.race_databases(url) - before)
+
+        self.assertEqual(set(), leftover, f"{name} exited {returncode}\n{output}")
+
+    def test_sigterm_during_a_run_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_signal_drops_the_database("SIGTERM")
+
+    def test_sighup_during_a_run_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_signal_drops_the_database("SIGHUP")
+
+
+class StopSignalHandlerTests(unittest.TestCase):
+    """The stop handlers go in before the create and come off after the drop."""
+
+    def test_hold_installs_a_handler_and_release_restores_it(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        original = signal.getsignal(signal.SIGTERM)
+        previous = runner._hold_stop_signals()  # pyright: ignore[reportPrivateUsage]
+
+        self.assertIs(runner._stop_signal, signal.getsignal(signal.SIGTERM))  # pyright: ignore[reportPrivateUsage]
+        runner._release_stop_signals(previous)  # pyright: ignore[reportPrivateUsage]
+        self.assertIs(original, signal.getsignal(signal.SIGTERM))
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
+    def test_hold_covers_sighup(self: StopSignalHandlerTests) -> None:
+        sighup = getattr(signal, "SIGHUP")
+        previous = runner._hold_stop_signals()  # pyright: ignore[reportPrivateUsage]
+        try:
+            self.assertIs(
+                runner._stop_signal,  # pyright: ignore[reportPrivateUsage]
+                signal.getsignal(sighup),
+            )
+        finally:
+            runner._release_stop_signals(previous)  # pyright: ignore[reportPrivateUsage]
+
+    def test_stop_signal_ends_the_run_through_system_exit(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            runner._stop_signal(  # pyright: ignore[reportPrivateUsage]
+                signal.SIGTERM, None
+            )
+
+        self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
 
 
 if __name__ == "__main__":
