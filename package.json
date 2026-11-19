@@ -11,6 +11,7 @@
     "test": "vitest run",
     "build": "npm run typecheck && tsc",
     "check:built": "node scripts/check-built-page.mjs",
+    "build:offline": "node scripts/build-offline.mjs",
     "smoke:browser": "node scripts/browser-smoke.mjs",
     "smoke:schema": "node scripts/schema-startup-smoke.mjs",
     "audit:contrast": "node scripts/contrast-audit.mjs"
