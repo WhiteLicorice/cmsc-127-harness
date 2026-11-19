@@ -45,11 +45,13 @@ function siteFetch(
     override?: Record<string, string>;
     httpCache?: Record<string, string>;
     markNetwork?: boolean;
+    bodies?: Record<string, string>;
+    stallBody?: boolean;
   } = {},
   manifest: unknown = manifestFor(buildId),
 ) {
   const calls: FetchCalls = [];
-  const bodies = PAGE;
+  const bodies = state.bodies ?? PAGE;
   const fetch = async (
     input: { url?: string; cache?: string } | string,
     init?: { signal?: AbortSignal },
@@ -60,10 +62,20 @@ function siteFetch(
     if (state.offline) throw new Error("network down");
     if (state.hang) {
       return await new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) reject(new Error("aborted"));
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
       });
     }
     const relative = url.href.slice(scope.length);
+    // The body stalls after the headers, as a slow server does. The first bytes
+    // arrive and the rest never does.
+    if (state.stallBody && (relative === "" || relative === "index.html")) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode("<!doctype html>"));
+        },
+      }), { headers: { "Content-Type": "text/html" } });
+    }
     if (relative === "offline-manifest.json") {
       return new Response(JSON.stringify(manifest), { headers: { "Content-Type": "application/json" } });
     }
@@ -106,8 +118,8 @@ class FakeCache {
     return this.entries.delete(cacheKey(key));
   }
 
-  async keys(): Promise<string[]> {
-    return [...this.entries.keys()];
+  async keys(): Promise<Request[]> {
+    return [...this.entries.keys()].map((key) => new Request(key));
   }
 }
 
@@ -165,6 +177,7 @@ type WorkerOptions = {
   caches?: FakeCaches;
   timers?: FakeTimers;
   source?: string;
+  clientIds?: string[];
 };
 
 function createWorker(options: WorkerOptions) {
@@ -174,6 +187,7 @@ function createWorker(options: WorkerOptions) {
   let claimed = 0;
   let skipped = 0;
   let unregistered = 0;
+  let live = [...(options.clientIds ?? [])];
   const self = {
     location: new URL(scope),
     registration: {
@@ -187,6 +201,7 @@ function createWorker(options: WorkerOptions) {
       claim: async () => {
         claimed += 1;
       },
+      matchAll: async () => live.map((id) => ({ id })),
     },
     skipWaiting: async () => {
       skipped += 1;
@@ -227,12 +242,14 @@ function createWorker(options: WorkerOptions) {
     return waits;
   }
 
-  function dispatchFetch(request: unknown): Promise<Response> | undefined {
+  function dispatchFetch(request: unknown, extra: Record<string, unknown> = {}): Promise<Response> | undefined {
     let answered: Promise<Response> | undefined;
     const listener = listeners.get("fetch");
     if (!listener) throw new Error("The worker has no fetch listener.");
     listener({
       request,
+      clientId: "",
+      ...extra,
       respondWith: (response: Promise<Response>) => {
         answered = response;
       },
@@ -255,6 +272,9 @@ function createWorker(options: WorkerOptions) {
     },
     get unregistered() {
       return unregistered;
+    },
+    setLiveClients(ids: string[]) {
+      live = [...ids];
     },
     async names(): Promise<string[]> {
       return caches.keys();
@@ -392,6 +412,25 @@ describe("offline worker requests", () => {
     await worker.install();
 
     state.hang = true;
+    const pending = worker.dispatchFetch(navigate(scope));
+    expect(pending).toBeDefined();
+    await timers.advance(3000);
+    const response = await pending;
+
+    expect(await response?.text()).toBe(PAGE["index.html"]);
+  });
+
+  it("falls back to the cached page when the body stalls after the headers", async () => {
+    // A slow server sends the headers and the first bytes, then stops. The
+    // deadline must cover the body read, not only the headers.
+    const build = "4".repeat(64);
+    const state: { stallBody?: boolean } = { stallBody: false };
+    const site = siteFetch(build, state);
+    const timers = new FakeTimers();
+    const worker = createWorker({ buildId: build, fetch: site.fetch as never, timers });
+    await worker.install();
+
+    state.stallBody = true;
     const pending = worker.dispatchFetch(navigate(scope));
     expect(pending).toBeDefined();
     await timers.advance(3000);

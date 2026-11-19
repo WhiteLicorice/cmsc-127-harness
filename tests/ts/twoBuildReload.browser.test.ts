@@ -143,8 +143,9 @@ async function waitForCache(page: Page, name: string): Promise<void> {
   throw new Error(`The snapshot ${name} never appeared.`);
 }
 
-// Activation deletes the older snapshots. A reload before it would still meet
-// the old worker, so the test waits for the deletion.
+// Activation deletes an older snapshot only when no open document reads it. A
+// reload before it would still meet the old worker, so the test waits for the
+// deletion after the older document navigates.
 async function waitForOnlyCache(page: Page, name: string): Promise<void> {
   for (let step = 0; step < 100; step += 1) {
     if ((await caches(page)).join() === name) return;
@@ -215,14 +216,26 @@ describe("two builds", () => {
     expect(await page.evaluate(() => document.getElementById("panel-a") !== null)).toBe(true);
     expect(await page.evaluate(() => document.getElementById("panel-b") !== null)).toBe(false);
 
-    // With the verified bytes, the next update installs and the next reload
-    // runs the new build.
+    // With the verified bytes, the next update installs. The A document is
+    // still open, so the A snapshot stays until that document navigates. The
+    // browser keeps the old worker in charge until the new one claims, so the
+    // test waits for the takeover before it reloads.
     corruptApp = null;
+    await page.evaluate(() => {
+      window.before = navigator.serviceWorker.controller;
+    });
     await update(page);
     const cacheB = await snapshotName(buildB);
-    await waitForOnlyCache(page, cacheB);
+    await waitForCache(page, cacheB);
+    await page.waitForFunction(
+      () => navigator.serviceWorker.controller !== window.before,
+      undefined,
+      { timeout: 15_000 },
+    );
+    expect((await caches(page)).sort()).toEqual([cacheA, cacheB].sort());
     await page.reload({ waitUntil: "load" });
     expect(await page.evaluate(() => document.body.dataset["build"])).toBe("b");
+    await waitForOnlyCache(page, cacheB);
 
     await context.close();
   }, 120_000);
