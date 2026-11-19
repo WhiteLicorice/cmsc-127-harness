@@ -1,4 +1,6 @@
+import { CONNECT_PROMPT, TOO_OLD_MESSAGE } from "../hosted.js";
 import { escapeHtml } from "./html.js";
+const LOCAL_VIEW = { hosted: false, connected: true };
 export function statusMessage(status) {
     const error = `${status.message ?? ""} ${status.error ?? ""}`.toLowerCase();
     if (error.includes("password") || error.includes("authentication")) {
@@ -16,7 +18,13 @@ function formatTime(value) {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
-export function renderStatus(status) {
+export function renderStatus(status, view = LOCAL_VIEW) {
+    if (view.hosted && view.tooOld === true) {
+        return `<p class="error-message">${escapeHtml(TOO_OLD_MESSAGE)}</p>`;
+    }
+    if (view.hosted && !view.connected) {
+        return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p><button type="button" data-action="connect">Connect</button></p>`;
+    }
     if (status.databaseStatus !== "connected") {
         return `<p class="error-message">${escapeHtml(statusMessage(status))}</p>`;
     }

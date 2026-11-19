@@ -7,8 +7,8 @@ export const TOO_OLD_MESSAGE = "This harness server is too old for the hosted pa
 export function unreachableMessage(address) {
     return `The page can't reach the harness server at ${address}. Start it, allow the browser's local network prompt, then click Connect.`;
 }
-// Server release 1 is the oldest release that answers every endpoint. A server
-// without the version field predates it and counts as older than the minimum.
+// Release 1 is the first API release that reports the version field. A server
+// without the field predates it and counts as older than the minimum.
 export const MINIMUM_API_VERSION = 1;
 export function isHostedPage(loc = typeof window === "undefined" ? undefined : window.location) {
     return loc?.origin === HOSTED_ORIGIN;

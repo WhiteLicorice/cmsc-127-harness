@@ -1,6 +1,10 @@
 import { buildFeed } from "./panels/changes.js";
+import { registerOfflineWorker } from "./offline.js";
+import { escapeHtml } from "./panels/html.js";
+import { CONNECT_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
 import { panelRegistry } from "./panelRegistry.js";
 import { selectionMatches } from "./panelRequest.js";
+import { renderStatus } from "./panels/status.js";
 function requireElement(selector) {
     const element = document.querySelector(selector);
     if (element === null) {
@@ -13,7 +17,14 @@ const panelContent = requireElement("#panel-content");
 const schemaSelect = requireElement("#schema-select");
 const connectionMessage = requireElement("#connection-message");
 const pollSummary = requireElement("#poll-summary");
-let activePanel = "tables";
+// The hosted page talks to a server on this computer, so it waits for the
+// Connect click on its Status panel. The local page was served by its server
+// and needs no click.
+const HOSTED = isHostedPage();
+const server = serverAddress();
+let connected = !HOSTED;
+let tooOld = false;
+let activePanel = HOSTED ? "status" : "tables";
 let selectedSchema = "public";
 let currentTables = null;
 let previousTables = null;
@@ -34,18 +45,35 @@ function showMessage(message, source = "panel") {
 const SERVER_UNREACHABLE = 'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.';
 function describeRequestError(error) {
     if (error instanceof TypeError) {
-        return SERVER_UNREACHABLE;
+        return HOSTED ? unreachableMessage(server ?? DEFAULT_SERVER_ADDRESS) : SERVER_UNREACHABLE;
     }
     return error instanceof Error ? error.message : SERVER_UNREACHABLE;
 }
+// A body that is not JSON means some other program answered on the port. The
+// page reports that as a server it cannot reach, so a reader never meets a
+// parser message.
+async function readJson(response) {
+    try {
+        return await response.json();
+    }
+    catch {
+        throw new TypeError("The response is not JSON.");
+    }
+}
 async function requestJson(url) {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
-    const data = await response.json();
+    const response = await fetch(apiUrl(url, server), loopbackInit(server));
+    const data = await readJson(response);
     if (!response.ok) {
         const body = data;
         throw new Error(body.message ?? "The harness request failed.");
     }
     return data;
+}
+// The version check reads the body of a failed status request too, because a
+// server with its database down still states its version.
+async function fetchStatus() {
+    const response = await fetch(apiUrl("/api/status", server), loopbackInit(server));
+    return await readJson(response);
 }
 function updateSchemas(response) {
     if (response.schemas.length === 0 || response.schema === null) {
@@ -108,6 +136,13 @@ async function drawMermaid() {
         showMessage("The schema diagram could not be drawn. Check the ERD block in the README.md of the folder you started the page in.");
     }
 }
+function statusView() {
+    const view = { hosted: HOSTED, connected };
+    if (tooOld) {
+        view.tooOld = true;
+    }
+    return view;
+}
 function renderCurrentPanel() {
     const panel = panelRegistry.find((candidate) => candidate.id === activePanel);
     if (!panel) {
@@ -115,14 +150,26 @@ function renderCurrentPanel() {
         return;
     }
     let markup;
-    if (activePanel === "tables" && currentTables) {
+    if (HOSTED && tooOld) {
+        // One plain line in the Status panel. The other panels draw nothing, so
+        // the page never shows seven empty panels against an old server.
+        markup = activePanel === "status"
+            ? `<p class="error-message">${escapeHtml(TOO_OLD_MESSAGE)}</p>`
+            : "";
+    }
+    else if (HOSTED && !connected) {
+        markup = activePanel === "status"
+            ? renderStatus({ server: "unknown", databaseStatus: "unknown" }, statusView())
+            : `<p>${escapeHtml(CONNECT_PROMPT)}</p>`;
+    }
+    else if (activePanel === "tables" && currentTables) {
         markup = panel.render(currentTables, previousTables);
     }
     else if (activePanel === "changes") {
         markup = panel.render(feed);
     }
-    else if (activePanel === "status" && statusData) {
-        markup = panel.render(statusData);
+    else if (activePanel === "status" && statusData !== null) {
+        markup = renderStatus(statusData, statusView());
     }
     else if (panelData !== null) {
         markup = panel.render(panelData);
@@ -208,6 +255,9 @@ async function pollTables() {
     }
 }
 async function refreshActivePanel() {
+    if (!connected) {
+        return;
+    }
     if (activePanel === "tables" || activePanel === "changes" || pollingPanel) {
         return;
     }
@@ -247,21 +297,64 @@ schemaSelect.addEventListener("change", () => {
     feed = [];
     panelData = null;
     renderCurrentPanel();
+    if (!connected) {
+        return;
+    }
     void pollTables();
     void refreshActivePanel();
+});
+panelContent.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.dataset["action"] !== "connect") {
+        return;
+    }
+    if (!HOSTED || connected) {
+        return;
+    }
+    connectHosted();
 });
 document.addEventListener("cmsc127:theme", () => {
     renderedMarkup = "";
     renderCurrentPanel();
 });
+function startPolling() {
+    void requestJson("/api/changes")
+        .then((data) => {
+        const settings = data;
+        pollInterval = settings.pollIntervalMs ?? 1000;
+        void pollTables();
+        void refreshActivePanel();
+        window.setInterval(() => void pollTables(), pollInterval);
+        window.setInterval(() => void refreshActivePanel(), pollInterval);
+    })
+        .catch((error) => showMessage(describeRequestError(error)));
+}
+// The hosted page checks the server release before it polls, so an old server
+// draws one plain line instead of seven empty panels.
+function connectHosted() {
+    void fetchStatus()
+        .then((data) => {
+        if (versionSupported(data)) {
+            connected = true;
+            statusData = null;
+            panelData = null;
+            startPolling();
+        }
+        else {
+            tooOld = true;
+        }
+    })
+        .catch((error) => showMessage(describeRequestError(error)))
+        .finally(() => {
+        renderedMarkup = "";
+        renderCurrentPanel();
+    });
+}
+registerOfflineWorker();
 buildPanelButtons();
-void requestJson("/api/changes")
-    .then((data) => {
-    const settings = data;
-    pollInterval = settings.pollIntervalMs ?? 1000;
-    void pollTables();
-    void refreshActivePanel();
-    window.setInterval(() => void pollTables(), pollInterval);
-    window.setInterval(() => void refreshActivePanel(), pollInterval);
-})
-    .catch(() => showMessage(SERVER_UNREACHABLE));
+if (HOSTED) {
+    renderCurrentPanel();
+}
+else {
+    startPolling();
+}
