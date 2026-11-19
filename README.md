@@ -113,8 +113,8 @@ The page reads the server at `http://127.0.0.1:55440`. When the server prints
 another port, add it to the link as `?port=`, for example
 <https://whitelicorice.github.io/cmsc-127-harness/?port=55441>.
 
-One load of the hosted page with the network on is enough. After that load, it
-opens with the network off and still reaches your server.
+The page works offline after the Status panel shows "Saved for offline use."
+Check for it before you go offline.
 
 The hosted page requires harness server v1.33 or later. For an earlier release,
 open the local address that the server prints.

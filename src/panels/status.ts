@@ -1,4 +1,5 @@
 import { CONNECT_PROMPT, TOO_OLD_MESSAGE } from "../hosted.js";
+import { OFFLINE_SAVED } from "../offline.js";
 import { escapeHtml } from "./html.js";
 
 export type StatusData = {
@@ -13,10 +14,13 @@ export type StatusData = {
 
 // The hosted page adds a Connect control and refuses a server that is older
 // than the oldest release it can read. The local page never draws either.
+// `saved` marks a complete offline snapshot. Only that state shows the offline
+// line, so the page never promises a copy that is not there.
 export type StatusView = {
   hosted: boolean;
   connected: boolean;
   tooOld?: boolean;
+  saved?: boolean;
 };
 
 const LOCAL_VIEW: StatusView = { hosted: false, connected: true };
@@ -44,11 +48,16 @@ export function renderStatus(status: StatusData, view: StatusView = LOCAL_VIEW):
   if (view.hosted && view.tooOld === true) {
     return `<p class="error-message">${escapeHtml(TOO_OLD_MESSAGE)}</p>`;
   }
+  // The offline line follows the verified snapshot, so it appears with the
+  // Connect prompt and stays after Connect.
+  const saved = view.hosted && view.saved === true
+    ? `<p class="offline-saved">${escapeHtml(OFFLINE_SAVED)}</p>`
+    : "";
   if (view.hosted && !view.connected) {
-    return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p><button type="button" data-action="connect">Connect</button></p>`;
+    return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p><button type="button" data-action="connect">Connect</button></p>${saved}`;
   }
   if (status.databaseStatus !== "connected") {
-    return `<p class="error-message">${escapeHtml(statusMessage(status))}</p>`;
+    return `<p class="error-message">${escapeHtml(statusMessage(status))}</p>${saved}`;
   }
-  return `<dl><dt>Server</dt><dd>${escapeHtml(status.server)}</dd><dt>Database</dt><dd>${escapeHtml(status.database ?? "unknown")}</dd><dt>Role</dt><dd>${escapeHtml(status.role ?? "unknown")}</dd><dt>Last poll</dt><dd>${escapeHtml(formatTime(status.lastPoll))}</dd></dl>`;
+  return `<dl><dt>Server</dt><dd>${escapeHtml(status.server)}</dd><dt>Database</dt><dd>${escapeHtml(status.database ?? "unknown")}</dd><dt>Role</dt><dd>${escapeHtml(status.role ?? "unknown")}</dd><dt>Last poll</dt><dd>${escapeHtml(formatTime(status.lastPoll))}</dd></dl>${saved}`;
 }

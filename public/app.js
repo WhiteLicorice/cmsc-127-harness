@@ -1,5 +1,5 @@
 import { buildFeed } from "./panels/changes.js";
-import { registerOfflineWorker } from "./offline.js";
+import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
 import { escapeHtml } from "./panels/html.js";
 import { CONNECT_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
 import { panelRegistry } from "./panelRegistry.js";
@@ -24,6 +24,9 @@ const HOSTED = isHostedPage();
 const server = serverAddress();
 let connected = !HOSTED;
 let tooOld = false;
+// True only after a complete snapshot is in the browser cache. The Status panel
+// shows the offline line from this value alone.
+let saved = false;
 let activePanel = HOSTED ? "status" : "tables";
 let selectedSchema = "public";
 let currentTables = null;
@@ -137,7 +140,7 @@ async function drawMermaid() {
     }
 }
 function statusView() {
-    const view = { hosted: HOSTED, connected };
+    const view = { hosted: HOSTED, connected, saved };
     if (tooOld) {
         view.tooOld = true;
     }
@@ -351,6 +354,11 @@ function connectHosted() {
     });
 }
 registerOfflineWorker();
+watchOfflineSave(() => {
+    saved = true;
+    renderedMarkup = "";
+    renderCurrentPanel();
+});
 buildPanelButtons();
 if (HOSTED) {
     renderCurrentPanel();

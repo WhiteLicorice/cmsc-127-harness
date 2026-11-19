@@ -116,4 +116,16 @@ describe("status panel connect control", () => {
     );
     expect(markup).not.toContain(">Connect</button>");
   });
+
+  it("shows the offline line only after a verified snapshot", async () => {
+    const { renderStatus } = await import("../../src/panels/status.js");
+    const status = { server: "running", databaseStatus: "connected" } as const;
+    const before = renderStatus(status, { hosted: true, connected: false });
+    const after = renderStatus(status, { hosted: true, connected: false, saved: true });
+    const local = renderStatus(status, { hosted: false, connected: true, saved: true });
+
+    expect(before).not.toContain("Saved for offline use.");
+    expect(after).toContain("Saved for offline use.");
+    expect(local).not.toContain("Saved for offline use.");
+  });
 });
