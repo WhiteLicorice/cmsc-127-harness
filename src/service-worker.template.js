@@ -12,6 +12,7 @@
 const OFFLINE_BUILD_ID = "__OFFLINE_BUILD_ID__";
 const SNAPSHOT_PREFIX = "cmsc127-harness-";
 const CLIENT_PATH = "__client__/";
+const BUILDING_PATH = "__building__";
 const MANIFEST_PATH = "offline-manifest.json";
 const PAGE_PATH = "index.html";
 const SCHEMA_VERSION = 1;
@@ -20,6 +21,12 @@ const NAVIGATION_TIMEOUT = 3000;
 // Until that document appears in the client list, the record holds its snapshot
 // for this long. The grace also covers a replaced document that has not closed.
 const CLIENT_GRACE = 10_000;
+// An install marks its own snapshot while it fills it. The mark carries the
+// time of the last write. A cleanup in another worker keeps a snapshot with a
+// fresh mark, so a reload cannot remove a download in progress. The mark stays
+// until the new worker activates, which covers the takeover wait. A mark older
+// than this limit belongs to an install that stopped, so its snapshot can go.
+const BUILDING_LIMIT = 600_000;
 
 function snapshotCacheName(buildId = OFFLINE_BUILD_ID) {
   return `${SNAPSHOT_PREFIX}${buildId}`;
@@ -99,6 +106,12 @@ async function installSnapshot() {
   const existed = (await caches.keys()).includes(cacheName);
   const cache = await caches.open(cacheName);
   try {
+    // An active worker can run its cleanup while this install works. The
+    // cleanup must then keep this snapshot. Write the record first, so the
+    // cleanup can see that an install still fills the snapshot. The record
+    // stays until this worker activates, which covers the wait before the
+    // takeover.
+    await cache.put(requestFor(scoped(BUILDING_PATH)), new Response(String(Date.now())));
     const manifest = await readManifest();
     if (await snapshotIsComplete(cache, manifest)) {
       await self.skipWaiting();
@@ -117,6 +130,9 @@ async function installSnapshot() {
         throw new Error(`Offline file hash does not match: ${entry.path}`);
       }
       fetched.push({ url, response });
+      // Keep the record fresh for a long download. A cleanup in another worker
+      // then still sees an install at work.
+      await cache.put(requestFor(scoped(BUILDING_PATH)), new Response(String(Date.now())));
     }
 
     for (const file of fetched) {
@@ -128,9 +144,23 @@ async function installSnapshot() {
     }));
     await self.skipWaiting();
   } catch (error) {
-    // Keep the active snapshot. Remove only a snapshot this install created.
-    if (!existed) await caches.delete(cacheName).catch(() => undefined);
+    // This install holds no snapshot now. Clear its record, then remove a
+    // snapshot that no document can read. The active snapshot stays.
+    await cache.delete(requestFor(scoped(BUILDING_PATH))).catch(() => undefined);
+    if (!existed || !(await holdsManifest(cache))) {
+      await caches.delete(cacheName).catch(() => undefined);
+    }
     throw error;
+  }
+}
+
+// True when the snapshot carries its manifest. A snapshot without one never
+// answered a document, so its removal costs no open page.
+async function holdsManifest(cache) {
+  try {
+    return (await cache.match(requestFor(scoped(MANIFEST_PATH)))) !== undefined;
+  } catch {
+    return false;
   }
 }
 
@@ -216,9 +246,11 @@ async function adoptClients() {
   }
 }
 
-// Delete an older snapshot only when no open document names it. A record for a
-// client that is gone stays for the grace period, because the navigation that
-// wrote it may still be in flight.
+// Delete an older snapshot only when no open document names it, and only when
+// the snapshot belongs to a retired build. A record for a client that is gone
+// stays for the grace period, because the navigation that wrote it may still be
+// in flight. A snapshot with a fresh building record is still being filled, and
+// it stays too.
 async function deleteUnusedSnapshots() {
   const current = snapshotCacheName();
   const keep = new Set([current]);
@@ -228,19 +260,27 @@ async function deleteUnusedSnapshots() {
     for (const name of await caches.keys()) {
       if (buildOf(name) === null) continue;
       const cache = await caches.open(name);
-      let held = false;
-      for (const request of await cache.keys()) {
-        const clientId = clientIdOf(request.url);
-        if (clientId === "") continue;
-        const record = await cache.match(request);
-        const stamp = Number((record ? await record.text() : "").trim().split(" ")[1] ?? 0);
-        if (live.has(clientId) || now - stamp < CLIENT_GRACE) {
-          held = true;
-          continue;
-        }
-        await cache.delete(request);
+      if (name === current) {
+        // The current snapshot answers files. Its records still age out.
+        await pruneClientRecords(cache, live, now);
+        continue;
       }
-      if (held) keep.add(name);
+      // An install in another worker fills this snapshot. Its own activation
+      // clears the record, so a fresh record means the build is not retired.
+      if (await buildingNow(cache, now)) {
+        keep.add(name);
+        continue;
+      }
+      // An install opens its snapshot before it writes the record. An empty
+      // snapshot is that moment, or a cheap leftover, so it stays.
+      if (await isEmpty(cache)) {
+        keep.add(name);
+        continue;
+      }
+      // A snapshot with files and no manifest is an install that stopped. No
+      // document can read it.
+      if (!(await holdsManifest(cache))) continue;
+      if (await pruneClientRecords(cache, live, now)) keep.add(name);
     }
   } catch {
     // A client list can fail. Keep the older snapshots rather than risk a
@@ -250,6 +290,48 @@ async function deleteUnusedSnapshots() {
   await Promise.all((await caches.keys())
     .filter((name) => buildOf(name) !== null && !keep.has(name))
     .map((name) => caches.delete(name)));
+}
+
+async function isEmpty(cache) {
+  try {
+    return (await cache.keys()).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+// True when an install wrote its building record less than BUILDING_LIMIT ago.
+async function buildingNow(cache, now) {
+  let record;
+  try {
+    record = await cache.match(requestFor(scoped(BUILDING_PATH)));
+  } catch {
+    return true;
+  }
+  if (!record) return false;
+  const stamp = Number(await record.text());
+  // A record that cannot be read still marks an install. Keep the snapshot
+  // rather than risk the snapshot of a running install.
+  if (!Number.isFinite(stamp)) return true;
+  return now - stamp < BUILDING_LIMIT;
+}
+
+// Drop the records of documents that are gone. True when one record still
+// belongs to a live document or sits inside its grace period.
+async function pruneClientRecords(cache, live, now) {
+  let held = false;
+  for (const request of await cache.keys()) {
+    const clientId = clientIdOf(request.url);
+    if (clientId === "") continue;
+    const record = await cache.match(request);
+    const stamp = Number((record ? await record.text() : "").trim().split(" ")[1] ?? 0);
+    if (live.has(clientId) || now - stamp < CLIENT_GRACE) {
+      held = true;
+      continue;
+    }
+    await cache.delete(request);
+  }
+  return held;
 }
 
 function offlineResponse(status, text) {
@@ -371,11 +453,25 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
+    // Record the open documents first. The building record then goes, and a
+    // cleanup in the replaced worker keeps the snapshot through those records.
     await adoptClients();
+    await clearBuildingRecord();
     await deleteUnusedSnapshots();
     await self.clients.claim();
   })());
 });
+
+// This worker owns the snapshot now, so the record that marked it as filling
+// has no further use. A cleanup after this point never waits on it.
+async function clearBuildingRecord() {
+  try {
+    const cache = await existingSnapshot();
+    await cache?.delete(requestFor(scoped(BUILDING_PATH)));
+  } catch {
+    // A failed delete leaves a record that ages out at BUILDING_LIMIT.
+  }
+}
 
 self.addEventListener("fetch", (event) => {
   const { request } = event;

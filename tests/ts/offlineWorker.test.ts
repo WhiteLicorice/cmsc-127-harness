@@ -47,6 +47,8 @@ function siteFetch(
     markNetwork?: boolean;
     bodies?: Record<string, string>;
     stallBody?: boolean;
+    hangPath?: string;
+    resume?: () => void;
   } = {},
   manifest: unknown = manifestFor(buildId),
 ) {
@@ -67,6 +69,12 @@ function siteFetch(
       });
     }
     const relative = url.href.slice(scope.length);
+    // A held file keeps the install inside its download window.
+    if (state.hangPath !== undefined && relative === state.hangPath) {
+      await new Promise<void>((resume) => {
+        state.resume = resume;
+      });
+    }
     // The body stalls after the headers, as a slow server does. The first bytes
     // arrive and the rest never does.
     if (state.stallBody && (relative === "" || relative === "index.html")) {
@@ -93,7 +101,7 @@ function siteFetch(
     if (state.markNetwork) headers["X-Answer"] = "network";
     return new Response(body, { headers });
   };
-  return { fetch, calls };
+  return { fetch, calls, state };
 }
 
 function cacheKey(key: string | { url: string }): string {
@@ -371,6 +379,74 @@ describe("offline worker activation", () => {
 
     expect((await worker.names()).sort()).toEqual([`cmsc127-harness-${build}`, "ren-courses-offline-old"].sort());
     expect(worker.claimed).toBe(1);
+  });
+
+  it("keeps a snapshot that another install still fills", async () => {
+    // A reload runs the active worker's cleanup while a new build downloads.
+    // The new snapshot carries a fresh building record, so the cleanup keeps it.
+    const active = "e".repeat(64);
+    const next = "f".repeat(64);
+    const caches = new FakeCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+
+    const site = siteFetch(next, { hangPath: "index.html" });
+    const worker = createWorker({ buildId: next, fetch: site.fetch as never, caches });
+    const installing = worker.install();
+    // Wait for the install to write its record and reach the held file.
+    for (let turn = 0; turn < 200 && site.state.resume === undefined; turn += 1) await flush();
+    expect(site.state.resume).toBeDefined();
+
+    await first.activate();
+
+    expect(await first.names()).toContain(`cmsc127-harness-${next}`);
+    site.state.resume?.();
+    await installing;
+    expect(await first.names()).toContain(`cmsc127-harness-${next}`);
+  });
+
+  it("deletes a snapshot whose building record is stale", async () => {
+    // An install that stopped leaves its record behind. The limit ages it out,
+    // so a later cleanup can still remove the half-filled snapshot.
+    const active = "a".repeat(64);
+    const stale = "b".repeat(64);
+    const caches = new FakeCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+    const half = await caches.open(`cmsc127-harness-${stale}`);
+    await half.put(`${scope}__building__`, new Response(String(Date.now() - 7_200_000)));
+
+    await first.activate();
+
+    expect(await first.names()).toEqual([`cmsc127-harness-${active}`]);
+  });
+
+  it("removes a snapshot that carries no manifest and no building record", async () => {
+    const active = "c".repeat(64);
+    const empty = "d".repeat(64);
+    const caches = new FakeCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+    await (await caches.open(`cmsc127-harness-${empty}`)).put(`${scope}app.js`, new Response("part"));
+
+    await first.activate();
+
+    expect(await first.names()).toEqual([`cmsc127-harness-${active}`]);
+  });
+
+  it("keeps an empty snapshot that an install has just opened", async () => {
+    // The install opens its cache before it can write the building record. A
+    // cleanup in that window must not delete the snapshot the install holds.
+    const active = "1".repeat(64);
+    const opening = "2".repeat(64);
+    const caches = new FakeCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+    await caches.open(`cmsc127-harness-${opening}`);
+
+    await first.activate();
+
+    expect(await first.names()).toContain(`cmsc127-harness-${opening}`);
   });
 });
 
