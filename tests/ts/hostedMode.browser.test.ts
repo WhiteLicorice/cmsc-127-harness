@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
@@ -55,6 +57,19 @@ let server: Server;
 let browser: Browser;
 let baseUrl = "";
 
+// The page under test is the compiled one. A workflow runs the tests before
+// the build, so compile the page here when it is absent.
+function ensureBuilt(): void {
+  if (existsSync(resolve(publicRoot, "app.js"))) {
+    return;
+  }
+  const compiler = resolve(root, "node_modules", "typescript", "bin", "tsc");
+  const built = spawnSync(process.execPath, [compiler, "-p", root], { stdio: "inherit" });
+  if (built.status !== 0) {
+    throw new Error("The page did not compile.");
+  }
+}
+
 async function fulfilPage(route: import("playwright").Route, url: string): Promise<void> {
   const file = await pageFile(new URL(url).pathname);
   if (file === null) {
@@ -65,6 +80,7 @@ async function fulfilPage(route: import("playwright").Route, url: string): Promi
 }
 
 beforeAll(async () => {
+  ensureBuilt();
   server = createServer((request, response) => {
     void pageFile(request.url ?? "/").then((file) => {
       if (file === null) {
