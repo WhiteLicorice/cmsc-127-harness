@@ -1,0 +1,267 @@
+import { buildFeed } from "./panels/changes.js";
+import { panelRegistry } from "./panelRegistry.js";
+import { selectionMatches } from "./panelRequest.js";
+function requireElement(selector) {
+    const element = document.querySelector(selector);
+    if (element === null) {
+        throw new Error("The harness page is missing a required element.");
+    }
+    return element;
+}
+const panelButtons = requireElement("#panels");
+const panelContent = requireElement("#panel-content");
+const schemaSelect = requireElement("#schema-select");
+const connectionMessage = requireElement("#connection-message");
+const pollSummary = requireElement("#poll-summary");
+let activePanel = "tables";
+let selectedSchema = "public";
+let currentTables = null;
+let previousTables = null;
+let feed = [];
+let panelData = null;
+let statusData = null;
+let pollInterval = 1000;
+let pollingTables = false;
+let pollingPanel = false;
+let renderedMarkup = "";
+const requestMessages = { tables: "", panel: "" };
+function showMessage(message, source = "panel") {
+    requestMessages[source] = message;
+    const visibleMessage = requestMessages.panel || requestMessages.tables;
+    connectionMessage.textContent = visibleMessage;
+    connectionMessage.hidden = visibleMessage.length === 0;
+}
+const SERVER_UNREACHABLE = 'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.';
+function describeRequestError(error) {
+    if (error instanceof TypeError) {
+        return SERVER_UNREACHABLE;
+    }
+    return error instanceof Error ? error.message : SERVER_UNREACHABLE;
+}
+async function requestJson(url) {
+    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    const data = await response.json();
+    if (!response.ok) {
+        const body = data;
+        throw new Error(body.message ?? "The harness request failed.");
+    }
+    return data;
+}
+function updateSchemas(response) {
+    if (response.schemas.length === 0 || response.schema === null) {
+        schemaSelect.replaceChildren();
+        schemaSelect.disabled = true;
+        return;
+    }
+    schemaSelect.disabled = false;
+    selectedSchema = response.schema;
+    const options = response.schemas.map((schema) => {
+        const option = document.createElement("option");
+        option.value = schema;
+        option.textContent = schema;
+        option.selected = schema === selectedSchema;
+        return option;
+    });
+    schemaSelect.replaceChildren(...options);
+}
+function configureMermaid() {
+    if (!window.mermaid) {
+        return;
+    }
+    const styles = getComputedStyle(document.documentElement);
+    const token = (name) => styles.getPropertyValue(name).trim();
+    const dark = styles.colorScheme === "dark";
+    window.mermaid.initialize({
+        startOnLoad: false,
+        theme: "base",
+        themeVariables: {
+            darkMode: dark,
+            background: token("--surface"),
+            primaryColor: token("--surface-2"),
+            primaryTextColor: token("--text"),
+            primaryBorderColor: token("--border"),
+            secondaryColor: token("--surface"),
+            tertiaryColor: token("--code-bg"),
+            mainBkg: token("--surface-2"),
+            nodeBorder: token("--border"),
+            // The ER renderer reads rowOdd and rowEven for the attribute rows. It
+            // ignores attributeBackgroundColorOdd and attributeBackgroundColorEven.
+            rowOdd: token("--surface"),
+            rowEven: token("--surface-2"),
+            lineColor: token("--border"),
+            textColor: token("--text"),
+            titleColor: token("--text"),
+            edgeLabelBackground: token("--surface"),
+            fontFamily: styles.fontFamily,
+        },
+    });
+}
+async function drawMermaid() {
+    if (!window.mermaid) {
+        return;
+    }
+    configureMermaid();
+    try {
+        await window.mermaid.run({ querySelector: ".mermaid" });
+    }
+    catch {
+        showMessage("The schema diagram could not be drawn. Check the ERD block in the README.md of the folder you started the page in.");
+    }
+}
+function renderCurrentPanel() {
+    const panel = panelRegistry.find((candidate) => candidate.id === activePanel);
+    if (!panel) {
+        showMessage("The selected panel is not available.");
+        return;
+    }
+    let markup;
+    if (activePanel === "tables" && currentTables) {
+        markup = panel.render(currentTables, previousTables);
+    }
+    else if (activePanel === "changes") {
+        markup = panel.render(feed);
+    }
+    else if (activePanel === "status" && statusData) {
+        markup = panel.render(statusData);
+    }
+    else if (panelData !== null) {
+        markup = panel.render(panelData);
+    }
+    else {
+        markup = "<p>Loading…</p>";
+    }
+    if (markup === renderedMarkup && panelContent.dataset["panel"] === activePanel) {
+        return;
+    }
+    const samePanel = panelContent.dataset["panel"] === activePanel;
+    const scrollState = samePanel
+        ? [...panelContent.querySelectorAll(".table-scroll")].map((node) => ({
+            left: node.scrollLeft, top: node.scrollTop, focused: node === document.activeElement,
+        }))
+        : [];
+    renderedMarkup = markup;
+    panelContent.dataset["panel"] = activePanel;
+    panelContent.innerHTML = markup;
+    panelContent.querySelectorAll(".table-scroll").forEach((node, index) => {
+        const saved = scrollState[index];
+        if (saved) {
+            node.scrollLeft = saved.left;
+            node.scrollTop = saved.top;
+            if (saved.focused)
+                node.focus({ preventScroll: true });
+        }
+    });
+    void drawMermaid();
+}
+function buildPanelButtons() {
+    const buttons = panelRegistry.map((panel) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = panel.title;
+        button.dataset["panel"] = panel.id;
+        button.setAttribute("aria-pressed", String(panel.id === activePanel));
+        button.addEventListener("click", () => {
+            activePanel = panel.id;
+            panelData = null;
+            showMessage("");
+            panelButtons.querySelectorAll("button").forEach((item) => {
+                item.setAttribute("aria-pressed", String(item.dataset["panel"] === activePanel));
+            });
+            renderCurrentPanel();
+            void refreshActivePanel();
+        });
+        return button;
+    });
+    panelButtons.replaceChildren(...buttons);
+}
+async function pollTables() {
+    if (pollingTables) {
+        return;
+    }
+    pollingTables = true;
+    const requestedSchema = selectedSchema;
+    try {
+        const response = await requestJson(`/api/tables?schema=${encodeURIComponent(requestedSchema)}`);
+        if (requestedSchema !== selectedSchema) {
+            return;
+        }
+        updateSchemas(response);
+        previousTables = currentTables;
+        currentTables = response;
+        const now = new Date();
+        if (previousTables) {
+            feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now.toISOString())].slice(-100);
+        }
+        pollSummary.textContent = `Last table poll: ${now.toLocaleTimeString()}.`;
+        showMessage(response.message ?? "", "tables");
+        if (activePanel === "tables" || activePanel === "changes") {
+            renderCurrentPanel();
+        }
+    }
+    catch (error) {
+        if (requestedSchema === selectedSchema) {
+            showMessage(describeRequestError(error), "tables");
+        }
+    }
+    finally {
+        pollingTables = false;
+    }
+}
+async function refreshActivePanel() {
+    if (activePanel === "tables" || activePanel === "changes" || pollingPanel) {
+        return;
+    }
+    const panel = panelRegistry.find((candidate) => candidate.id === activePanel);
+    if (!panel) {
+        return;
+    }
+    const requestedPanel = activePanel;
+    const requestedSchema = selectedSchema;
+    pollingPanel = true;
+    try {
+        const response = await requestJson(panel.endpoint(requestedSchema));
+        if (!selectionMatches(requestedPanel, activePanel, requestedSchema, selectedSchema)) {
+            return;
+        }
+        panelData = response;
+        if (requestedPanel === "status") {
+            statusData = panelData;
+        }
+        showMessage("");
+        renderCurrentPanel();
+    }
+    catch (error) {
+        if (selectionMatches(requestedPanel, activePanel, requestedSchema, selectedSchema)) {
+            panelData = null;
+            showMessage(describeRequestError(error));
+        }
+    }
+    finally {
+        pollingPanel = false;
+    }
+}
+schemaSelect.addEventListener("change", () => {
+    selectedSchema = schemaSelect.value;
+    previousTables = null;
+    currentTables = null;
+    feed = [];
+    panelData = null;
+    renderCurrentPanel();
+    void pollTables();
+    void refreshActivePanel();
+});
+document.addEventListener("cmsc127:theme", () => {
+    renderedMarkup = "";
+    renderCurrentPanel();
+});
+buildPanelButtons();
+void requestJson("/api/changes")
+    .then((data) => {
+    const settings = data;
+    pollInterval = settings.pollIntervalMs ?? 1000;
+    void pollTables();
+    void refreshActivePanel();
+    window.setInterval(() => void pollTables(), pollInterval);
+    window.setInterval(() => void refreshActivePanel(), pollInterval);
+})
+    .catch(() => showMessage(SERVER_UNREACHABLE));

@@ -27,8 +27,8 @@ npm run build
 
 `npm ci` installs the exact package versions in `package-lock.json`.
 `npm run build` runs the strict type check and compiles `src/` into `public/`.
-The compiled files land beside `index.html`. Git leaves them out of the
-repository, so the first `start.sh` run builds them.
+The compiled files land beside `index.html`. The repository tracks them, so a
+student needs no Node.js. Commit the built files with each source change.
 
 The page loads `/app.js`, `/style.css`, and `/vendor/mermaid.min.js`. The server
 serves `public/` as the asset root. The page needs no network because the
@@ -96,10 +96,13 @@ python -m unittest discover --start-directory tests --top-level-directory . --ve
 ```
 
 Run `python -m pyright` from the repository root to check the Python files. Run
-`npm test` to run the page tests.
+`npm test` to run the page tests. Run `npm run check:built` to prove that the
+page in `public/` matches a fresh build of `src/`. The check compiles `src/`
+into a scratch folder and compares each file, so a stale `app.js` fails it. Run
+`npm run build` and commit `public/` when it fails.
 
-`start.sh` builds the page on the first run, when `public/app.js` is missing.
-A student runs no build step.
+`start.sh` skips the build when `public/app.js` is present. A student runs no
+build step. A clean clone carries the built page.
 
 The browser checks need a disposable database. `npm run smoke:browser` creates
 a `public.smoke_student` table, loads the page in Chromium without a window,

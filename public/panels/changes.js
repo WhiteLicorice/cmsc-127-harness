@@ -1,0 +1,28 @@
+import { escapeHtml } from "./html.js";
+import { compareRows } from "./tables.js";
+export function buildFeed(previous, current, observedAt) {
+    const oldTables = new Map(previous.map((table) => [table.table, table]));
+    const newTables = new Map(current.map((table) => [table.table, table]));
+    const names = [...new Set([...oldTables.keys(), ...newTables.keys()])].sort();
+    const events = [];
+    for (const name of names) {
+        const oldTable = oldTables.get(name) ?? { table: name, primaryKey: [], rows: [] };
+        const newTable = newTables.get(name) ?? { table: name, primaryKey: oldTable.primaryKey, rows: [] };
+        for (const change of compareRows(oldTable, newTable)) {
+            events.push({ time: observedAt, table: name, kind: change.kind, key: change.key });
+        }
+    }
+    return orderFeed(events);
+}
+export function orderFeed(events) {
+    return [...events].sort((left, right) => left.time.localeCompare(right.time) || left.table.localeCompare(right.table) || left.key.localeCompare(right.key));
+}
+export function renderChangeFeed(events) {
+    if (events.length === 0) {
+        return "<p>No changes observed yet. The page checks once per second.</p>";
+    }
+    const rows = orderFeed(events)
+        .map((event) => `<tr><td>${escapeHtml(new Date(event.time).toLocaleTimeString())}</td><td>${escapeHtml(event.table)}</td><td>${escapeHtml(event.kind)}</td><td><code>${escapeHtml(event.key)}</code></td></tr>`)
+        .join("");
+    return `<p>Changes come from the one-second table polls. The feed keeps the last 100 changes.</p><div class="table-scroll" tabindex="0"><table><thead><tr><th>Time</th><th>Table</th><th>Change</th><th>Key</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
