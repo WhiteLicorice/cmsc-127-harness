@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "npm run typecheck && tsc",
+    "build:offline": "node scripts/build-offline.mjs",
     "smoke:browser": "node scripts/browser-smoke.mjs",
     "smoke:schema": "node scripts/schema-startup-smoke.mjs",
     "audit:contrast": "node scripts/contrast-audit.mjs"
