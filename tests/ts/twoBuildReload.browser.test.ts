@@ -12,8 +12,30 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const root = resolve(import.meta.dirname, "../..");
 const fixtureRoot = resolve(root, ".vitest/two-build");
 
-// The page tests bind port 0 on loopback, so two lanes never collide. The test
-// records the port it took in its own output.
+// The lane owns ports 55503 to 55505. The test tries them in order. It fails
+// if all three are busy, so it never leaves the lane.
+const LANE_PORTS = [55503, 55504, 55505];
+
+async function listenOnLanePort(target: Server): Promise<number> {
+  for (const port of LANE_PORTS) {
+    const taken = await new Promise<boolean>((ready) => {
+      const failed = (error: NodeJS.ErrnoException) => {
+        target.off("listening", listened);
+        ready(error.code === "EADDRINUSE");
+      };
+      const listened = () => {
+        target.off("error", failed);
+        ready(false);
+      };
+      target.once("error", failed);
+      target.once("listening", listened);
+      target.listen(port, "127.0.0.1");
+    });
+    if (!taken) return port;
+  }
+  throw new Error(`The two-build test server found no free port in ${LANE_PORTS.join(", ")}.`);
+}
+
 const TYPES: Record<string, string> = {
   ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
 };
@@ -99,12 +121,8 @@ beforeAll(async () => {
       },
     );
   });
-  await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    throw new Error("The two-build test server did not bind to a port.");
-  }
-  origin = `http://127.0.0.1:${address.port}`;
+  const port = await listenOnLanePort(server);
+  origin = `http://127.0.0.1:${port}`;
   browser = await chromium.launch({ headless: true });
 }, 60_000);
 
