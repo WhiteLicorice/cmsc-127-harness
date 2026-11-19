@@ -160,6 +160,24 @@ async function update(page: Page): Promise<void> {
   });
 }
 
+// A rejected install may still run when `update()` resolves. The install opens
+// its cache before it checks a hash, so the cache list shows two names until
+// the failure deletes the new one. Wait for a settled state twice in a row.
+async function waitForRejectedUpdate(page: Page, keep: string): Promise<void> {
+  let settled = 0;
+  for (let step = 0; step < 150; step += 1) {
+    const busy = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      return registration?.installing !== null || registration?.waiting !== null;
+    });
+    const names = await caches(page);
+    settled = !busy && names.length === 1 && names[0] === keep ? settled + 1 : 0;
+    if (settled >= 2) return;
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`The rejected update did not settle on ${keep}.`);
+}
+
 describe("two builds", () => {
   it("serves the active page after a rejected update", async () => {
     const errors: string[] = [];
@@ -185,10 +203,7 @@ describe("two builds", () => {
     served = buildB;
     corruptApp = `${APP_B}\n// one byte the manifest does not name\n`;
     await update(page);
-    for (let step = 0; step < 100; step += 1) {
-      if ((await caches(page)).length === 1) break;
-      await page.waitForTimeout(100);
-    }
+    await waitForRejectedUpdate(page, cacheA);
     expect(await caches(page)).toEqual([cacheA]);
 
     // A real reload meets the build B document from the network, and the worker
