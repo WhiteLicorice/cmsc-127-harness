@@ -6,6 +6,7 @@ import argparse
 from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+import ctypes
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import TracebackType
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -57,6 +59,10 @@ INVARIANT_KINDS = {
 CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
+CONSOLE_EVENTS = frozenset({2, 5, 6})  # close, logoff, shutdown
+CONSOLE_WAIT_SECONDS = 3.0
+CONSOLE_GRACE_SECONDS = 1.2
+CONSOLE_RETRY_SECONDS = 0.2
 FEATURE_PATTERNS = {
     "left_join": re.compile(
         r"\b(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE
@@ -1462,15 +1468,20 @@ def _create_database(
     The guard stays latched after this call returns. The caller unlatches it
     only after it owns the name and the connection, so a signal in this
     section cannot arrive before cleanup can drop the database.
+
+    The guard keeps the new name before this call returns, so a console close
+    in the next line finds the database to drop.
     """
     guard.latch()
     name = f"cmsc127_race_{uuid4().hex}"
+    guard.protect(name, base_url)
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
     try:
         with admin.cursor() as cursor:
             _execute(cursor, f"CREATE DATABASE {_quote_identifier(name)}")
     except BaseException:
         admin.close()
+        guard.release()
         raise
     return name, admin
 
@@ -1484,7 +1495,7 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
 
 
 class _StopGuard:
-    """Turn SIGTERM and SIGHUP into SystemExit, except during cleanup.
+    """Turn a stop request into a dropped database, except during cleanup.
 
     Python ends the process on SIGTERM and SIGHUP with no handler installed,
     so the run's finally block never drops its database. The guard installs
@@ -1495,12 +1506,20 @@ class _StopGuard:
     signal after cleanup, and the exit code still names the signal.
 
     Windows has no SIGHUP, so install names only the signals the platform has.
+    A console close on Windows is not a Python signal: Windows ends the process
+    about 5 s after CTRL_CLOSE_EVENT, and no finally block runs. The guard also
+    registers a console control handler that drops the protected database
+    itself, then lets the default handler end the process.
     """
 
     def __init__(self) -> None:
         self.previous: dict[int, Any] = {}
         self.pending: int | None = None
         self.latched = False
+        self.console_url: str | None = None
+        self.console_name: str | None = None
+        self.console_api: Any = None
+        self.console_handler: Any = None
 
     def handle(self, signum: int, frame: object) -> None:
         # Record the first signal before the raise. A later signal that arrives
@@ -1515,6 +1534,98 @@ class _StopGuard:
         self.latched = True
         raise SystemExit(128 + signum)
 
+    def protect(self, name: str, base_url: str) -> None:
+        """Keep the scratch database name, so a console close can drop it.
+
+        Call this before the create returns. A close handler that runs after
+        the create but before the caller owns the name would leak it otherwise.
+        """
+        self.console_url = base_url
+        self.console_name = name
+
+    def release(self) -> None:
+        """Forget the scratch database. Call this when its create failed."""
+        self.console_name = None
+
+    def drop(self, name: str, admin: _DbConnection) -> None:
+        """Drop the scratch database on the run's own path.
+
+        The name stays protected until the drop returns, so a console close
+        during the drop runs its own DROP DATABASE IF EXISTS rather than
+        finding nothing to drop.
+        """
+        try:
+            _drop_database(name, admin)
+        finally:
+            self.console_name = None
+
+    def console_event(self, event: int) -> int:
+        """Drop the scratch database on a Windows console close.
+
+        Windows calls a close handler on a new thread and gives it about 5 s.
+        The handler returns 0 after the drop, so the default handler ends the
+        process with the close status the console already chose.
+
+        The drop runs even when the run's own cleanup is dropping the same
+        name. DROP DATABASE IF EXISTS is idempotent, and a real drop is the
+        only way to keep a run that dies in that moment from leaving the
+        database behind.
+        """
+        if event not in CONSOLE_EVENTS:
+            return 0
+        name = self.console_name
+        if name is None:
+            return 0
+        try:
+            self._drop_console_database(name)
+        except BaseException:
+            # A callback that lets an exception escape can leave the process in
+            # an unknown state. The close must always end through the default
+            # handler, so a failed drop reports nothing and returns.
+            pass
+        return 0
+
+    def _drop_console_database(self, name: str) -> None:
+        """Drop the named database, then look once more before this returns.
+
+        A close can arrive before CREATE DATABASE has landed, or while the
+        run's own drop is still in flight. The name is absent in both cases,
+        so the loop keeps looking for one grace period before it gives up.
+        """
+        url = self.console_url
+        if url is None:
+            return
+        start = time.monotonic()
+        deadline = start + CONSOLE_WAIT_SECONDS
+        grace = start + CONSOLE_GRACE_SECONDS
+        try:
+            admin = cast(_DbConnection, psycopg.connect(url, autocommit=True))
+        except psycopg.Error:
+            return
+        statement = (
+            f"DROP DATABASE IF EXISTS {_quote_identifier(name)} WITH (FORCE)"
+        )
+        try:
+            while time.monotonic() < deadline:
+                present = False
+                try:
+                    with admin.cursor() as cursor:
+                        _execute(
+                            cursor,
+                            "SELECT 1 FROM pg_database WHERE datname = %s",
+                            (name,),
+                        )
+                        present = cursor.fetchone() is not None
+                        if present:
+                            _execute(cursor, statement)
+                except psycopg.Error:
+                    present = False
+                if not present and time.monotonic() >= grace:
+                    return
+                time.sleep(CONSOLE_RETRY_SECONDS)
+        finally:
+            admin.close()
+
     def install(self) -> None:
         """Replace the SIGTERM and SIGHUP handlers and keep the old ones."""
         if threading.current_thread() is not threading.main_thread():
@@ -1527,15 +1638,43 @@ class _StopGuard:
                 self.previous[number] = signal.signal(number, self.handle)
             except (OSError, ValueError):
                 continue
+        self._install_console_handler()
 
     def restore(self) -> None:
         """Put back the handlers that install replaced."""
+        self._remove_console_handler()
         for number, handler in self.previous.items():
             try:
                 signal.signal(number, handler)
             except (OSError, ValueError):
                 continue
         self.previous.clear()
+
+    def _install_console_handler(self) -> None:
+        """Register the Windows console control handler. Windows only."""
+        if sys.platform != "win32":
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        routine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+        handler = routine(self.console_event)
+        kernel32.SetConsoleCtrlHandler.argtypes = [routine, ctypes.c_int]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
+        if not kernel32.SetConsoleCtrlHandler(handler, 1):
+            return
+        self.console_api = kernel32
+        self.console_handler = handler
+
+    def _remove_console_handler(self) -> None:
+        """Remove the console handler that install added. Windows only."""
+        handler = self.console_handler
+        if handler is None:
+            return
+        try:
+            self.console_api.SetConsoleCtrlHandler(handler, 0)
+        except (AttributeError, OSError, ValueError):
+            pass
+        self.console_handler = None
+        self.console_api = None
 
     def latch(self) -> None:
         """Hold a stop signal until the caller finishes cleanup."""
@@ -3799,7 +3938,7 @@ def _self_test() -> int:
         try:
             guard.latch()
             if admin is not None and name:
-                _drop_database(name, admin)
+                guard.drop(name, admin)
         finally:
             guard.restore()
         guard.stop_if_pending()
@@ -3981,7 +4120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             guard.latch()
             if admin is not None and database_name:
-                _drop_database(database_name, admin)
+                guard.drop(database_name, admin)
         finally:
             guard.restore()
         guard.stop_if_pending()

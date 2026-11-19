@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ from contextlib import redirect_stdout
 import hashlib
 from io import StringIO
 from types import TracebackType
-from typing import Callable, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
@@ -3729,6 +3730,43 @@ class StopSignalHandlerTests(unittest.TestCase):
         finally:
             guard.restore()
 
+    @unittest.skipUnless(sys.platform == "win32", "a console handler is a Windows event")
+    def test_install_registers_the_console_handler_and_restore_removes_it(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.install()
+        try:
+            self.assertIsNotNone(guard.console_handler)
+        finally:
+            guard.restore()
+
+        self.assertIsNone(guard.console_handler)
+
+    def test_a_console_close_drops_the_protected_database(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """The close handler names the database that the run still holds."""
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.protect("cmsc127_race_0123456789abcdef", "postgresql://localhost/postgres")
+        with patch.object(
+            guard, "_drop_console_database", wraps=None
+        ) as drop:
+            code = guard.console_event(2)
+
+        self.assertEqual(0, code)
+        drop.assert_called_once_with("cmsc127_race_0123456789abcdef")
+
+    def test_a_console_close_without_a_database_drops_nothing(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        with patch.object(guard, "_drop_console_database") as drop:
+            code = guard.console_event(2)
+
+        self.assertEqual(0, code)
+        drop.assert_not_called()
+
     def test_unlatched_stop_signal_ends_the_run_through_system_exit(
         self: StopSignalHandlerTests,
     ) -> None:
@@ -3784,6 +3822,154 @@ class StopSignalHandlerTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as stopped:
             guard.stop_if_pending()
         self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+
+
+CONSOLE_DRIVER = '''\
+"""Start the runner in a new console and report that console's window."""
+
+from __future__ import annotations
+
+import ctypes
+from pathlib import Path
+import sys
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+sys.path.insert(0, str(HARNESS))
+
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.GetConsoleWindow.restype = ctypes.c_void_p
+MARKER.write_text(str(int(KERNEL32.GetConsoleWindow() or 0)), encoding="utf-8")
+
+import runner
+
+raise SystemExit(runner.main(sys.argv[3:]))
+'''
+
+
+@unittest.skipUnless(
+    sys.platform == "win32", "a console window close is a Windows event"
+)
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class ConsoleCloseCleanupTests(unittest.TestCase):
+    """A closed console window leaves no race database behind."""
+
+    def race_databases(self: ConsoleCloseCleanupTests, url: str) -> set[str]:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "SELECT datname FROM pg_database WHERE datname LIKE 'cmsc127_race_%'"
+                )
+                return {str(row[0]) for row in cursor.fetchall()}
+
+    def drop(
+        self: ConsoleCloseCleanupTests, url: str, name: str
+    ) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                        psycopg_sql.Identifier(name)
+                    )
+                )
+
+    def test_a_closed_console_window_drops_the_race_database(
+        self: ConsoleCloseCleanupTests,
+    ) -> None:
+        url = os.environ["CMSC127_DATABASE_URL"]
+        before = self.race_databases(url)
+        output = ""
+        window = 0
+        created: set[str] = set()
+        leftover: set[str] = set()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nsleep 120\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "console-driver.py"
+            driver.write_text(CONSOLE_DRIVER, encoding="utf-8")
+            marker = base / "window.txt"
+            # The Windows-only names stay out of the type checker's way, so the
+            # suite type-checks on Linux and macOS too. The class skips them.
+            windows = cast(Any, subprocess)
+            startup = windows.STARTUPINFO()
+            startup.dwFlags |= windows.STARTF_USESHOWWINDOW
+            startup.wShowWindow = windows.SW_HIDE
+            environment = os.environ.copy()
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "1",
+                    "--root",
+                    str(root),
+                    "--runner-dir",
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=environment,
+                startupinfo=startup,
+                creationflags=0x00000010,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline:
+                    if marker.exists():
+                        window = int(marker.read_text(encoding="utf-8").strip() or "0")
+                    created = self.race_databases(url) - before
+                    if created and window:
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertTrue(created, "the run made no race database")
+                self.assertTrue(window, "the run reported no console window")
+                post = cast(Any, ctypes).WinDLL("user32", use_last_error=True).PostMessageW
+                post.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_uint,
+                    ctypes.c_size_t,
+                    ctypes.c_ssize_t,
+                ]
+                post.restype = ctypes.c_int
+                posted = post(window, 0x0010, 0, 0)
+                self.assertTrue(posted, "WM_CLOSE did not reach the console window")
+                process.wait(timeout=90)
+                deadline = time.monotonic() + 15
+                leftover = self.race_databases(url) & created
+                while leftover and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                    leftover = self.race_databases(url) & created
+            finally:
+                if process.poll() is None:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True,
+                        check=False,
+                    )
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                for leftover_name in created:
+                    self.drop(url, leftover_name)
+
+        self.assertFalse(
+            leftover, f"the race database outlived the closed console\n{output}"
+        )
 
 
 if __name__ == "__main__":
