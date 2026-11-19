@@ -146,6 +146,14 @@ describe("local page", () => {
 });
 
 describe("hosted page", () => {
+  it("names every asset relative to the page", async () => {
+    // Pages serves the page under /cmsc-127-harness/. A root-absolute asset
+    // path asks for the account root and finds nothing.
+    const page = await readFile(resolve(publicRoot, "index.html"), "utf-8");
+    const references = [...page.matchAll(/(?:src|href)="([^"]+)"/g)].map((match) => match[1]);
+    expect(references.filter((value) => value?.startsWith("/"))).toEqual([]);
+  });
+
   it("waits for the Connect click before it polls", async () => {
     const { page, requested } = await hostedPage(STATUS_OK);
     const status = page.locator("#panel-content");

@@ -258,7 +258,7 @@ class HarnessPageTests(unittest.TestCase):
         with running_server(REPOSITORY_ROOT, None) as base_url:
             with urllib.request.urlopen(f"{base_url}/", timeout=3) as response:
                 page = response.read().decode("utf-8")
-            self.assertIn("/vendor/mermaid.min.js", page)
+            self.assertIn("vendor/mermaid.min.js", page)
             # The page loads every asset from its own folder. The byline link is
             # the one off-origin reference, and a reader clicks it on purpose.
             references = re.findall(r'(?:src|href)="([^"]+)"', page)
