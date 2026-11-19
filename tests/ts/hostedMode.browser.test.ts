@@ -17,8 +17,15 @@ const TYPES: Record<string, string> = {
 };
 
 // The page files, with the asset root standing in for whichever origin served
-// them. A hosted load and a local load read the same bytes.
+// them. A hosted load and a local load read the same bytes. The worker script
+// stands in for the offline lane's worker, so a registration that happens
+// installs and becomes visible to the test.
+const WORKER_SCRIPT = "self.addEventListener('install', () => self.skipWaiting());\n";
+
 async function pageFile(pathname: string): Promise<{ body: Buffer; type: string } | null> {
+  if (pathname === "/service-worker.js") {
+    return { body: Buffer.from(WORKER_SCRIPT, "utf-8"), type: "text/javascript" };
+  }
   const relative = pathname === "/" || pathname === "/cmsc-127-harness/"
     ? "index.html"
     : pathname.replace(/^\/cmsc-127-harness\//, "/").slice(1);
@@ -131,14 +138,33 @@ describe("local page", () => {
     const page = await browser.newPage();
     const requested: string[] = [];
     page.on("request", (request) => requested.push(request.url()));
+    // A worker script that installs cleanly. A registration on the local page
+    // then succeeds, so either signal proves that the page asked for no worker.
+    await page.route(`${baseUrl}service-worker.js`, (route) => route.fulfill({
+      status: 200,
+      contentType: "text/javascript",
+      body: "self.addEventListener('install', () => self.skipWaiting());\n",
+    }));
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(
       () => document.querySelectorAll("#panels button").length === 7,
       undefined,
       { timeout: 15_000 },
     );
-    expect(await page.evaluate(() => navigator.serviceWorker.getRegistrations().then((list) => list.length)))
-      .toBe(0);
+    await page.waitForTimeout(500);
+    // A registration starts with a fetch of the worker script, so either
+    // signal proves that the page asked for a worker.
+    let registered = false;
+    for (let step = 0; step < 30; step += 1) {
+      const scopes = await page.evaluate(() =>
+        navigator.serviceWorker.getRegistrations().then((list) => list.map((entry) => entry.scope)));
+      if (scopes.length > 0 || requested.some((url) => url.endsWith("service-worker.js"))) {
+        registered = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(registered).toBe(false);
     const offOrigin = requested.filter((url) => !url.startsWith(baseUrl));
     expect(offOrigin).toEqual([]);
     await page.context().close();
