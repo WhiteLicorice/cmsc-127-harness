@@ -98,8 +98,10 @@ python -m unittest discover --start-directory tests --top-level-directory . --ve
 Run `python -m pyright` from the repository root to check the Python files. Run
 `npm test` to run the page tests. Run `npm run check:built` to prove that the
 page in `public/` matches a fresh build of `src/`. The check compiles `src/`
-into a scratch folder and compares each file, so a stale `app.js` fails it. Run
-`npm run build` and commit `public/` when it fails.
+into a scratch folder and compares each compiled module. A stale `app.js` fails
+it. The check skips the two worker files that `npm run build:offline` writes
+into `public/`. Any other extra JavaScript fails it. Run `npm run build` and
+commit `public/` when it fails.
 
 `start.sh` skips the build when `public/app.js` is present. A student runs no
 build step. A clean clone carries the built page.
