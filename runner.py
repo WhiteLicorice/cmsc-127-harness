@@ -1503,9 +1503,12 @@ class _StopGuard:
         self.latched = False
 
     def handle(self, signum: int, frame: object) -> None:
+        # Record the first signal before the raise. A later signal that arrives
+        # during cleanup then cannot replace its exit code, so the run names the
+        # signal that stopped it.
+        if self.pending is None:
+            self.pending = signum
         if self.latched:
-            if self.pending is None:
-                self.pending = signum
             return
         # Hold the next signal, so a second one during cleanup cannot cut the
         # drop short while this one unwinds the stack.

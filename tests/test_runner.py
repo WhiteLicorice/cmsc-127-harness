@@ -3466,7 +3466,7 @@ class InvariantTests(unittest.TestCase):
 
 
 SIGNAL_DRIVER = '''\
-"""Run the runner and send a SIGTERM at one named point in its cleanup."""
+"""Run the runner and send a stop signal at one named point in its cleanup."""
 
 from __future__ import annotations
 
@@ -3498,8 +3498,8 @@ def note(text: str) -> None:
         handle.write(text + "\\n")
 
 
-def stop() -> None:
-    os.kill(os.getpid(), signal.SIGTERM)
+def stop(signum: int = signal.SIGTERM) -> None:
+    os.kill(os.getpid(), signum)
 
 
 runner.uuid4 = _Token
@@ -3508,6 +3508,9 @@ plain_run_pair = runner._run_pair
 
 
 def execute(cursor, statement, parameters=None):
+    if POINT == "mixed-before-drop" and statement.startswith("DROP DATABASE"):
+        note("second SIGHUP")
+        stop(signal.SIGHUP)
     if POINT.endswith("drop") and statement.startswith("DROP DATABASE"):
         note("before-drop")
         stop()
@@ -3520,7 +3523,7 @@ def execute(cursor, statement, parameters=None):
 
 
 def run_pair(*args, **kwargs):
-    if POINT == "drop" and SENT["child-run"] == 0:
+    if POINT in ("drop", "mixed-before-drop") and SENT["child-run"] == 0:
         SENT["child-run"] = 1
         note("child-run")
         stop()
@@ -3683,6 +3686,12 @@ class StopSignalCleanupTests(unittest.TestCase):
     ) -> None:
         self.assert_stop_leaves_no_database("drop")
 
+    def test_sigterm_then_sighup_before_drop_keeps_the_first_code(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        """A later signal during cleanup keeps the first signal's exit code."""
+        self.assert_stop_leaves_no_database("mixed-before-drop")
+
     def test_self_test_sigterm_just_after_create_drops_the_race_database(
         self: StopSignalCleanupTests,
     ) -> None:
@@ -3754,6 +3763,27 @@ class StopSignalHandlerTests(unittest.TestCase):
 
         self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
         self.assertIsNone(guard.pending)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
+    def test_a_later_latched_signal_keeps_the_first_exit_code(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """The first signal names the exit, through cleanup and after it."""
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        first = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+
+        with self.assertRaises(SystemExit) as raised:
+            first.handle(signal.SIGTERM, None)
+        self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
+
+        guard.latch()
+        guard.handle(signal.SIGTERM, None)
+        guard.handle(cast(int, getattr(signal, "SIGHUP")), None)
+
+        self.assertEqual(signal.SIGTERM, guard.pending)
+        with self.assertRaises(SystemExit) as stopped:
+            guard.stop_if_pending()
+        self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
 
 
 if __name__ == "__main__":
