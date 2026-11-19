@@ -64,8 +64,23 @@ describe("hosted page placement", () => {
       "This harness server is too old for the hosted page. Use the local page that the server prints.",
     );
     expect(unreachableMessage("http://127.0.0.1:55440")).toBe(
-      "The page can't reach the harness server at http://127.0.0.1:55440. Start it, allow the browser's local network prompt, then click Connect.",
+      "The page can't reach the harness server at http://127.0.0.1:55440. The hosted page requires harness server v1.33 or later. For an earlier release, open the local address that the server prints. If the browser asks for permission to connect to your computer, allow it.",
     );
+  });
+
+  it("names no cause when the browser withholds the status body", async () => {
+    // Chrome and Firefox withhold the body of a server that sends no CORS
+    // header, which is v1.32 and earlier. The page cannot tell that server
+    // from a stopped one, so the message states the release rule and the
+    // local route and leaves the cause open.
+    const { unreachableMessage } = await import("../../src/hosted.js");
+    const message = unreachableMessage("http://127.0.0.1:55440");
+    expect(message).toContain("v1.33 or later");
+    expect(message).toContain(
+      "open the local address that the server prints",
+    );
+    expect(message).not.toMatch(/too old|CORS|blocked|refused/i);
+    expect(message).not.toContain("Start it");
   });
 });
 

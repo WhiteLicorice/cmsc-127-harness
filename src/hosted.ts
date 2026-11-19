@@ -9,8 +9,21 @@ export const CONNECT_PROMPT =
 export const TOO_OLD_MESSAGE =
   "This harness server is too old for the hosted page. Use the local page that the server prints.";
 
+// A browser withholds the status body of a server that sends no CORS header,
+// which is every release up to v1.32. The page then cannot tell that server
+// from a stopped one or from one the reader denied. The connection message
+// therefore asserts no cause. It names the minimum release and the local
+// route, and it asks about permission only as a condition. A readable response
+// from an unsupported server still gets the exact version message.
+export const MINIMUM_RELEASE_MESSAGE =
+  "The hosted page requires harness server v1.33 or later.";
+export const LOCAL_PAGE_ADVICE =
+  "For an earlier release, open the local address that the server prints.";
+export const PERMISSION_ADVICE =
+  "If the browser asks for permission to connect to your computer, allow it.";
+
 export function unreachableMessage(address: string): string {
-  return `The page can't reach the harness server at ${address}. Start it, allow the browser's local network prompt, then click Connect.`;
+  return `The page can't reach the harness server at ${address}. ${MINIMUM_RELEASE_MESSAGE} ${LOCAL_PAGE_ADVICE} ${PERMISSION_ADVICE}`;
 }
 
 // Release 1 is the first API release that reports the version field. A server

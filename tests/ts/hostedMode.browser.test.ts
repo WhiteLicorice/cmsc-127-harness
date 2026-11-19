@@ -168,6 +168,15 @@ async function htmlServer(): Promise<{ page: Page; port: number; close: () => Pr
   };
 }
 
+// A failed status read states the connection message, the minimum release, the
+// local-page fallback, and the conditional permission advice. It names no cause,
+// because a page cannot tell a stopped server from an old one or a denied one.
+const connectionMessage = (address: string): string =>
+  `The page can't reach the harness server at ${address}. `
+  + "The hosted page requires harness server v1.33 or later. "
+  + "For an earlier release, open the local address that the server prints. "
+  + "If the browser asks for permission to connect to your computer, allow it.";
+
 describe("local page", () => {
   it("registers no worker and keeps every request on its own origin", async () => {
     const page = await browser.newPage();
@@ -271,9 +280,65 @@ describe("hosted page", () => {
       { timeout: 15_000 },
     );
     expect(await page.locator("#connection-message").textContent()).toBe(
-      `The page can't reach the harness server at ${SERVER}. Start it, allow the browser's local network prompt, then click Connect.`,
+      connectionMessage(SERVER),
     );
     await page.context().close();
+  }, 60_000);
+
+  it("gives the version and the local-page fallback when the browser withholds the status body", async () => {
+    // This fixture repeats the real v1.32 server: status 200, no `api_version`
+    // in the body, and no `Access-Control-Allow-Origin` header. The browser
+    // withholds the body, so the page cannot tell that server from a stopped
+    // one. It states the minimum release, the local route, and the permission
+    // question, and it asserts no cause. The scratch repro also ran the real
+    // v1.32 `server.py` against this page and got the same message.
+    const stand = createServer((_request, response) => {
+      response.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.end(JSON.stringify({
+        server: "running", databaseStatus: "connected",
+        database: "campus", role: "ada", lastPoll: "2026-11-19T09:00:00Z",
+      }));
+    });
+    await new Promise<void>((ready) => stand.listen(0, "127.0.0.1", ready));
+    const address = stand.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("The v1.32 stand-in did not bind to a port.");
+    }
+    const context = await browser.newContext();
+    await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+    const page = await context.newPage();
+    try {
+      await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
+      await page.goto(`${HOSTED_PAGE}?port=${address.port}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(
+        () => document.querySelectorAll("#panels button").length === 7,
+        undefined,
+        { timeout: 15_000 },
+      );
+      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await page.waitForFunction(
+        () => {
+          const message = document.querySelector("#connection-message");
+          return message !== null && !message.hasAttribute("hidden")
+            && (message.textContent ?? "").includes("v1.33");
+        },
+        undefined,
+        { timeout: 15_000 },
+      );
+      const message = await page.locator("#connection-message").textContent();
+      expect(message).toBe(connectionMessage(`http://127.0.0.1:${address.port}`));
+      const panel = await page.locator("#panel-content").textContent();
+      expect(panel).toContain(
+        "Start the harness page server on your computer, then click Connect.",
+      );
+    } finally {
+      await context.close();
+      await new Promise<void>((closed) => stand.close(() => closed()));
+    }
   }, 60_000);
 
   it("reports a broken status body in one plain line", async () => {
@@ -292,9 +357,7 @@ describe("hosted page", () => {
       { timeout: 15_000 },
     );
     const message = await page.locator("#connection-message").textContent();
-    expect(message).toBe(
-      `The page can't reach the harness server at http://127.0.0.1:${port}. Start it, allow the browser's local network prompt, then click Connect.`,
-    );
+    expect(message).toBe(connectionMessage(`http://127.0.0.1:${port}`));
     expect(message).not.toMatch(/Unexpected token|JSON|SyntaxError/i);
     await close();
   }, 60_000);
@@ -339,9 +402,7 @@ describe("hosted page", () => {
         { timeout: 15_000 },
       );
       const message = await page.locator("#connection-message").textContent();
-      expect(message).toBe(
-        `The page can't reach the harness server at http://127.0.0.1:${address.port}. Start it, allow the browser's local network prompt, then click Connect.`,
-      );
+      expect(message).toBe(connectionMessage(`http://127.0.0.1:${address.port}`));
       expect(message).not.toMatch(/Unexpected token|SyntaxError/i);
     } finally {
       await context.close();

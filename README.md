@@ -106,9 +106,9 @@ Start the server first, as the previous section describes. Then open the link
 in Chrome or Edge, or in Firefox 151 or later. Safari doesn't support the
 hosted page. Use the local page in Safari.
 
-Click `Connect` in the Status panel. The browser then asks once for permission
-to reach the local network. Allow it. Firefox asks the same question at the
-same point.
+Click `Connect` in the Status panel. If the browser asks for permission to
+connect to your computer, allow it. Firefox asks the same question at the same
+point.
 
 The page reads the server at `http://127.0.0.1:55440`. When the server prints
 another port, add it to the link as `?port=`, for example
@@ -117,10 +117,11 @@ another port, add it to the link as `?port=`, for example
 One load of the hosted page with the network on is enough. After that load, it
 opens with the network off and still reaches your server.
 
-The hosted page needs a server release from the first day of classes or later.
-An older server shows one message in the Status panel. No panel draws. The
-message reads `This harness server is too old for the hosted page. Use the
-local page that the server prints.`
+The hosted page requires harness server v1.33 or later. For an earlier release,
+open the local address that the server prints. An older server shows one
+message in the Status panel. No panel draws. The message reads `This harness
+server is too old for the hosted page. Use the local page that the server
+prints.`
 
 #### The Seven Panels
 
