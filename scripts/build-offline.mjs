@@ -1,6 +1,5 @@
-// Write the offline snapshot files into the built page.
-//
-// The page deploys from `public/`. This script writes three files there:
+// This script writes the offline snapshot files into the built page. The page
+// deploys from `public/`, and the script writes three files there:
 //
 //   offline-manifest.json          every page file with its SHA-256 hash
 //   service-worker.js              the worker, with its build ID filled in
@@ -25,8 +24,7 @@ export const killSwitchTemplatePath = resolve(
   "../src/service-worker.kill-switch.template.js",
 );
 
-// Files this script writes. They are not page content, so no snapshot entry
-// names them.
+// These three files are not page content, so no snapshot entry names them.
 const GENERATED = new Set([MANIFEST_NAME, WORKER_NAME, KILL_SWITCH_NAME]);
 
 function sha256(bytes) {

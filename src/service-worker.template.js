@@ -1,7 +1,7 @@
-// The harness page offline worker. The build fills in the build ID placeholder
-// with the build ID. Each build installs one immutable snapshot. A failed
-// install keeps the active snapshot, so a half-copied page never reaches a
-// reader.
+// The harness page uses this worker to keep an offline snapshot. The build
+// fills in the build ID placeholder. Each build installs one immutable
+// snapshot, and a failed install keeps the active snapshot. A half-copied page
+// never reaches a reader.
 
 const OFFLINE_BUILD_ID = "__OFFLINE_BUILD_ID__";
 const SNAPSHOT_PREFIX = "cmsc127-harness-";
@@ -22,6 +22,12 @@ function requestFor(url, cache = "default") {
   return new Request(url.href || url, { method: "GET", cache });
 }
 
+// The HTTP cache may hold the previous build. A file fetch must bypass it, or a
+// stale body fails the hash check and the next build never installs.
+function freshRequestFor(url) {
+  return requestFor(url, "no-store");
+}
+
 function hex(bytes) {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -36,7 +42,7 @@ function invalidManifest(message) {
 
 async function readManifest() {
   const url = scoped(MANIFEST_PATH);
-  const response = await fetch(requestFor(url, "no-store"));
+  const response = await fetch(freshRequestFor(url));
   if (!response.ok) throw invalidManifest(`the fetch returned ${response.status}`);
   let manifest;
   try {
@@ -80,12 +86,12 @@ async function installSnapshot() {
       return;
     }
 
-    // Check every file before the first write, so a mismatch leaves no
-    // half-installed page behind.
+    // Check every file before the first write. The fetch bypasses the HTTP
+    // cache, so a stale body cannot fail a good build.
     const fetched = [];
     for (const entry of manifest.files) {
       const url = scoped(entry.path);
-      const response = await fetch(requestFor(url));
+      const response = await fetch(freshRequestFor(url));
       if (!response.ok) throw new Error(`Offline file returned ${response.status}: ${entry.path}`);
       const body = await response.clone().arrayBuffer();
       if (await sha256(body) !== entry.hash) {
@@ -116,11 +122,6 @@ async function deleteOlderSnapshots() {
     .map((name) => caches.delete(name)));
 }
 
-async function tellClients(message) {
-  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  clients.forEach((client) => client.postMessage(message));
-}
-
 function offlineResponse(status, text) {
   return new Response(text, {
     status,
@@ -129,10 +130,18 @@ function offlineResponse(status, text) {
   });
 }
 
+// Read the snapshot without creating it. Opening a missing cache would plant an
+// empty one, which a later failed install would then keep.
+async function snapshotCache() {
+  const name = snapshotCacheName();
+  if (!(await caches.keys()).includes(name)) return null;
+  return caches.open(name);
+}
+
 async function cachedPage() {
   try {
-    const cache = await caches.open(snapshotCacheName());
-    return await cache.match(requestFor(scoped(PAGE_PATH)));
+    const cache = await snapshotCache();
+    return cache === null ? undefined : await cache.match(requestFor(scoped(PAGE_PATH)));
   } catch {
     return undefined;
   }
@@ -160,14 +169,15 @@ function answersRequest(request) {
   const scope = self.registration.scope;
   if (!url.href.startsWith(scope)) return false;
   const path = url.href.slice(scope.length);
-  // Live database data. A cached answer would show tables that are not there.
+  // The panels read live database data. A cached answer would show tables that
+  // are not there.
   return !path.startsWith("api/");
 }
 
 async function handleAsset(request) {
   try {
-    const cache = await caches.open(snapshotCacheName());
-    const cached = await cache.match(request);
+    const cache = await snapshotCache();
+    const cached = cache === null ? undefined : await cache.match(request);
     if (cached) return cached;
     return await fetch(request);
   } catch {
@@ -183,7 +193,6 @@ self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     await deleteOlderSnapshots();
     await self.clients.claim();
-    await tellClients({ type: "offline-ready", buildId: OFFLINE_BUILD_ID });
   })());
 });
 

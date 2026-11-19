@@ -39,7 +39,12 @@ type FetchCalls = { path: string; cache: string | null }[];
 
 function siteFetch(
   buildId: string,
-  state: { hang?: boolean; offline?: boolean; override?: Record<string, string> } = {},
+  state: {
+    hang?: boolean;
+    offline?: boolean;
+    override?: Record<string, string>;
+    httpCache?: Record<string, string>;
+  } = {},
   manifest: unknown = manifestFor(buildId),
 ) {
   const calls: FetchCalls = [];
@@ -60,6 +65,10 @@ function siteFetch(
     const relative = url.href.slice(scope.length);
     if (relative === "offline-manifest.json") {
       return new Response(JSON.stringify(manifest), { headers: { "Content-Type": "application/json" } });
+    }
+    // The browser HTTP cache answers any request that does not bypass it.
+    if (cache !== "no-store" && cache !== "reload" && state.httpCache?.[relative] !== undefined) {
+      return new Response(state.httpCache[relative], { headers: { "Content-Type": "text/plain" } });
     }
     const body = state.override?.[relative === "" ? "index.html" : relative]
       ?? (relative === "" ? bodies["index.html"] : bodies[relative]);
@@ -112,7 +121,9 @@ class FakeCaches {
   async keys(): Promise<string[]> {
     return [...this.caches.keys()];
   }
-}class FakeTimers {
+}
+
+class FakeTimers {
   private queue: { id: number; at: number; run: () => void }[] = [];
   private next = 0;
   private now = 0;
@@ -154,12 +165,9 @@ function createWorker(options: WorkerOptions) {
   const caches = options.caches ?? new FakeCaches();
   const timers = options.timers ?? new FakeTimers();
   const listeners = new Map<string, (event: Record<string, unknown>) => void>();
-  const messages: { type?: string }[] = [];
-  const posted: unknown[] = [];
   let claimed = 0;
   let skipped = 0;
   let unregistered = 0;
-  const clients = [{ postMessage: (message: unknown) => messages.push(message as { type?: string }) }];
   const self = {
     location: new URL(scope),
     registration: {
@@ -173,7 +181,6 @@ function createWorker(options: WorkerOptions) {
       claim: async () => {
         claimed += 1;
       },
-      matchAll: async () => clients,
     },
     skipWaiting: async () => {
       skipped += 1;
@@ -243,8 +250,6 @@ function createWorker(options: WorkerOptions) {
     get unregistered() {
       return unregistered;
     },
-    messages,
-    posted,
     async names(): Promise<string[]> {
       return caches.keys();
     },
@@ -275,6 +280,20 @@ describe("offline worker install", () => {
     expect(await cache.match(`${scope}offline-manifest.json`)).toBeDefined();
   });
 
+  it("installs past a stale HTTP cache entry for a page file", async () => {
+    const build = "a".repeat(64);
+    const site = siteFetch(build, { httpCache: { "app.js": "console.log('old page');" } });
+    const worker = createWorker({ buildId: build, fetch: site.fetch as never });
+
+    await worker.install();
+
+    expect(worker.skipped).toBe(1);
+    const cache = await worker.caches.open(`cmsc127-harness-${build}`);
+    expect(await (await cache.match(`${scope}app.js`))?.text()).toBe(PAGE["app.js"]);
+    const fileCalls = site.calls.filter((call) => call.path !== "/cmsc-127-harness/offline-manifest.json");
+    expect(fileCalls.every((call) => call.cache === "no-store")).toBe(true);
+  });
+
   it("fails a wrong hash and keeps the previous snapshot", async () => {
     const previous = "b".repeat(64);
     const next = "c".repeat(64);
@@ -298,8 +317,7 @@ describe("offline worker install", () => {
     expect(await previousCache.match(`${scope}marker.txt`)).toBeDefined();
   });
 
-  it("does not fetch again when its own snapshot is complete", async () => {
-    const build = "d".repeat(64);
+  it("does not fetch again when its own snapshot is complete", async () => {    const build = "d".repeat(64);
     const caches = new FakeCaches();
     const first = siteFetch(build);
     await createWorker({ buildId: build, fetch: first.fetch as never, caches }).install();
@@ -327,7 +345,6 @@ describe("offline worker activation", () => {
 
     expect((await worker.names()).sort()).toEqual([`cmsc127-harness-${build}`, "ren-courses-offline-old"].sort());
     expect(worker.claimed).toBe(1);
-    expect(worker.messages.map((message) => message.type)).toContain("offline-ready");
   });
 });
 
@@ -408,6 +425,18 @@ describe("offline worker requests", () => {
     const response = await worker.dispatchFetch(new Request(`${scope}missing.js`));
 
     expect(response?.status).toBe(503);
+  });
+
+  it("reads the snapshot without creating one before install", async () => {
+    const build = "6".repeat(64);
+    const state: { offline?: boolean } = {};
+    const worker = createWorker({ buildId: build, fetch: siteFetch(build, state).fetch as never });
+
+    state.offline = true;
+    await worker.dispatchFetch(new Request(`${scope}app.js`));
+    await worker.dispatchFetch(navigate(scope));
+
+    expect(await worker.names()).toEqual([]);
   });
 });
 

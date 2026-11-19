@@ -1,6 +1,6 @@
-// The kill switch. Deploy it as service-worker.js to remove the offline
-// snapshot from every open page. It clears only harness caches and then
-// unregisters itself. A reader gets the network page at the next load.
+// This worker is the kill switch. Deploy it as service-worker.js to remove the
+// offline snapshot from every open page. It clears only harness caches and then
+// unregisters itself, and a reader gets the network page at the next load.
 
 const SNAPSHOT_PREFIX = "cmsc127-harness-";
 
