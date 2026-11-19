@@ -1,8 +1,21 @@
 import { buildFeed, type ChangeFeedEvent } from "./panels/changes.js";
+import { registerOfflineWorker } from "./offline.js";
+import { escapeHtml } from "./panels/html.js";
+import {
+  CONNECT_PROMPT,
+  DEFAULT_SERVER_ADDRESS,
+  isHostedPage,
+  loopbackInit,
+  serverAddress,
+  apiUrl,
+  TOO_OLD_MESSAGE,
+  unreachableMessage,
+  versionSupported,
+} from "./hosted.js";
 import { panelRegistry, type PanelId } from "./panelRegistry.js";
 import { selectionMatches } from "./panelRequest.js";
 import { type TablesResponse } from "./panels/tables.js";
-import { type StatusData } from "./panels/status.js";
+import { renderStatus, type StatusData, type StatusView } from "./panels/status.js";
 
 declare global {
   interface Window {
@@ -27,7 +40,15 @@ const schemaSelect = requireElement<HTMLSelectElement>("#schema-select");
 const connectionMessage = requireElement<HTMLElement>("#connection-message");
 const pollSummary = requireElement<HTMLElement>("#poll-summary");
 
-let activePanel: PanelId = "tables";
+// The hosted page talks to a server on this computer, so it waits for the
+// Connect click on its Status panel. The local page was served by its server
+// and needs no click.
+const HOSTED = isHostedPage();
+const server = serverAddress();
+let connected = !HOSTED;
+let tooOld = false;
+
+let activePanel: PanelId = HOSTED ? "status" : "tables";
 let selectedSchema = "public";
 let currentTables: TablesResponse | null = null;
 let previousTables: TablesResponse | null = null;
@@ -52,19 +73,26 @@ const SERVER_UNREACHABLE =
 
 function describeRequestError(error: unknown): string {
   if (error instanceof TypeError) {
-    return SERVER_UNREACHABLE;
+    return HOSTED ? unreachableMessage(server ?? DEFAULT_SERVER_ADDRESS) : SERVER_UNREACHABLE;
   }
   return error instanceof Error ? error.message : SERVER_UNREACHABLE;
 }
 
 async function requestJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  const response = await fetch(apiUrl(url, server), loopbackInit(server));
   const data: unknown = await response.json();
   if (!response.ok) {
     const body = data as { message?: string };
     throw new Error(body.message ?? "The harness request failed.");
   }
   return data;
+}
+
+// The version check reads the body of a failed status request too, because a
+// server with its database down still states its version.
+async function fetchStatus(): Promise<unknown> {
+  const response = await fetch(apiUrl("/api/status", server), loopbackInit(server));
+  return await response.json();
 }
 
 function updateSchemas(response: TablesResponse): void {
@@ -130,6 +158,14 @@ async function drawMermaid(): Promise<void> {
   }
 }
 
+function statusView(): StatusView {
+  const view: StatusView = { hosted: HOSTED, connected };
+  if (tooOld) {
+    view.tooOld = true;
+  }
+  return view;
+}
+
 function renderCurrentPanel(): void {
   const panel = panelRegistry.find((candidate) => candidate.id === activePanel);
   if (!panel) {
@@ -137,12 +173,22 @@ function renderCurrentPanel(): void {
     return;
   }
   let markup: string;
-  if (activePanel === "tables" && currentTables) {
+  if (HOSTED && tooOld) {
+    // One plain line in the Status panel. The other panels draw nothing, so
+    // the page never shows seven empty panels against an old server.
+    markup = activePanel === "status"
+      ? `<p class="error-message">${escapeHtml(TOO_OLD_MESSAGE)}</p>`
+      : "";
+  } else if (HOSTED && !connected) {
+    markup = activePanel === "status"
+      ? renderStatus({ server: "unknown", databaseStatus: "unknown" }, statusView())
+      : `<p>${escapeHtml(CONNECT_PROMPT)}</p>`;
+  } else if (activePanel === "tables" && currentTables) {
     markup = panel.render(currentTables, previousTables);
   } else if (activePanel === "changes") {
     markup = panel.render(feed);
-  } else if (activePanel === "status" && statusData) {
-    markup = panel.render(statusData);
+  } else if (activePanel === "status" && statusData !== null) {
+    markup = renderStatus(statusData, statusView());
   } else if (panelData !== null) {
     markup = panel.render(panelData);
   } else {
@@ -226,6 +272,9 @@ async function pollTables(): Promise<void> {
 }
 
 async function refreshActivePanel(): Promise<void> {
+  if (!connected) {
+    return;
+  }
   if (activePanel === "tables" || activePanel === "changes" || pollingPanel) {
     return;
   }
@@ -264,8 +313,22 @@ schemaSelect.addEventListener("change", () => {
   feed = [];
   panelData = null;
   renderCurrentPanel();
+  if (!connected) {
+    return;
+  }
   void pollTables();
   void refreshActivePanel();
+});
+
+panelContent.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || target.dataset["action"] !== "connect") {
+    return;
+  }
+  if (!HOSTED || connected) {
+    return;
+  }
+  connectHosted();
 });
 
 document.addEventListener("cmsc127:theme", () => {
@@ -273,14 +336,45 @@ document.addEventListener("cmsc127:theme", () => {
   renderCurrentPanel();
 });
 
+function startPolling(): void {
+  void requestJson("/api/changes")
+    .then((data) => {
+      const settings = data as { pollIntervalMs?: number };
+      pollInterval = settings.pollIntervalMs ?? 1000;
+      void pollTables();
+      void refreshActivePanel();
+      window.setInterval(() => void pollTables(), pollInterval);
+      window.setInterval(() => void refreshActivePanel(), pollInterval);
+    })
+    .catch((error: unknown) => showMessage(describeRequestError(error)));
+}
+
+// The hosted page checks the server release before it polls, so an old server
+// draws one plain line instead of seven empty panels.
+function connectHosted(): void {
+  void fetchStatus()
+    .then((data) => {
+      if (versionSupported(data)) {
+        connected = true;
+        statusData = null;
+        panelData = null;
+        startPolling();
+      } else {
+        tooOld = true;
+      }
+    })
+    .catch((error: unknown) => showMessage(describeRequestError(error)))
+    .finally(() => {
+      renderedMarkup = "";
+      renderCurrentPanel();
+    });
+}
+
+registerOfflineWorker();
 buildPanelButtons();
-void requestJson("/api/changes")
-  .then((data) => {
-    const settings = data as { pollIntervalMs?: number };
-    pollInterval = settings.pollIntervalMs ?? 1000;
-    void pollTables();
-    void refreshActivePanel();
-    window.setInterval(() => void pollTables(), pollInterval);
-    window.setInterval(() => void refreshActivePanel(), pollInterval);
-  })
-  .catch(() => showMessage(SERVER_UNREACHABLE));
+if (HOSTED) {
+  renderCurrentPanel();
+} else {
+  startPolling();
+}
+

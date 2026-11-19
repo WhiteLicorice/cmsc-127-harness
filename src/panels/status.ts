@@ -1,3 +1,4 @@
+import { CONNECT_PROMPT, TOO_OLD_MESSAGE } from "../hosted.js";
 import { escapeHtml } from "./html.js";
 
 export type StatusData = {
@@ -9,6 +10,16 @@ export type StatusData = {
   message?: string;
   error?: string;
 };
+
+// The hosted page adds a Connect control and refuses a server that is older
+// than the oldest release it can read. The local page never draws either.
+export type StatusView = {
+  hosted: boolean;
+  connected: boolean;
+  tooOld?: boolean;
+};
+
+const LOCAL_VIEW: StatusView = { hosted: false, connected: true };
 
 export function statusMessage(status: StatusData): string {
   const error = `${status.message ?? ""} ${status.error ?? ""}`.toLowerCase();
@@ -29,7 +40,13 @@ function formatTime(value: string | undefined): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
-export function renderStatus(status: StatusData): string {
+export function renderStatus(status: StatusData, view: StatusView = LOCAL_VIEW): string {
+  if (view.hosted && view.tooOld === true) {
+    return `<p class="error-message">${escapeHtml(TOO_OLD_MESSAGE)}</p>`;
+  }
+  if (view.hosted && !view.connected) {
+    return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p><button type="button" data-action="connect">Connect</button></p>`;
+  }
   if (status.databaseStatus !== "connected") {
     return `<p class="error-message">${escapeHtml(statusMessage(status))}</p>`;
   }

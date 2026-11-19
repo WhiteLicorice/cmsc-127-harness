@@ -273,6 +273,75 @@ class HarnessPageTests(unittest.TestCase):
         self.assertTrue((ASSET_ROOT / "app.js").is_file())
         self.assertTrue((ASSET_ROOT / "panelRequest.js").is_file())
 
+    def test_allowed_origin_receives_the_cors_header_and_vary(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            request = urllib.request.Request(
+                f"{base_url}/api/changes",
+                headers={"Origin": "https://whitelicorice.github.io"},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(
+                    "https://whitelicorice.github.io",
+                    response.headers.get("Access-Control-Allow-Origin"),
+                )
+                self.assertEqual("Origin", response.headers.get("Vary"))
+
+    def test_another_origin_receives_no_cors_header(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            for origin in ("https://example.com", "http://127.0.0.1:55440", "null"):
+                request = urllib.request.Request(
+                    f"{base_url}/api/changes", headers={"Origin": origin}
+                )
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    self.assertIsNone(
+                        response.headers.get("Access-Control-Allow-Origin"), origin
+                    )
+                    self.assertIsNone(response.headers.get("Vary"), origin)
+
+    def test_a_request_without_an_origin_receives_no_cors_header(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            with urllib.request.urlopen(f"{base_url}/api/changes", timeout=3) as response:
+                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+                self.assertIsNone(response.headers.get("Vary"))
+
+    def test_cors_header_never_allows_every_origin(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            request = urllib.request.Request(
+                f"{base_url}/api/changes", headers={"Origin": "https://example.com"}
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertNotEqual("*", response.headers.get("Access-Control-Allow-Origin"))
+
+    def test_status_reports_the_api_version(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+            payload = json.loads(error.exception.read())
+            error.exception.close()
+        server_module = self.load_server()
+        self.assertEqual(1, server_module.API_VERSION)
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
+    def test_api_version_does_not_depend_on_the_database(self) -> None:
+        server_module = self.load_server()
+        with patch.object(
+            server_module, "_connect_dict", side_effect=psycopg.OperationalError("down")
+        ):
+            with running_server(
+                REPOSITORY_ROOT, "postgresql://postgres@127.0.0.1:55449/postgres"
+            ) as base_url:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+                self.assertEqual(503, error.exception.code)
+                payload = json.loads(error.exception.read())
+                error.exception.close()
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
     def test_status_returns_a_plain_message_when_database_is_stopped(self) -> None:
         self.load_server()
         with running_server(

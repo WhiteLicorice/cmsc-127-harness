@@ -1,0 +1,104 @@
+import { describe, expect, it } from "vitest";
+
+describe("hosted page placement", () => {
+  it("recognizes the Pages origin and nothing else", async () => {
+    const { HOSTED_ORIGIN, isHostedPage } = await import("../../src/hosted.js");
+    expect(HOSTED_ORIGIN).toBe("https://whitelicorice.github.io");
+    expect(isHostedPage(new URL("https://whitelicorice.github.io/cmsc-127-harness/"))).toBe(true);
+    expect(isHostedPage(new URL("http://127.0.0.1:55440/"))).toBe(false);
+    expect(isHostedPage(new URL("http://localhost:55440/"))).toBe(false);
+    expect(isHostedPage(new URL("https://example.com/"))).toBe(false);
+  });
+
+  it("keeps a local request relative", async () => {
+    const { serverAddress, apiUrl } = await import("../../src/hosted.js");
+    const local = new URL("http://127.0.0.1:55440/");
+    expect(serverAddress(local)).toBeNull();
+    expect(apiUrl("/api/status", serverAddress(local))).toBe("/api/status");
+  });
+
+  it("prefixes a hosted request with the server address", async () => {
+    const { serverAddress, apiUrl } = await import("../../src/hosted.js");
+    const hosted = new URL("https://whitelicorice.github.io/cmsc-127-harness/");
+    expect(serverAddress(hosted)).toBe("http://127.0.0.1:55440");
+    expect(apiUrl("/api/status", serverAddress(hosted))).toBe("http://127.0.0.1:55440/api/status");
+  });
+
+  it("reads the server port from the page address", async () => {
+    const { addressFromSearch } = await import("../../src/hosted.js");
+    expect(addressFromSearch("")).toBe("http://127.0.0.1:55440");
+    expect(addressFromSearch("?port=55443")).toBe("http://127.0.0.1:55443");
+    expect(addressFromSearch("?port=0")).toBe("http://127.0.0.1:55440");
+    expect(addressFromSearch("?port=70000")).toBe("http://127.0.0.1:55440");
+    expect(addressFromSearch("?port=abc")).toBe("http://127.0.0.1:55440");
+  });
+
+  it("sends the loopback address space only from the hosted page", async () => {
+    const { loopbackInit } = await import("../../src/hosted.js");
+    expect(loopbackInit(null)).toEqual({ headers: { Accept: "application/json" } });
+    expect(loopbackInit("http://127.0.0.1:55440")).toEqual({
+      headers: { Accept: "application/json" },
+      targetAddressSpace: "loopback",
+    });
+  });
+
+  it("accepts a server with the version field and rejects an older one", async () => {
+    const { apiVersionOf, versionSupported } = await import("../../src/hosted.js");
+    expect(apiVersionOf({ server: "running", api_version: 1 })).toBe(1);
+    expect(versionSupported({ server: "running", api_version: 1 })).toBe(true);
+    expect(versionSupported({ server: "running", api_version: 2 })).toBe(true);
+    expect(apiVersionOf({ server: "running" })).toBe(0);
+    expect(versionSupported({ server: "running" })).toBe(false);
+    expect(versionSupported({ api_version: "1" })).toBe(false);
+    expect(versionSupported({ api_version: 0 })).toBe(false);
+    expect(versionSupported(null)).toBe(false);
+  });
+
+  it("states the three hosted messages word for word", async () => {
+    const { CONNECT_PROMPT, TOO_OLD_MESSAGE, unreachableMessage } =
+      await import("../../src/hosted.js");
+    expect(CONNECT_PROMPT).toBe(
+      "Start the harness page server on your computer, then click Connect.",
+    );
+    expect(TOO_OLD_MESSAGE).toBe(
+      "This harness server is too old for the hosted page. Use the local page that the server prints.",
+    );
+    expect(unreachableMessage("http://127.0.0.1:55440")).toBe(
+      "The page can't reach the harness server at http://127.0.0.1:55440. Start it, allow the browser's local network prompt, then click Connect.",
+    );
+  });
+});
+
+describe("status panel connect control", () => {
+  it("shows the prompt and the Connect button before the first click", async () => {
+    const { renderStatus } = await import("../../src/panels/status.js");
+    const markup = renderStatus(
+      { server: "running", databaseStatus: "connected" },
+      { hosted: true, connected: false },
+    );
+    expect(markup).toContain("Start the harness page server on your computer, then click Connect.");
+    expect(markup).toContain(">Connect</button>");
+  });
+
+  it("draws no Connect button on the local page", async () => {
+    const { renderStatus } = await import("../../src/panels/status.js");
+    const markup = renderStatus(
+      { server: "running", databaseStatus: "connected", database: "campus", role: "ada" },
+      { hosted: false, connected: false },
+    );
+    expect(markup).not.toContain("Connect");
+    expect(markup).toContain("campus");
+  });
+
+  it("shows one plain line for a server older than the minimum", async () => {
+    const { renderStatus } = await import("../../src/panels/status.js");
+    const markup = renderStatus(
+      { server: "running", databaseStatus: "connected" },
+      { hosted: true, connected: true, tooOld: true },
+    );
+    expect(markup).toContain(
+      "This harness server is too old for the hosted page. Use the local page that the server prints.",
+    );
+    expect(markup).not.toContain(">Connect</button>");
+  });
+});
