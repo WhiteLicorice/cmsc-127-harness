@@ -44,6 +44,7 @@ function siteFetch(
     offline?: boolean;
     override?: Record<string, string>;
     httpCache?: Record<string, string>;
+    markNetwork?: boolean;
   } = {},
   manifest: unknown = manifestFor(buildId),
 ) {
@@ -73,7 +74,12 @@ function siteFetch(
     const body = state.override?.[relative === "" ? "index.html" : relative]
       ?? (relative === "" ? bodies["index.html"] : bodies[relative]);
     if (body === undefined) return new Response("missing", { status: 404 });
-    return new Response(body, { headers: { "Content-Type": "text/plain" } });
+    // A marked answer tells a test that the worker passed this network body
+    // through instead of serving one from its cache.
+    const type = relative === "" || relative === "index.html" ? "text/html" : "text/plain";
+    const headers: Record<string, string> = { "Content-Type": type };
+    if (state.markNetwork) headers["X-Answer"] = "network";
+    return new Response(body, { headers });
   };
   return { fetch, calls };
 }
@@ -400,10 +406,49 @@ describe("offline worker requests", () => {
     const worker = createWorker({ buildId: build, fetch: siteFetch(build, state).fetch as never });
     await worker.install();
 
-    state.override = { "index.html": "<!doctype html><title>fresh</title>" };
+    // The network serves the same page as the snapshot. The worker must pass
+    // that body through instead of answering from the cache.
+    state.override = { "index.html": PAGE["index.html"] };
+    state.markNetwork = true;
     const response = await worker.dispatchFetch(navigate(scope));
 
-    expect(await response?.text()).toContain("fresh");
+    expect(response?.headers.get("X-Answer")).toBe("network");
+    expect(await response?.text()).toBe(PAGE["index.html"]);
+  });
+
+  it("serves the active page when the network HTML belongs to another build", async () => {
+    // A rejected update keeps the first snapshot. The next navigation then
+    // meets HTML from the second build. The worker must answer with the page
+    // that matches the scripts in its snapshot, or the page pairs new HTML
+    // with old JavaScript.
+    const build = "7".repeat(64);
+    const state: { override?: Record<string, string>; markNetwork?: boolean } = {};
+    const worker = createWorker({ buildId: build, fetch: siteFetch(build, state).fetch as never });
+    await worker.install();
+
+    state.override = {
+      "index.html": "<!doctype html><title>second build</title><div id=\"panel-b\"></div>",
+    };
+    state.markNetwork = true;
+    for (const target of [scope, `${scope}index.html`]) {
+      const response = await worker.dispatchFetch(navigate(target));
+
+      expect(response?.headers.get("X-Answer")).not.toBe("network");
+      expect(await response?.text()).toBe(PAGE["index.html"]);
+    }
+  });
+
+  it("passes the network page through when no snapshot is active", async () => {
+    const build = "8".repeat(64);
+    const state: { override?: Record<string, string>; markNetwork?: boolean } = {};
+    const worker = createWorker({ buildId: build, fetch: siteFetch(build, state).fetch as never });
+
+    state.override = { "index.html": "<!doctype html><title>first load</title>" };
+    state.markNetwork = true;
+    const response = await worker.dispatchFetch(navigate(scope));
+
+    expect(response?.headers.get("X-Answer")).toBe("network");
+    expect(await response?.text()).toContain("first load");
   });
 
   it("serves a page asset from the snapshot", async () => {    const build = "4".repeat(64);
