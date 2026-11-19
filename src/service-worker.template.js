@@ -147,13 +147,37 @@ async function cachedPage() {
   }
 }
 
+// A page keeps its HTML and its scripts from one build. A failed install keeps
+// the active snapshot, so the network can answer with the next build while the
+// scripts still come from the snapshot. The page then fails on a changed
+// element. Compare the network page with the active page, and serve the active
+// page when the two bodies belong to different builds.
+async function pageForActiveBuild(response) {
+  const type = response.headers.get("Content-Type") ?? "";
+  if (!type.includes("text/html")) return response;
+  try {
+    const cache = await snapshotCache();
+    if (cache === null) return response;
+    const active = await cache.match(requestFor(scoped(PAGE_PATH)));
+    if (!active) return response;
+    const [networkHash, activeHash] = await Promise.all([
+      sha256(await response.clone().arrayBuffer()),
+      sha256(await active.clone().arrayBuffer()),
+    ]);
+    return networkHash === activeHash ? response : active;
+  } catch {
+    // A cache read can fail. The network page still answers, as it did before.
+    return response;
+  }
+}
+
 async function handleNavigation(request) {
   const fallback = cachedPage();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), NAVIGATION_TIMEOUT);
   try {
     const response = await fetch(request, { signal: controller.signal });
-    if (response.ok) return response;
+    if (response.ok) return pageForActiveBuild(response);
   } catch {
     // The network is slow or absent. The snapshot answers below.
   } finally {
