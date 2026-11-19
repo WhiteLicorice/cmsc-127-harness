@@ -96,6 +96,32 @@ The Schema panel reads the ERD from the `README.md` in the folder where you
 started the page. The Checks panel reads the last result from
 `.cmsc127/last-run.json` in that folder.
 
+#### The Hosted Page
+
+The page also loads from <https://whitelicorice.github.io/cmsc-127-harness/>.
+The server still runs on your computer and reads your own database. The local
+page stays the default.
+
+Start the server first, as the previous section describes. Then open the link
+in Chrome or Edge, or in Firefox 151 or later. Safari doesn't support the
+hosted page. Use the local page in Safari.
+
+Click `Connect` in the Status panel. The browser then asks once for permission
+to reach the local network. Allow it. Firefox asks the same question at the
+same point.
+
+The page reads the server at `http://127.0.0.1:55440`. When the server prints
+another port, add it to the link as `?port=`, for example
+<https://whitelicorice.github.io/cmsc-127-harness/?port=55441>.
+
+One load of the hosted page with the network on is enough. After that load, it
+opens with the network off and still reaches your server.
+
+The hosted page needs a server release from the first day of classes or later.
+An older server shows one message in the Status panel. No panel draws. The
+message reads `This harness server is too old for the hosted page. Use the
+local page that the server prints.`
+
 #### The Seven Panels
 
 The page has seven panels. Use the tabs at the top of the page to switch
