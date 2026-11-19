@@ -1,7 +1,6 @@
 .venv/
 node_modules/
-public/*.js
-public/panels/
+.build-check/
 .vitest/
 smoke-artifacts/
 smoke-project/

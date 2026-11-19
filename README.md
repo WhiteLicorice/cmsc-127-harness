@@ -20,10 +20,6 @@ line.
 
 - Git, which clones the folder. Check it with `git --version`. If the command
   is missing, install Git from <https://git-scm.com/downloads>.
-- Node.js 26.13.1 and npm 11, which build the page from TypeScript. Check them
-  with `node --version` and `npm --version`. The replies start with `v26.13`
-  and `11`. If a reply is lower, install Node.js 26.13.1 over the vendor route
-  for your platform: the Windows MSI, Homebrew on macOS, or the Linux tarball.
 - PostgreSQL 18, the database server that holds your tables. The page reads it
   every second. Check it with `pg_isready`. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`

@@ -54,6 +54,8 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
+      - name: Check the built page
+        run: npm run check:built
       - name: Install Chromium for the browser tests and smoke
         run: npx playwright install chromium --with-deps --only-shell
       - name: Test and build
@@ -194,6 +196,8 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
+      - name: Check the built page
+        run: npm run check:built
       - name: Install Chromium for the browser tests and smoke on macOS and Windows
         if: runner.os != 'Linux'
         run: npx playwright install chromium --only-shell
