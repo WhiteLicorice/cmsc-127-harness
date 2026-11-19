@@ -315,9 +315,9 @@ A `query` case may set `document` to `true` when it owns the `document` fact.
 The runner then checks that the pair's `column_mapping` view maps that fact to a
 `jsonb` column that holds at least one non-null value.
 
-A row whose first cell starts with `warning:` is a warning. The runner prints it
-under its case and counts it on the count line, so a case with only warnings
-passes.
+A row whose first cell starts with `warning:`, whatever the letter case, is a
+warning. The runner prints it under its case and counts it on the count line, so
+a case with only warnings passes.
 
 An invariant is a rule that must hold for every correct database. The invariant
 list runs after the cases. Each invariant checks one property.
