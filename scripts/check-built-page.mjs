@@ -9,13 +9,6 @@ const buildRoot = join(root, ".build-check");
 const pageRoot = join(root, "public");
 const compiler = join(root, "node_modules", "typescript", "bin", "tsc");
 
-function fail(lines) {
-  for (const line of lines) {
-    console.error(line);
-  }
-  process.exit(1);
-}
-
 async function listJavaScriptFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true, recursive: true });
   const files = [];
@@ -32,7 +25,7 @@ async function listJavaScriptFiles(directory) {
 }
 
 async function removeBuild() {
-  const { files, folders } = await listJavaScriptFiles(buildRoot);
+  const { files, folders } = await listJavaScriptFiles(buildRoot).catch(() => ({ files: [], folders: [] }));
   for (const file of files) {
     await unlink(file).catch(() => undefined);
   }
@@ -42,7 +35,7 @@ async function removeBuild() {
   await rmdir(buildRoot).catch(() => undefined);
 }
 
-function pageNames(files, base) {
+function moduleNames(files, base) {
   return files
     .map((file) => relative(base, file).split("\\").join("/"))
     .filter((name) => !name.startsWith("vendor/"));
@@ -60,61 +53,60 @@ function firstDifferingLine(expected, actual) {
   return 1;
 }
 
-if ((await readFile(compiler, "utf-8").catch(() => null)) === null) {
-  fail(["The built-page check needs the page packages. Run npm ci first."]);
-}
-
-const pageInPublic = new Set(pageNames((await listJavaScriptFiles(pageRoot)).files, pageRoot));
-
 const problems = [];
 let compared = 0;
 try {
-  await mkdir(buildRoot, { recursive: true });
-  const compiled = spawnSync(
-    process.execPath,
-    [compiler, "--outDir", buildRoot, "--pretty", "false"],
-    { cwd: root, encoding: "utf-8" },
-  );
-  if (compiled.status !== 0) {
-    fail([
-      "The page did not compile, so the check cannot compare the build.",
-      (compiled.stdout ?? "").trim(),
-      (compiled.stderr ?? "").trim(),
-    ].filter((line) => line.length > 0));
-  }
+  if ((await readFile(compiler, "utf-8").catch(() => null)) === null) {
+    problems.push("The built-page check needs the page packages. Run npm ci first.");
+  } else {
+    await mkdir(buildRoot, { recursive: true });
+    const compiled = spawnSync(
+      process.execPath,
+      [compiler, "--outDir", buildRoot, "--pretty", "false"],
+      { cwd: root, encoding: "utf-8" },
+    );
+    if (compiled.status !== 0) {
+      problems.push("The page did not compile, so the check cannot compare the build.");
+      for (const line of `${compiled.stdout}${compiled.stderr}`.trim().split("\n")) {
+        problems.push(line);
+      }
+    } else {
+      const pageInPublic = new Set(moduleNames((await listJavaScriptFiles(pageRoot)).files, pageRoot));
+      const built = moduleNames((await listJavaScriptFiles(buildRoot)).files, buildRoot).sort();
+      const builtNames = new Set(built);
 
-  const built = pageNames((await listJavaScriptFiles(buildRoot)).files, buildRoot).sort();
-  const builtNames = new Set(built);
+      for (const name of built) {
+        if (!pageInPublic.has(name)) {
+          problems.push(`public/${name} is missing. Run npm run build, then commit public/.`);
+          continue;
+        }
+        const expected = await readFile(join(buildRoot, name), "utf-8");
+        const actual = await readFile(join(pageRoot, name), "utf-8");
+        compared += 1;
+        if (expected !== actual) {
+          problems.push(
+            `public/${name} differs from the build of src/ at line ${firstDifferingLine(expected, actual)}. `
+              + "Run npm run build, then commit public/.",
+          );
+        }
+      }
 
-  for (const name of built) {
-    if (!pageInPublic.has(name)) {
-      problems.push(`public/${name} is missing. Run npm run build, then commit public/.`);
-      continue;
+      for (const name of [...pageInPublic].sort()) {
+        if (!builtNames.has(name)) {
+          problems.push(`public/${name} has no module in src/. Remove it, then rebuild the page.`);
+        }
+      }
     }
-    const expected = await readFile(join(buildRoot, name), "utf-8");
-    const actual = await readFile(join(pageRoot, name), "utf-8");
-    compared += 1;
-    if (expected !== actual) {
-      problems.push(
-        `public/${name} differs from the build of src/ at line ${firstDifferingLine(expected, actual)}. `
-          + "Run npm run build, then commit public/.",
-      );
-    }
-  }
-
-  for (const name of [...pageInPublic].sort()) {
-    if (!builtNames.has(name)) {
-      problems.push(`public/${name} has no module in src/. Remove it, then rebuild the page.`);
-    }
-  }
-
-  if (problems.length === 0) {
-    console.log(`The page in public/ matches the build of src/. ${compared} files compared.`);
   }
 } finally {
   await removeBuild();
 }
 
 if (problems.length > 0) {
-  fail(problems);
+  for (const line of problems) {
+    console.error(line);
+  }
+  process.exit(1);
 }
+
+console.log(`The page in public/ matches the build of src/. ${compared} files compared.`);

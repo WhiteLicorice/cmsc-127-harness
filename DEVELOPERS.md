@@ -27,8 +27,8 @@ npm run build
 
 `npm ci` installs the exact package versions in `package-lock.json`.
 `npm run build` runs the strict type check and compiles `src/` into `public/`.
-The compiled files land beside `index.html`, and the repository tracks them, so
-a student needs no Node.js. Commit the built files with each source change.
+The compiled files land beside `index.html`. The repository tracks them, so a
+student needs no Node.js. Commit the built files with each source change.
 
 The page loads `/app.js`, `/style.css`, and `/vendor/mermaid.min.js`. The server
 serves `public/` as the asset root. The page needs no network because the
