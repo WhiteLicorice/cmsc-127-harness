@@ -15,9 +15,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from types import TracebackType
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -1470,6 +1472,41 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
             _execute(cursor, f"DROP DATABASE IF EXISTS {_quote_identifier(name)} WITH (FORCE)")
     finally:
         admin.close()
+
+
+def _stop_signal(signum: int, frame: object) -> None:
+    """End the run through SystemExit, so its finally blocks run."""
+    raise SystemExit(128 + signum)
+
+
+def _hold_stop_signals() -> dict[int, Any]:
+    """Make SIGTERM and SIGHUP raise SystemExit. Return the old handlers.
+
+    Python ends the process on SIGTERM and SIGHUP with no handler installed,
+    and the run's finally block never drops its database. Windows has no
+    SIGHUP, so the loop names only the signals the platform has.
+    """
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is not threading.main_thread():
+        return previous
+    for name in ("SIGTERM", "SIGHUP"):
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            previous[number] = signal.signal(number, _stop_signal)
+        except (OSError, ValueError):
+            continue
+    return previous
+
+
+def _release_stop_signals(previous: Mapping[int, Any]) -> None:
+    """Restore the handlers that _hold_stop_signals replaced."""
+    for number, handler in previous.items():
+        try:
+            signal.signal(number, handler)
+        except (OSError, ValueError):
+            continue
 
 
 def _migration_files(root: Path) -> list[Path]:
@@ -3677,6 +3714,7 @@ def _self_test() -> int:
         return 2
     name = ""
     admin: _DbConnection | None = None
+    previous = _hold_stop_signals()
     try:
         name, admin = _create_database(base_url)
         test_url = _database_url(base_url, name)
@@ -3712,6 +3750,7 @@ def _self_test() -> int:
     finally:
         if admin is not None and name:
             _drop_database(name, admin)
+        _release_stop_signals(previous)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -3777,6 +3816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     database_name = ""
     admin: _DbConnection | None = None
     results: list[dict[str, object]] = []
+    previous = _hold_stop_signals()
     try:
         database_name, admin = _create_database(database_url)
         scratch_url = _database_url(database_url, database_name)
@@ -3885,6 +3925,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if admin is not None and database_name:
             _drop_database(database_name, admin)
+        _release_stop_signals(previous)
     skipped = manifest.get("skips", [])
     if arguments.case_id is None and isinstance(skipped, list):
         for index, raw_skip in enumerate(cast(list[object], skipped), start=1):
