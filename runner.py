@@ -60,9 +60,21 @@ CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 CONSOLE_EVENTS = frozenset({2, 5, 6})  # close, logoff, shutdown
-CONSOLE_WAIT_SECONDS = 3.0
+# Windows ends the process about 5 s after a close event. Every cleanup path
+# stops waiting at this one budget, so a close handler always returns in time.
+CLEANUP_SECONDS = 3.0
+CONSOLE_WAIT_SECONDS = 2.5
 CONSOLE_GRACE_SECONDS = 1.2
 CONSOLE_RETRY_SECONDS = 0.2
+# libpq limits for one cleanup connection. They bound the common stalls that
+# the server reports, such as a startup that never answers and a statement
+# that runs too long. The budget above bounds the rest.
+CLEANUP_CONNECT_TIMEOUT = 2
+CLEANUP_STATEMENT_TIMEOUT = 2000
+CLEANUP_OPTIONS = (
+    f"-c statement_timeout={CLEANUP_STATEMENT_TIMEOUT} "
+    f"-c lock_timeout={CLEANUP_STATEMENT_TIMEOUT}"
+)
 FEATURE_PATTERNS = {
     "left_join": re.compile(
         r"\b(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?\s+JOIN\b", re.IGNORECASE
@@ -1460,6 +1472,51 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _cleanup_conninfo(url: str) -> str:
+    """Return the cleanup connection string with its own libpq limits.
+
+    Cleanup has no user to answer a question, so a connection that stalls
+    must fail inside the cleanup budget. The statement and lock limits also
+    free a connection whose statement never finishes.
+    """
+    settings = conninfo_to_dict(url)
+    settings["connect_timeout"] = str(CLEANUP_CONNECT_TIMEOUT)
+    settings["options"] = CLEANUP_OPTIONS
+    return make_conninfo("", **settings)
+
+
+def _run_in_budget(action: Callable[[], None], seconds: float) -> bool:
+    """Run one cleanup action and stop waiting when the budget ends.
+
+    Return True when the action finished. Return False when the budget ended
+    first. A failure from the action reaches the caller as it did before. When
+    the budget ends first, the worker thread stays behind and the process ends
+    without it, so a stalled server cannot hold the process open.
+    """
+    finished = threading.Event()
+    failure: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            action()
+        except BaseException as error:
+            failure.append(error)
+        finally:
+            finished.set()
+
+    try:
+        worker = threading.Thread(target=target, name="cmsc127-cleanup", daemon=True)
+        worker.start()
+    except RuntimeError:
+        # A thread cannot start while the interpreter shuts down. Run the
+        # action here instead, and rely on the libpq limits for its length.
+        target()
+    done = finished.wait(seconds)
+    if done and failure:
+        raise failure[0]
+    return done
+
+
 def _create_database(
     base_url: str, guard: _StopGuard
 ) -> tuple[str, _DbConnection]:
@@ -1550,14 +1607,23 @@ class _StopGuard:
     def drop(self, name: str, admin: _DbConnection) -> None:
         """Drop the scratch database on the run's own path.
 
-        The name stays protected until the drop returns, so a console close
+        The name stays protected until the drop finishes, so a console close
         during the drop runs its own DROP DATABASE IF EXISTS rather than
         finding nothing to drop.
+
+        The drop stops waiting at the cleanup budget. A server that stalls a
+        statement then cannot hold a stop path open. A drop that did not
+        finish keeps the name, so a later console close still tries once
+        more. The worker owns the connection until its call returns.
         """
+        finished = False
         try:
-            _drop_database(name, admin)
+            finished = _run_in_budget(
+                lambda: _drop_database(name, admin), CLEANUP_SECONDS
+            )
         finally:
-            self.console_name = None
+            if finished:
+                self.console_name = None
 
     def console_event(self, event: int) -> int:
         """Drop the scratch database on a Windows console close.
@@ -1565,6 +1631,10 @@ class _StopGuard:
         Windows calls a close handler on a new thread and gives it about 5 s.
         The handler returns 0 after the drop, so the default handler ends the
         process with the close status the console already chose.
+
+        The drop waits at most the cleanup budget. A server that stops
+        answering then cannot hold the callback past the Windows window, and
+        the process still ends with the status the console chose.
 
         The drop runs even when the run's own cleanup is dropping the same
         name. DROP DATABASE IF EXISTS is idempotent, and a real drop is the
@@ -1577,7 +1647,9 @@ class _StopGuard:
         if name is None:
             return 0
         try:
-            self._drop_console_database(name)
+            _run_in_budget(
+                lambda: self._drop_console_database(name), CLEANUP_SECONDS
+            )
         except BaseException:
             # A callback that lets an exception escape can leave the process in
             # an unknown state. The close must always end through the default
@@ -1591,6 +1663,10 @@ class _StopGuard:
         A close can arrive before CREATE DATABASE has landed, or while the
         run's own drop is still in flight. The name is absent in both cases,
         so the loop keeps looking for one grace period before it gives up.
+
+        The connection carries its own connect, statement and lock limits, so
+        a server that stalls fails a call at once. The caller also runs this
+        method under the cleanup budget, which bounds the cases libpq cannot.
         """
         url = self.console_url
         if url is None:
@@ -1599,7 +1675,10 @@ class _StopGuard:
         deadline = start + CONSOLE_WAIT_SECONDS
         grace = start + CONSOLE_GRACE_SECONDS
         try:
-            admin = cast(_DbConnection, psycopg.connect(url, autocommit=True))
+            admin = cast(
+                _DbConnection,
+                psycopg.connect(_cleanup_conninfo(url), autocommit=True),
+            )
         except psycopg.Error:
             return
         statement = (

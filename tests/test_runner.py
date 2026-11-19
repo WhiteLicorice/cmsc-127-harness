@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Mapping, Sequence
@@ -3822,6 +3825,263 @@ class StopSignalHandlerTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as stopped:
             guard.stop_if_pending()
         self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+
+
+CLEANUP_WATCH_SECONDS = 6.0
+STALL_LANE = range(55560, 55570)
+
+
+def stall_drop(*arguments: object) -> None:
+    """Stand in for a drop that the server never answers."""
+    time.sleep(60)
+
+
+def run_with_watch(action: Callable[[], object], seconds: float) -> tuple[bool, float]:
+    """Run one action on a thread and report whether it returned in time."""
+    finished = threading.Event()
+
+    def target() -> None:
+        try:
+            action()
+        except BaseException:
+            pass
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=target, daemon=True)
+    start = time.monotonic()
+    worker.start()
+    returned = finished.wait(seconds)
+    return returned, time.monotonic() - start
+
+
+def _stall_message(kind: bytes, payload: bytes) -> bytes:
+    return kind + struct.pack("!i", len(payload) + 4) + payload
+
+
+def _stall_receive(client: socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        chunk = client.recv(size - len(data))
+        if not chunk:
+            raise ConnectionError("the client closed the connection")
+        data += chunk
+    return data
+
+
+class StallServer:
+    """A PostgreSQL stand-in that accepts a connection and stops answering.
+
+    With handshake set, the server answers the startup and then withholds
+    every query reply. Without it, the server accepts the TCP connection and
+    sends nothing at all. Both cases are what a database does when it stalls.
+    """
+
+    def __init__(self: StallServer, handshake: bool) -> None:
+        self.handshake = handshake
+        self.connections = 0
+        self.queries = 0
+        self._clients: list[socket.socket] = []
+        self._lock = threading.Lock()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        port = 0
+        for candidate in STALL_LANE:
+            try:
+                self._listener.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            port = candidate
+            break
+        if port == 0:
+            self._listener.close()
+            raise unittest.SkipTest("Every port in the stall lane is busy.")
+        self._listener.listen(8)
+        self.port = port
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def url(self: StallServer, database: str = "postgres") -> str:
+        return f"postgresql://postgres:password@127.0.0.1:{self.port}/{database}"
+
+    def _accept(self: StallServer) -> None:
+        while True:
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return
+            with self._lock:
+                self.connections += 1
+                self._clients.append(client)
+            threading.Thread(
+                target=self._serve, args=(client,), daemon=True
+            ).start()
+
+    def _serve(self: StallServer, client: socket.socket) -> None:
+        try:
+            if not self.handshake:
+                while client.recv(65536):
+                    pass
+                return
+            length = struct.unpack("!i", _stall_receive(client, 4))[0]
+            body = _stall_receive(client, length - 4)
+            if length == 8 and struct.unpack("!i", body)[0] == 80877103:
+                # SSLRequest: answer "no TLS", then read the startup message.
+                client.sendall(b"N")
+                length = struct.unpack("!i", _stall_receive(client, 4))[0]
+                _stall_receive(client, length - 4)
+            client.sendall(
+                _stall_message(b"R", struct.pack("!i", 0))
+                + _stall_message(b"S", b"server_version\x0018.6\x00")
+                + _stall_message(b"S", b"client_encoding\x00UTF8\x00")
+                + _stall_message(b"S", b"integer_datetimes\x00on\x00")
+                + _stall_message(b"S", b"standard_conforming_strings\x00on\x00")
+                + _stall_message(b"K", struct.pack("!ii", 1234, 5678))
+                + _stall_message(b"Z", b"I")
+            )
+            while True:
+                kind = _stall_receive(client, 1)
+                size = struct.unpack("!i", _stall_receive(client, 4))[0]
+                _stall_receive(client, size - 4)
+                with self._lock:
+                    self.queries += 1
+                if kind == b"X":
+                    return
+        except (ConnectionError, OSError):
+            return
+
+    def close(self: StallServer) -> None:
+        self._listener.close()
+        with self._lock:
+            clients = list(self._clients)
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                client.close()
+            except OSError:
+                pass
+
+    def __enter__(self: StallServer) -> StallServer:
+        return self
+
+    def __exit__(
+        self: StallServer,
+        kind: type[BaseException] | None,
+        value: BaseException | None,
+        trace: type[TracebackType] | None,
+    ) -> None:
+        self.close()
+
+
+class CleanupDeadlineTests(unittest.TestCase):
+    """Every cleanup path ends inside one budget when the database stalls."""
+
+    def test_a_stalled_handshake_ends_inside_the_cleanup_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A server that never sends its startup reply must not hold the close."""
+        with StallServer(handshake=False) as server:
+            guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+            guard.protect(f"cmsc127_race_{uuid4().hex}", server.url())
+            returned, elapsed = run_with_watch(
+                lambda: guard.console_event(2), CLEANUP_WATCH_SECONDS
+            )
+            connections = server.connections
+
+        self.assertEqual(1, connections, "the callback opened no connection")
+        self.assertTrue(
+            returned, f"the callback was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            runner.CLEANUP_SECONDS + 1.0,
+            f"the callback took {elapsed:.2f} s on a stalled handshake",
+        )
+
+    def test_a_stalled_query_ends_inside_the_cleanup_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A server that answers the startup and then stops must not hold it."""
+        with StallServer(handshake=True) as server:
+            guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+            guard.protect(f"cmsc127_race_{uuid4().hex}", server.url())
+            returned, elapsed = run_with_watch(
+                lambda: guard.console_event(2), CLEANUP_WATCH_SECONDS
+            )
+            queries = server.queries
+
+        self.assertGreater(queries, 0, "the callback sent no query")
+        self.assertTrue(
+            returned, f"the callback was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            runner.CLEANUP_SECONDS + 1.0,
+            f"the callback took {elapsed:.2f} s on a stalled query",
+        )
+
+    def test_the_cleanup_connection_carries_its_limits(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """The cleanup connect and its statements carry their own limits."""
+        url = "postgresql://postgres:password@127.0.0.1:55460/postgres"
+        built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertIn("connect_timeout=2", built)
+        self.assertIn("statement_timeout=2000", built)
+        self.assertIn("lock_timeout=2000", built)
+        self.assertIn("dbname=postgres", built)
+
+    def test_the_signal_cleanup_gives_up_at_its_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A stalled drop must not hold the SIGTERM cleanup path open."""
+        name = f"cmsc127_race_{uuid4().hex}"
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.protect(name, "postgresql://127.0.0.1/postgres")
+        with patch.object(
+            runner, "_drop_database", side_effect=stall_drop
+        ):
+            returned, elapsed = run_with_watch(
+                lambda: guard.drop(name, cast(Any, Mock())), CLEANUP_WATCH_SECONDS
+            )
+
+        self.assertTrue(
+            returned, f"the signal cleanup was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            runner.CLEANUP_SECONDS + 1.0,
+            f"the signal cleanup took {elapsed:.2f} s on a stalled drop",
+        )
+
+    def test_the_self_test_cleanup_gives_up_at_its_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """The self-test shares the drop of the signal cleanup path."""
+        with patch.object(
+            runner,
+            "_create_database",
+            return_value=(f"cmsc127_race_{uuid4().hex}", cast(Any, Mock())),
+        ), patch.object(runner, "subprocess") as child, patch.object(
+            runner, "_drop_database", side_effect=stall_drop
+        ):
+            child.run.return_value.returncode = 0
+            returned, elapsed = run_with_watch(
+                runner._self_test,  # pyright: ignore[reportPrivateUsage]
+                CLEANUP_WATCH_SECONDS,
+            )
+
+        self.assertTrue(
+            returned, f"the self-test was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            runner.CLEANUP_SECONDS + 1.0,
+            f"the self-test took {elapsed:.2f} s on a stalled drop",
+        )
 
 
 CONSOLE_DRIVER = '''\
