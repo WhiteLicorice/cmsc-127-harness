@@ -26,6 +26,8 @@ from comparator import Difference, compare_erd
 ROW_CAP = 100
 POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
+API_VERSION = 1
+ALLOWED_ORIGIN = "https://whitelicorice.github.io"
 _NO_SCHEMA_MESSAGE = (
     "No schema is visible to this role. Check that CMSC127_DATABASE_URL names "
     "the right database and role."
@@ -620,6 +622,7 @@ def _status_endpoint(
         return 503, {
             "server": "running",
             "databaseStatus": "down",
+            "api_version": API_VERSION,
             "message": (
                 "PostgreSQL is unavailable. Check that the server is running and "
                 "that CMSC127_DATABASE_URL is right."
@@ -629,6 +632,7 @@ def _status_endpoint(
     return 200, {
         "server": "running",
         "databaseStatus": "connected",
+        "api_version": API_VERSION,
         "database": row["database"],
         "role": row["role"],
         "lastPoll": _json_value(row["last_poll"]),
@@ -687,10 +691,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             except (psycopg.Error, RuntimeError) as error:
                 status = 503
-                payload = {"message": _database_message(error)}
+                payload = {"message": _database_message(error), "api_version": API_VERSION}
             except Exception:
                 status = 500
-                payload = {"message": "The harness could not complete this request."}
+                payload = {
+                    "message": "The harness could not complete this request.",
+                    "api_version": API_VERSION,
+                }
             self._send_json(status, payload)
             return
         if parts.path.startswith("/api/"):
@@ -714,6 +721,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # Only the hosted page may read a response from another origin. A
+        # browser refuses the read when the header is absent, so any other
+        # site gets nothing.
+        if self.headers.get("Origin") == ALLOWED_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
 

@@ -13,8 +13,8 @@ export function unreachableMessage(address: string): string {
   return `The page can't reach the harness server at ${address}. Start it, allow the browser's local network prompt, then click Connect.`;
 }
 
-// Server release 1 is the oldest release that answers every endpoint. A server
-// without the version field predates it and counts as older than the minimum.
+// Release 1 is the first API release that reports the version field. A server
+// without the field predates it and counts as older than the minimum.
 export const MINIMUM_API_VERSION = 1;
 
 declare global {

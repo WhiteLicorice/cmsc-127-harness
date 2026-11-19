@@ -258,7 +258,7 @@ class HarnessPageTests(unittest.TestCase):
         with running_server(REPOSITORY_ROOT, None) as base_url:
             with urllib.request.urlopen(f"{base_url}/", timeout=3) as response:
                 page = response.read().decode("utf-8")
-            self.assertIn("/vendor/mermaid.min.js", page)
+            self.assertIn("vendor/mermaid.min.js", page)
             # The page loads every asset from its own folder. The byline link is
             # the one off-origin reference, and a reader clicks it on purpose.
             references = re.findall(r'(?:src|href)="([^"]+)"', page)
@@ -272,6 +272,102 @@ class HarnessPageTests(unittest.TestCase):
     def test_page_assets_contain_compiled_modules(self) -> None:
         self.assertTrue((ASSET_ROOT / "app.js").is_file())
         self.assertTrue((ASSET_ROOT / "panelRequest.js").is_file())
+
+    def test_allowed_origin_receives_the_cors_header_and_vary(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            request = urllib.request.Request(
+                f"{base_url}/api/changes",
+                headers={"Origin": "https://whitelicorice.github.io"},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(
+                    "https://whitelicorice.github.io",
+                    response.headers.get("Access-Control-Allow-Origin"),
+                )
+                self.assertEqual("Origin", response.headers.get("Vary"))
+
+    def test_another_origin_receives_no_cors_header(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            for origin in ("https://example.com", "http://127.0.0.1:55440", "null"):
+                request = urllib.request.Request(
+                    f"{base_url}/api/changes", headers={"Origin": origin}
+                )
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    self.assertIsNone(
+                        response.headers.get("Access-Control-Allow-Origin"), origin
+                    )
+                    self.assertIsNone(response.headers.get("Vary"), origin)
+
+    def test_a_request_without_an_origin_receives_no_cors_header(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            with urllib.request.urlopen(f"{base_url}/api/changes", timeout=3) as response:
+                self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+                self.assertIsNone(response.headers.get("Vary"))
+
+    def test_cors_header_never_allows_every_origin(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            request = urllib.request.Request(
+                f"{base_url}/api/changes", headers={"Origin": "https://example.com"}
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertNotEqual("*", response.headers.get("Access-Control-Allow-Origin"))
+
+    def test_status_reports_the_api_version(self) -> None:
+        self.load_server()
+        with running_server(REPOSITORY_ROOT, None) as base_url:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+            payload = json.loads(error.exception.read())
+            error.exception.close()
+        server_module = self.load_server()
+        self.assertEqual(1, server_module.API_VERSION)
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
+    def test_connected_status_reports_the_api_version(self) -> None:
+        # The hosted page reads this body, so the field must be here too.
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        database_url = DATABASE_URL
+        with running_server(REPOSITORY_ROOT, database_url) as base_url:
+            payload = get_json(f"{base_url}/api/status")
+        self.assertEqual("connected", payload["databaseStatus"])
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
+    def test_status_without_a_database_row_reports_the_api_version(self) -> None:
+        # The page still reads the version when the database reports no row.
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        database_url = DATABASE_URL
+        with patch.object(server_module, "_fetch_rows", return_value=[]):
+            with running_server(REPOSITORY_ROOT, database_url) as base_url:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+                self.assertEqual(503, error.exception.code)
+                payload = json.loads(error.exception.read())
+                error.exception.close()
+        self.assertEqual("down", payload["databaseStatus"])
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
+    def test_api_version_does_not_depend_on_the_database(self) -> None:
+        server_module = self.load_server()
+        with patch.object(
+            server_module, "_connect_dict", side_effect=psycopg.OperationalError("down")
+        ):
+            with running_server(
+                REPOSITORY_ROOT, "postgresql://postgres@127.0.0.1:55449/postgres"
+            ) as base_url:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+                self.assertEqual(503, error.exception.code)
+                payload = json.loads(error.exception.read())
+                error.exception.close()
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
 
     def test_status_returns_a_plain_message_when_database_is_stopped(self) -> None:
         self.load_server()
