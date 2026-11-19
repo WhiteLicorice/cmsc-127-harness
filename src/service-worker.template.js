@@ -317,7 +317,7 @@ async function buildingNow(cache, now) {
 }
 
 // Drop the records of documents that are gone. True when one record still
-// names a live document or sits inside its grace period.
+// belongs to a live document or sits inside its grace period.
 async function pruneClientRecords(cache, live, now) {
   let held = false;
   for (const request of await cache.keys()) {
