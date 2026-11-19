@@ -327,6 +327,33 @@ class HarnessPageTests(unittest.TestCase):
         self.assertEqual(1, server_module.API_VERSION)
         self.assertEqual(server_module.API_VERSION, payload["api_version"])
 
+    def test_connected_status_reports_the_api_version(self) -> None:
+        # The hosted page reads this body, so the field must be here too.
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        database_url = DATABASE_URL
+        with running_server(REPOSITORY_ROOT, database_url) as base_url:
+            payload = get_json(f"{base_url}/api/status")
+        self.assertEqual("connected", payload["databaseStatus"])
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
+    def test_status_without_a_database_row_reports_the_api_version(self) -> None:
+        # The page still reads the version when the database reports no row.
+        server_module = self.load_server()
+        if DATABASE_URL is None:
+            raise unittest.SkipTest("requires the isolated PostgreSQL service on port 55445")
+        database_url = DATABASE_URL
+        with patch.object(server_module, "_fetch_rows", return_value=[]):
+            with running_server(REPOSITORY_ROOT, database_url) as base_url:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(f"{base_url}/api/status", timeout=3)
+                self.assertEqual(503, error.exception.code)
+                payload = json.loads(error.exception.read())
+                error.exception.close()
+        self.assertEqual("down", payload["databaseStatus"])
+        self.assertEqual(server_module.API_VERSION, payload["api_version"])
+
     def test_api_version_does_not_depend_on_the_database(self) -> None:
         server_module = self.load_server()
         with patch.object(

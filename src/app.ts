@@ -78,9 +78,20 @@ function describeRequestError(error: unknown): string {
   return error instanceof Error ? error.message : SERVER_UNREACHABLE;
 }
 
+// A body that is not JSON means some other program answered on the port. The
+// page reports that as a server it cannot reach, so a reader never meets a
+// parser message.
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new TypeError("The response is not JSON.");
+  }
+}
+
 async function requestJson(url: string): Promise<unknown> {
   const response = await fetch(apiUrl(url, server), loopbackInit(server));
-  const data: unknown = await response.json();
+  const data: unknown = await readJson(response);
   if (!response.ok) {
     const body = data as { message?: string };
     throw new Error(body.message ?? "The harness request failed.");
@@ -92,7 +103,7 @@ async function requestJson(url: string): Promise<unknown> {
 // server with its database down still states its version.
 async function fetchStatus(): Promise<unknown> {
   const response = await fetch(apiUrl("/api/status", server), loopbackInit(server));
-  return await response.json();
+  return await readJson(response);
 }
 
 function updateSchemas(response: TablesResponse): void {

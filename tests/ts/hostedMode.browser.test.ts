@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
@@ -64,12 +63,9 @@ let server: Server;
 let browser: Browser;
 let baseUrl = "";
 
-// The page under test is the compiled one. A workflow runs the tests before
-// the build, so compile the page here when it is absent.
+// The page under test is the compiled one. Compile it here every time, so a
+// stale `public/app.js` cannot answer for the source in `src/`.
 function ensureBuilt(): void {
-  if (existsSync(resolve(publicRoot, "app.js"))) {
-    return;
-  }
   const compiler = resolve(root, "node_modules", "typescript", "bin", "tsc");
   const built = spawnSync(process.execPath, [compiler, "-p", root], { stdio: "inherit" });
   if (built.status !== 0) {
@@ -131,6 +127,45 @@ async function hostedPage(status: unknown): Promise<{ page: Page; requested: str
     { timeout: 15_000 },
   );
   return { page, requested };
+}
+
+// A stand-in for another local program on the server port. It answers with an
+// HTML page and the permissive CORS header, so the browser reads the body and
+// the JSON read fails.
+async function htmlServer(): Promise<{ page: Page; port: number; close: () => Promise<void> }> {
+  const stand = createServer((_request, response) => {
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+    });
+    response.end("<!doctype html><title>Another program</title><p>Not the harness.</p>");
+  });
+  await new Promise<void>((ready) => stand.listen(0, "127.0.0.1", ready));
+  const address = stand.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("The stand-in server did not bind to a port.");
+  }
+  const context = await browser.newContext();
+  // Chrome asks for loopback access before an HTTPS page may reach a local
+  // port. Grant it, so the request reaches the stand-in and the JSON read is
+  // the thing under test.
+  await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+  const page = await context.newPage();
+  await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
+  await page.goto(`${HOSTED_PAGE}?port=${address.port}`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => document.querySelectorAll("#panels button").length === 7,
+    undefined,
+    { timeout: 15_000 },
+  );
+  return {
+    page,
+    port: address.port,
+    close: async () => {
+      await context.close();
+      await new Promise<void>((closed) => stand.close(() => closed()));
+    },
+  };
 }
 
 describe("local page", () => {
@@ -239,5 +274,78 @@ describe("hosted page", () => {
       `The page can't reach the harness server at ${SERVER}. Start it, allow the browser's local network prompt, then click Connect.`,
     );
     await page.context().close();
+  }, 60_000);
+
+  it("reports a broken status body in one plain line", async () => {
+    // A dev server or a notebook answers with HTML and `*`, so the browser
+    // reads the body and the JSON read fails. The page must show the contract
+    // line, never the JavaScript parse error.
+    const { page, port, close } = await htmlServer();
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await page.waitForFunction(
+      () => {
+        const message = document.querySelector("#connection-message");
+        return message !== null && !message.hasAttribute("hidden")
+          && (message.textContent ?? "").length > 0;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const message = await page.locator("#connection-message").textContent();
+    expect(message).toBe(
+      `The page can't reach the harness server at http://127.0.0.1:${port}. Start it, allow the browser's local network prompt, then click Connect.`,
+    );
+    expect(message).not.toMatch(/Unexpected token|JSON|SyntaxError/i);
+    await close();
+  }, 60_000);
+
+  it("reports a broken poll body in one plain line", async () => {
+    // Connect succeeds on the status body, then a panel request answers with
+    // HTML. The poll path reads JSON too, so it needs the same plain line.
+    const stand = createServer((request, response) => {
+      const isStatus = (request.url ?? "").startsWith("/api/status");
+      response.writeHead(200, {
+        "Content-Type": isStatus ? "application/json" : "text/html; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+      });
+      response.end(isStatus
+        ? JSON.stringify({ server: "running", databaseStatus: "connected", api_version: 1 })
+        : "<!doctype html><title>Another program</title><p>Not the harness.</p>");
+    });
+    await new Promise<void>((ready) => stand.listen(0, "127.0.0.1", ready));
+    const address = stand.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("The stand-in server did not bind to a port.");
+    }
+    const context = await browser.newContext();
+    await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+    const page = await context.newPage();
+    try {
+      await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
+      await page.goto(`${HOSTED_PAGE}?port=${address.port}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(
+        () => document.querySelectorAll("#panels button").length === 7,
+        undefined,
+        { timeout: 15_000 },
+      );
+      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await page.waitForFunction(
+        () => {
+          const message = document.querySelector("#connection-message");
+          return message !== null && !message.hasAttribute("hidden")
+            && (message.textContent ?? "").includes("can't reach the harness server");
+        },
+        undefined,
+        { timeout: 15_000 },
+      );
+      const message = await page.locator("#connection-message").textContent();
+      expect(message).toBe(
+        `The page can't reach the harness server at http://127.0.0.1:${address.port}. Start it, allow the browser's local network prompt, then click Connect.`,
+      );
+      expect(message).not.toMatch(/Unexpected token|SyntaxError/i);
+    } finally {
+      await context.close();
+      await new Promise<void>((closed) => stand.close(() => closed()));
+    }
   }, 60_000);
 });
