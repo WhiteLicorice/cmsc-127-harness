@@ -309,9 +309,10 @@ class ScratchDatabaseNameTests(unittest.TestCase):
         self.assertIs(admin, connection)
         cursor.execute.assert_called_once_with(f'CREATE DATABASE "{name}"', None)
 
-    def test_scratch_database_stays_latched_until_the_caller_unlatches(
+    def test_scratch_database_holds_a_stop_until_the_caller_owns_the_name(
         self: ScratchDatabaseNameTests,
     ) -> None:
+        """The create section runs in the cleanup phase, so a stop is held."""
         admin = MagicMock()
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         with (
@@ -322,7 +323,7 @@ class ScratchDatabaseNameTests(unittest.TestCase):
                 "postgresql://postgres@127.0.0.1/postgres", guard
             )
 
-        self.assertTrue(guard.latched)
+        self.assertEqual("cleanup", guard.phase)
         self.assertEqual("cmsc127_race_0123456789abcdef", name)
 
 
@@ -1394,8 +1395,16 @@ class RunnerIntegrationTests(unittest.TestCase):
                 finally:
                     connection.close()
         finally:
+            # The fixture table goes before the role. A later run against the
+            # same database would otherwise find the table in its exact public
+            # schema comparison. The comparator would report it.
             with psycopg.connect(database_url, autocommit=True) as admin:
                 with admin.cursor() as cursor:
+                    cursor.execute(
+                        psycopg_sql.SQL("DROP TABLE IF EXISTS public.{}").format(
+                            psycopg_sql.Identifier(table)
+                        )
+                    )
                     cursor.execute(
                         psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
                             psycopg_sql.Identifier(group_role)
@@ -3785,6 +3794,138 @@ note("handler " + ("default" if noted else "custom"))
 raise SystemExit(code)
 '''
 
+PHASE_DRIVER = '''\
+"""Run the runner and call the guard's handler at one line event."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+POINT = sys.argv[3]
+TOKEN = sys.argv[4]
+ENTRY = sys.argv[5]
+FIRST = sys.argv[6]
+SECOND = sys.argv[7]
+KEEP = sys.argv[8] == "1"
+ROOT = Path(sys.argv[9])
+RESOURCES = Path(sys.argv[10])
+sys.path.insert(0, str(HARNESS))
+
+import runner
+
+# The functions whose line events are injection points. install, restore,
+# _end_run and stop_if_pending hold every handler change and every exit
+# decision, so a stop at any of their lines must keep the first code.
+TARGETS = ("install", "restore", "_end_run", "stop_if_pending")
+STOPS = [
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
+    if hasattr(signal, name)
+]
+ORIGINAL = {number: signal.getsignal(number) for number in STOPS}
+GUARD = {"value": None}
+SEEN: list[tuple[str, int]] = []
+INJECTED = {"done": False}
+
+
+def note(text: str) -> None:
+    with MARKER.open("a", encoding="utf-8") as handle:
+        handle.write(text + "\\n")
+
+
+class _Token:
+    """Stand in for the UUID, so the test knows the name the run created."""
+
+    hex = TOKEN
+
+
+class _SkipChild:
+    """Stand in for subprocess, so the self-test skips its child suite."""
+
+    CompletedProcess = subprocess.CompletedProcess
+
+    @staticmethod
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0] if args else [], 0)
+
+
+plain_init = runner._StopGuard.__init__
+
+
+def init(self):
+    plain_init(self)
+    GUARD["value"] = self
+
+
+def fake_exit(code: int) -> None:
+    """Stand in for os._exit in the final phase. The process ends here."""
+    note("os._exit " + str(code))
+    raise SystemExit(code)
+
+
+runner._StopGuard.__init__ = init
+runner.uuid4 = _Token
+runner.subprocess = _SkipChild
+runner.os._exit = fake_exit
+
+
+def inject() -> None:
+    """Send the first stop, then a different one, at this point."""
+    guard = GUARD["value"]
+    if guard is None or INJECTED["done"]:
+        return
+    INJECTED["done"] = True
+    note("inject " + FIRST + " then " + SECOND)
+    try:
+        guard.handle(getattr(signal, FIRST), None)
+    finally:
+        guard.handle(getattr(signal, SECOND), None)
+
+
+def local(frame, event, arg):
+    if event == "line":
+        SEEN.append((frame.f_code.co_name, frame.f_lineno))
+        if POINT == "line:" + str(len(SEEN) - 1):
+            inject()
+    return local
+
+
+def tracer(frame, event, arg):
+    if event == "call" and frame.f_code.co_name in TARGETS:
+        return local
+    return None
+
+
+def run() -> int:
+    if ENTRY == "selftest":
+        return runner._self_test(keep_guard=KEEP)
+    return runner.main(
+        ["1", "--root", str(ROOT), "--runner-dir", str(RESOURCES)], keep_guard=KEEP
+    )
+
+
+code = 0
+try:
+    sys.settrace(tracer)
+    try:
+        code = run()
+        if POINT == "after-return":
+            inject()
+    finally:
+        sys.settrace(None)
+except SystemExit as requested:
+    code = requested.code if isinstance(requested.code, int) else 1
+note("exit " + str(code))
+note("restored " + str(all(signal.getsignal(n) is h for n, h in ORIGINAL.items())))
+note("points " + str(len(SEEN)))
+raise SystemExit(code)
+'''
+
 
 def console_break_event() -> int:
     """Return the Ctrl+Break console event number. Windows only.
@@ -4556,7 +4697,7 @@ class StopSignalHandlerTests(unittest.TestCase):
         before = {number: signal.getsignal(number) for number in numbers}
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         guard.install()
-        guard.latch()
+        guard.phase = "cleanup"
         guard.handle(signal.SIGINT, None)
 
         with self.assertRaises(SystemExit) as raised:
@@ -4574,7 +4715,7 @@ class StopSignalHandlerTests(unittest.TestCase):
         before = {number: signal.getsignal(number) for number in numbers}
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         guard.install()
-        guard.latch()
+        guard.phase = "cleanup"
         guard.handle(signal.SIGINT, None)
         real_signal = signal.signal
         calls: list[int] = []
@@ -4587,7 +4728,7 @@ class StopSignalHandlerTests(unittest.TestCase):
 
         with patch.object(signal, "signal", interrupted):
             with self.assertRaises(SystemExit) as raised:
-                guard.restore()
+                runner._end_run(guard, 0, False)  # pyright: ignore[reportPrivateUsage]
 
         self.assertEqual(128 + signal.SIGINT, raised.exception.code)
         for number in numbers:
@@ -4653,35 +4794,62 @@ class StopSignalHandlerTests(unittest.TestCase):
         self.assertEqual(0, code)
         drop.assert_not_called()
 
-    def test_unlatched_stop_signal_ends_the_run_through_system_exit(
+    def test_a_body_stop_ends_the_run_through_system_exit(
         self: StopSignalHandlerTests,
     ) -> None:
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.phase = "body"
 
         with self.assertRaises(SystemExit) as raised:
             guard.handle(signal.SIGTERM, None)
 
         self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
 
-    def test_latched_stop_signal_waits_for_cleanup(
+    def test_a_cleanup_stop_waits_for_the_section_to_finish(
         self: StopSignalHandlerTests,
     ) -> None:
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
-        guard.latch()
+        guard.phase = "cleanup"
 
         guard.handle(signal.SIGTERM, None)
         guard.handle(signal.SIGTERM, None)
 
         self.assertEqual(signal.SIGTERM, guard.pending)
 
+    def test_an_install_stop_waits_for_the_handlers_to_go_in(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """A stop during install is recorded, so the loop can finish."""
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+
+        guard.handle(signal.SIGTERM, None)
+
+        self.assertEqual("install", guard.phase)
+        self.assertEqual(signal.SIGTERM, guard.pending)
+
+    def test_a_final_stop_ends_the_process_at_once(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """The final phase ends the process with the first code."""
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.phase = "cleanup"
+        guard.handle(signal.SIGTERM, None)
+        guard.phase = "final"
+        exits: list[int] = []
+
+        with patch.object(runner.os, "_exit", exits.append):
+            guard.handle(signal.SIGINT, None)
+
+        self.assertEqual([128 + signal.SIGTERM], exits)
+
     def test_pending_stop_signal_ends_the_run_after_cleanup(
         self: StopSignalHandlerTests,
     ) -> None:
         """The signal stays recorded, so a later one cannot replace it."""
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
-        guard.latch()
+        guard.phase = "cleanup"
         guard.handle(signal.SIGTERM, None)
-        guard.unlatch()
+        guard.phase = "body"
 
         with self.assertRaises(SystemExit) as raised:
             guard.stop_if_pending()
@@ -4690,18 +4858,19 @@ class StopSignalHandlerTests(unittest.TestCase):
         self.assertEqual(signal.SIGTERM, guard.pending)
 
     @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
-    def test_a_later_latched_signal_keeps_the_first_exit_code(
+    def test_a_later_cleanup_signal_keeps_the_first_exit_code(
         self: StopSignalHandlerTests,
     ) -> None:
-        """The first signal names the exit, through cleanup and after it."""
+        """The first signal sets the exit, through cleanup and after it."""
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         first = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        first.phase = "body"
 
         with self.assertRaises(SystemExit) as raised:
             first.handle(signal.SIGTERM, None)
         self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
 
-        guard.latch()
+        guard.phase = "cleanup"
         guard.handle(signal.SIGTERM, None)
         guard.handle(cast(int, getattr(signal, "SIGHUP")), None)
 
@@ -4709,6 +4878,142 @@ class StopSignalHandlerTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as stopped:
             guard.stop_if_pending()
         self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class StopPhaseInjectionTests(unittest.TestCase):
+    """A stop at any line of the guard's own code keeps the first code.
+
+    A handler can run between any two bytecodes, so no placement of checks
+    closes the class. This test calls the guard's handler at every line event
+    inside install, restore, _end_run, and stop_if_pending. It runs both entry
+    functions on both entry paths, and sends a second, different stop right
+    after the first at each point. The first code must still set the exit. No
+    traceback may appear. The library path must put every handler back. The
+    scratch database must be gone or never created.
+    """
+
+    def stop_names(self: StopPhaseInjectionTests) -> list[str]:
+        """Every stop signal that this platform has."""
+        return [
+            name
+            for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
+            if hasattr(signal, name)
+        ]
+
+    def run_driver(
+        self: StopPhaseInjectionTests,
+        entry: str,
+        keep: bool,
+        point: str,
+        first: str,
+        second: str,
+    ) -> tuple[int, list[str], str, bool]:
+        """Run the driver at one point and report what the run left."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(PHASE_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    point,
+                    token,
+                    entry,
+                    first,
+                    second,
+                    "1" if keep else "0",
+                    str(root),
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            returncode = process.returncode
+            output = process.stdout + process.stderr
+            if marker.exists():
+                notes = marker.read_text(encoding="utf-8").splitlines()
+            leftover = race_database_exists(url, name)
+            drop_race_database(url, name)
+        return returncode, notes, output, leftover
+
+    def assert_point_keeps_the_first_code(
+        self: StopPhaseInjectionTests,
+        entry: str,
+        keep: bool,
+        point: str,
+        first: str,
+        second: str,
+    ) -> None:
+        """Check one injection point for the first code and a clean exit."""
+        returncode, notes, output, leftover = self.run_driver(
+            entry, keep, point, first, second
+        )
+        detail = (
+            f"{entry} keep={keep} {point} exited {returncode} notes {notes}\n{output}"
+        )
+        self.assertIn(f"inject {first} then {second}", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(128 + getattr(signal, first), returncode, detail)
+        self.assertFalse(leftover, detail)
+        if not keep:
+            self.assertIn("restored True", notes, detail)
+
+    def test_every_line_event_keeps_the_first_code(
+        self: StopPhaseInjectionTests,
+    ) -> None:
+        """Every line event of the guard's own code is an injection point."""
+        names = self.stop_names()
+        first = "SIGINT"
+        second = "SIGTERM" if "SIGTERM" in names else "SIGBREAK"
+        covered = 0
+        for entry in ("normal", "selftest"):
+            for keep in (False, True):
+                _, notes, output, _ = self.run_driver(
+                    entry, keep, "none", first, second
+                )
+                counted = [line for line in notes if line.startswith("points ")]
+                self.assertTrue(counted, output)
+                points = int(counted[0].split()[1])
+                self.assertGreater(points, 0, output)
+                for index in range(points):
+                    with self.subTest(entry=entry, keep=keep, point=index):
+                        self.assert_point_keeps_the_first_code(
+                            entry, keep, f"line:{index}", first, second
+                        )
+                    covered += 1
+                if keep:
+                    with self.subTest(entry=entry, keep=keep, point="after-return"):
+                        self.assert_point_keeps_the_first_code(
+                            entry, keep, "after-return", first, second
+                        )
+                    covered += 1
+        self.assertGreaterEqual(covered, 150)
 
 
 CLEANUP_WATCH_SECONDS = 6.0
@@ -5149,7 +5454,7 @@ class CleanupDeadlineTests(unittest.TestCase):
         name = f"cmsc127_race_{uuid4().hex}"
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         guard.protect(name, "postgresql://127.0.0.1/postgres")
-        guard.latch()
+        guard.phase = "cleanup"
         guard.handle(signal.SIGTERM, None)
 
         with patch.object(runner, "_drop_database", side_effect=stall_drop):
