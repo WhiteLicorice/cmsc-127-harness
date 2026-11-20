@@ -60,9 +60,16 @@ CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 CONSOLE_EVENTS = frozenset({2, 5, 6})  # close, logoff, shutdown
-# Windows ends the process about 5 s after a close event. Every cleanup path
-# stops waiting at this one budget, so a close handler always returns in time.
+# Windows ends the process about 5 s after a close event. A stop path and a
+# close handler stop waiting at this budget, so the handler always returns in
+# time. A normal end waits longer, because a run that drops its database is
+# more useful than a run that leaves it behind.
 CLEANUP_SECONDS = 3.0
+# A normal end waits for its drop. The libpq limits end a stall at 2 s, so
+# this limit leaves five times that room. A lock that lasts longer is not a
+# short delay, so the run stops waiting and reports the failure.
+NORMAL_DROP_SECONDS = 10.0
+CLEANUP_POLL_SECONDS = 0.2
 CONSOLE_WAIT_SECONDS = 2.5
 CONSOLE_GRACE_SECONDS = 1.2
 CONSOLE_RETRY_SECONDS = 0.2
@@ -1478,20 +1485,46 @@ def _cleanup_conninfo(url: str) -> str:
     Cleanup has no user to answer a question, so a connection that stalls
     must fail inside the cleanup budget. The statement and lock limits also
     free a connection whose statement never finishes.
+
+    Keep the options that the user's URL supplies. A URL can turn off a
+    read-only default, and a cleanup connection without that setting cannot
+    drop the database. Add the cleanup limits after the supplied options, so
+    the later setting wins.
+
+    libpq reads PGOPTIONS only when the connection string leaves options
+    unset, so the run's own connection can take its options from there. Keep
+    that setting too, in the same order of precedence.
     """
     settings = conninfo_to_dict(url)
     settings["connect_timeout"] = str(CLEANUP_CONNECT_TIMEOUT)
-    settings["options"] = CLEANUP_OPTIONS
+    supplied = str(
+        settings.get("options") or os.environ.get("PGOPTIONS") or ""
+    ).strip()
+    settings["options"] = f"{supplied} {CLEANUP_OPTIONS}" if supplied else CLEANUP_OPTIONS
     return make_conninfo("", **settings)
 
 
-def _run_in_budget(action: Callable[[], None], seconds: float) -> bool:
+def _run_in_budget(
+    action: Callable[[], None],
+    seconds: float,
+    subject: str,
+    stop: Callable[[], bool] | None = None,
+) -> bool:
     """Run one cleanup action and stop waiting when the budget ends.
 
     Return True when the action finished. Return False when the budget ended
     first. A failure from the action reaches the caller as it did before. When
     the budget ends first, the worker thread stays behind and the process ends
     without it, so a stalled server cannot hold the process open.
+
+    A worker thread can fail to start while the interpreter shuts down. The
+    action would then run on this thread, where no budget can stop a server
+    that answers and then stalls a statement. Skip the action and name what it
+    did not drop, so the caller always returns inside its budget.
+
+    The stop callback ends the wait when it returns True. The caller decides
+    how long a stop may wait, so a stop signal never holds the process open
+    for the whole budget.
     """
     finished = threading.Event()
     failure: list[BaseException] = []
@@ -1508,13 +1541,27 @@ def _run_in_budget(action: Callable[[], None], seconds: float) -> bool:
         worker = threading.Thread(target=target, name="cmsc127-cleanup", daemon=True)
         worker.start()
     except RuntimeError:
-        # A thread cannot start while the interpreter shuts down. Run the
-        # action here instead, and rely on the libpq limits for its length.
-        target()
-    done = finished.wait(seconds)
-    if done and failure:
+        try:
+            print(
+                f"Cleanup skipped. A worker thread could not start. "
+                f"Drop the database {subject} by hand.",
+                file=sys.stderr,
+            )
+        except (OSError, ValueError):
+            pass
+        return False
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if finished.wait(min(CLEANUP_POLL_SECONDS, remaining)):
+            break
+        if stop is not None and stop():
+            return False
+    if failure:
         raise failure[0]
-    return done
+    return True
 
 
 def _create_database(
@@ -1604,26 +1651,48 @@ class _StopGuard:
         """Forget the scratch database. Call this when its create failed."""
         self.console_name = None
 
-    def drop(self, name: str, admin: _DbConnection) -> None:
-        """Drop the scratch database on the run's own path.
+    def drop(
+        self, name: str, admin: _DbConnection, seconds: float = CLEANUP_SECONDS
+    ) -> bool:
+        """Drop the scratch database on the run's own path. Report the result.
 
         The name stays protected until the drop finishes, so a console close
         during the drop runs its own DROP DATABASE IF EXISTS rather than
         finding nothing to drop.
 
-        The drop stops waiting at the cleanup budget. A server that stalls a
-        statement then cannot hold a stop path open. A drop that did not
-        finish keeps the name, so a later console close still tries once
-        more. The worker owns the connection until its call returns.
+        A normal end passes a longer budget, because the run must not report
+        success while its database is still there. A stop path keeps the
+        cleanup budget. A stop signal that arrives during the wait gets that
+        same budget from the moment it arrives. The drop still gets its
+        chance, and the stop waits no longer than a stop path does. A drop
+        that did not finish keeps the name, so a later console close still
+        tries once more. The worker owns the connection until its call
+        returns.
         """
+        seen = self.pending
+        stop_started: float | None = None
+
+        def stop() -> bool:
+            """End the wait once a new stop has had the cleanup budget."""
+            nonlocal stop_started
+            if self.pending is None or self.pending == seen:
+                return False
+            if stop_started is None:
+                stop_started = time.monotonic()
+            return time.monotonic() - stop_started >= CLEANUP_SECONDS
+
         finished = False
         try:
             finished = _run_in_budget(
-                lambda: _drop_database(name, admin), CLEANUP_SECONDS
+                lambda: _drop_database(name, admin),
+                seconds,
+                name,
+                stop,
             )
         finally:
             if finished:
                 self.console_name = None
+        return finished
 
     def console_event(self, event: int) -> int:
         """Drop the scratch database on a Windows console close.
@@ -1648,7 +1717,7 @@ class _StopGuard:
             return 0
         try:
             _run_in_budget(
-                lambda: self._drop_console_database(name), CLEANUP_SECONDS
+                lambda: self._drop_console_database(name), CLEANUP_SECONDS, name
             )
         except BaseException:
             # A callback that lets an exception escape can leave the process in
@@ -1770,6 +1839,54 @@ class _StopGuard:
         signum = self.pending
         self.pending = None
         raise SystemExit(128 + signum)
+
+
+def _cleanup_seconds(guard: _StopGuard) -> float:
+    """The drop budget for the path that is ending now.
+
+    A stop or a console close must return inside the Windows window. A normal
+    end waits for its drop, because a run that reports success while its
+    database is still there is wrong about what it did.
+    """
+    return CLEANUP_SECONDS if guard.pending is not None else NORMAL_DROP_SECONDS
+
+
+def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bool:
+    """Drop the scratch database on the way out. Report a normal failure.
+
+    A stop signal that arrived during the run ends it with its own code after
+    the cleanup. The drop keeps the short budget on that path, because the
+    process must return inside the Windows window. A normal end waits for a
+    confirmed drop. When that drop fails, this returns False and the caller
+    reports the failure and ends with an error.
+    """
+    dropped = True
+    try:
+        guard.latch()
+        if admin is not None and name:
+            dropped = guard.drop(name, admin, _cleanup_seconds(guard))
+    except (OSError, psycopg.Error) as error:
+        # A server that refuses the drop, such as one that denies the
+        # permission, reaches here. Report it in one line rather than let a
+        # traceback replace the run's result.
+        detail = str(error).strip().rstrip(".!?")
+        print(f"Cleanup failed. {detail}.")
+        dropped = False
+    finally:
+        guard.restore()
+    # A held signal raises here, so its exit code stands and this result is
+    # never used on that path.
+    guard.stop_if_pending()
+    return dropped
+
+
+def _report_cleanup_failure(name: str) -> None:
+    """Name the database that a normal end could not drop."""
+    print(
+        f"Cleanup failed. The database {name} is still present. "
+        "Drop it by hand.",
+        file=sys.stderr,
+    )
 
 
 def _migration_files(root: Path) -> list[Path]:
@@ -3979,6 +4096,7 @@ def _self_test() -> int:
     admin: _DbConnection | None = None
     guard = _StopGuard()
     guard.install()
+    code = 0
     try:
         name, admin = _create_database(base_url, guard)
         guard.unlatch()
@@ -4008,19 +4126,16 @@ def _self_test() -> int:
             env=environment,
             check=False,
         )
-        return completed.returncode
+        code = completed.returncode
     except (OSError, psycopg.Error) as error:
         detail = str(error).strip().rstrip(".!?")
         print(f"Self-test setup failed. {detail}.")
-        return 1
+        code = 1
     finally:
-        try:
-            guard.latch()
-            if admin is not None and name:
-                guard.drop(name, admin)
-        finally:
-            guard.restore()
-        guard.stop_if_pending()
+        if not _finish_run(guard, name, admin):
+            _report_cleanup_failure(name)
+            code = 1
+    return code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -4088,6 +4203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     results: list[dict[str, object]] = []
     guard = _StopGuard()
     guard.install()
+    cleanup_failed = False
     try:
         database_name, admin = _create_database(database_url, guard)
         guard.unlatch()
@@ -4196,13 +4312,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Runner setup failed. {detail}.")
         return 1
     finally:
-        try:
-            guard.latch()
-            if admin is not None and database_name:
-                guard.drop(database_name, admin)
-        finally:
-            guard.restore()
-        guard.stop_if_pending()
+        if not _finish_run(guard, database_name, admin):
+            _report_cleanup_failure(database_name)
+            cleanup_failed = True
+    if cleanup_failed:
+        return 1
     skipped = manifest.get("skips", [])
     if arguments.case_id is None and isinstance(skipped, list):
         for index, raw_skip in enumerate(cast(list[object], skipped), start=1):

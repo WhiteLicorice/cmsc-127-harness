@@ -14,16 +14,17 @@ import threading
 import time
 import unittest
 from collections.abc import Mapping, Sequence
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 from io import StringIO
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any, Callable, Protocol, cast
 from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 import psycopg
 from psycopg import sql as psycopg_sql
+from psycopg.conninfo import conninfo_to_dict
 import runner
 
 from runner import compare_dataset, load_manifest, main, select_cases
@@ -3828,7 +3829,11 @@ class StopSignalHandlerTests(unittest.TestCase):
 
 
 CLEANUP_WATCH_SECONDS = 6.0
-STALL_LANE = range(55560, 55570)
+NORMAL_WATCH_SECONDS = 15.0
+# A stall fixture takes one loopback port from this lane. It skips a busy port,
+# so the database cluster on 55610 and the browser tests on 55616 to 55619 stay
+# free.
+STALL_LANE = range(55611, 55616)
 
 
 def stall_drop(*arguments: object) -> None:
@@ -4034,6 +4039,126 @@ class CleanupDeadlineTests(unittest.TestCase):
         self.assertIn("lock_timeout=2000", built)
         self.assertIn("dbname=postgres", built)
 
+    def test_the_cleanup_connection_keeps_the_url_options(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A supplied option survives, and the cleanup limits follow it."""
+        url = (
+            "postgresql://postgres:password@127.0.0.1:55460/postgres"
+            "?options=-c%20default_transaction_read_only%3Doff"
+        )
+        built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+        options = conninfo_to_dict(built)["options"]
+
+        self.assertEqual(
+            "-c default_transaction_read_only=off "
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            options,
+        )
+
+    def test_a_url_without_options_gets_only_the_cleanup_limits(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """An absent option list must not leave a stray space or a blank value."""
+        url = "postgresql://postgres:password@127.0.0.1:55460/postgres"
+        built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            conninfo_to_dict(built)["options"],
+        )
+
+    def test_the_cleanup_connection_keeps_the_environment_options(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """PGOPTIONS reaches the run, so the cleanup keeps it as well."""
+        url = "postgresql://postgres:password@127.0.0.1:55460/postgres"
+        with patch.dict(
+            os.environ, {"PGOPTIONS": "-c default_transaction_read_only=off"}
+        ):
+            built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(
+            "-c default_transaction_read_only=off "
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            conninfo_to_dict(built)["options"],
+        )
+
+    def test_a_url_option_wins_over_the_environment(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """libpq reads the connection string first, so the cleanup does too."""
+        url = (
+            "postgresql://postgres:password@127.0.0.1:55460/postgres"
+            "?options=-c%20default_transaction_read_only%3Doff"
+        )
+        with patch.dict(
+            os.environ, {"PGOPTIONS": "-c default_transaction_read_only=on"}
+        ):
+            built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(
+            "-c default_transaction_read_only=off "
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            conninfo_to_dict(built)["options"],
+        )
+
+    def test_a_failed_thread_start_returns_inside_the_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A cleanup with no worker thread must skip the drop, not run it late."""
+        with StallServer(handshake=True) as server:
+            guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+            guard.protect(f"cmsc127_race_{uuid4().hex}", server.url())
+
+            class _FailedThread:
+                """Stand in for a thread the interpreter will not start."""
+
+                def __init__(self, **options: object) -> None:
+                    pass
+
+                def start(self) -> None:
+                    raise RuntimeError("cannot start new thread")
+
+            fallback = SimpleNamespace(Event=threading.Event, Thread=_FailedThread)
+            notes = StringIO()
+            with patch.object(runner, "threading", fallback), redirect_stderr(notes):
+                returned, elapsed = run_with_watch(
+                    lambda: guard.console_event(2), CLEANUP_WATCH_SECONDS
+                )
+            connections = server.connections
+
+        self.assertTrue(
+            returned, f"the callback was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(elapsed, 1.0, f"the fallback took {elapsed:.2f} s")
+        self.assertEqual(0, connections, "the fallback opened a connection")
+        self.assertIn("Cleanup skipped.", notes.getvalue())
+
+    def test_a_failed_thread_start_keeps_the_database_protected(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A skipped drop leaves the name, so a later close still tries."""
+        name = f"cmsc127_race_{uuid4().hex}"
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.protect(name, "postgresql://127.0.0.1/postgres")
+
+        class _FailedThread:
+            """Stand in for a thread the interpreter will not start."""
+
+            def __init__(self, **options: object) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("cannot start new thread")
+
+        fallback = SimpleNamespace(Event=threading.Event, Thread=_FailedThread)
+        with patch.object(runner, "threading", fallback), redirect_stderr(StringIO()):
+            dropped = guard.drop(name, cast(Any, Mock()), 0.5)
+
+        self.assertFalse(dropped)
+        self.assertEqual(name, guard.console_name)
+
     def test_the_signal_cleanup_gives_up_at_its_budget(
         self: CleanupDeadlineTests,
     ) -> None:
@@ -4057,10 +4182,46 @@ class CleanupDeadlineTests(unittest.TestCase):
             f"the signal cleanup took {elapsed:.2f} s on a stalled drop",
         )
 
+    def test_a_stop_during_a_normal_end_keeps_the_cleanup_budget(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A stop that arrives during the wait still gets the cleanup budget."""
+        name = f"cmsc127_race_{uuid4().hex}"
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.protect(name, "postgresql://127.0.0.1/postgres")
+
+        def stop_soon() -> None:
+            time.sleep(0.5)
+            guard.pending = signal.SIGTERM
+
+        with patch.object(runner, "_drop_database", side_effect=stall_drop):
+            threading.Thread(target=stop_soon, daemon=True).start()
+            returned, elapsed = run_with_watch(
+                lambda: guard.drop(
+                    name, cast(Any, Mock()), runner.NORMAL_DROP_SECONDS
+                ),
+                NORMAL_WATCH_SECONDS,
+            )
+
+        self.assertTrue(
+            returned, f"the normal end was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            0.5 + runner.CLEANUP_SECONDS + 1.0,
+            f"the stop waited {elapsed:.2f} s on a stalled drop",
+        )
+        self.assertGreaterEqual(
+            elapsed,
+            0.5 + runner.CLEANUP_SECONDS - 0.5,
+            f"the stop cut the drop short at {elapsed:.2f} s",
+        )
+
     def test_the_self_test_cleanup_gives_up_at_its_budget(
         self: CleanupDeadlineTests,
     ) -> None:
         """The self-test shares the drop of the signal cleanup path."""
+        notes = StringIO()
         with patch.object(
             runner,
             "_create_database",
@@ -4069,19 +4230,200 @@ class CleanupDeadlineTests(unittest.TestCase):
             runner, "_drop_database", side_effect=stall_drop
         ):
             child.run.return_value.returncode = 0
-            returned, elapsed = run_with_watch(
-                runner._self_test,  # pyright: ignore[reportPrivateUsage]
-                CLEANUP_WATCH_SECONDS,
-            )
+            with redirect_stderr(notes):
+                returned, elapsed = run_with_watch(
+                    runner._self_test,  # pyright: ignore[reportPrivateUsage]
+                    NORMAL_WATCH_SECONDS,
+                )
 
         self.assertTrue(
             returned, f"the self-test was still blocked at {elapsed:.2f} s"
         )
         self.assertLess(
             elapsed,
-            runner.CLEANUP_SECONDS + 1.0,
+            runner.NORMAL_DROP_SECONDS + 1.0,
             f"the self-test took {elapsed:.2f} s on a stalled drop",
         )
+        self.assertIn("Cleanup failed.", notes.getvalue())
+
+
+NORMAL_DROP_DRIVER = '''\
+"""Run the runner and hold its real DROP until the parent allows it."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import time
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+TOKEN = sys.argv[3]
+BUDGET = sys.argv[4]
+sys.path.insert(0, str(HARNESS))
+
+import runner
+
+
+class _Token:
+    """Stand in for the UUID, so the parent knows the database name."""
+
+    hex = TOKEN
+
+
+runner.uuid4 = _Token
+if BUDGET:
+    runner.NORMAL_DROP_SECONDS = float(BUDGET)
+plain_execute = runner._execute
+
+
+def execute(cursor, statement, parameters=None):
+    if statement.startswith("DROP DATABASE"):
+        MARKER.write_text("ready", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while MARKER.read_text(encoding="utf-8") != "drop":
+            if time.monotonic() >= deadline:
+                raise SystemExit("the parent never released the drop")
+            time.sleep(0.01)
+    return plain_execute(cursor, statement, parameters)
+
+
+runner._execute = execute
+raise SystemExit(runner.main(sys.argv[5:]))
+'''
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class NormalDropCompletionTests(unittest.TestCase):
+    """A normal end drops its database before it reports success."""
+
+    def exists(self: NormalDropCompletionTests, url: str, name: str) -> bool:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+                return cursor.fetchone() is not None
+
+    def drop(self: NormalDropCompletionTests, url: str, name: str) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                        psycopg_sql.Identifier(name)
+                    )
+                )
+
+    def run_with_lock(
+        self: NormalDropCompletionTests, budget: str
+    ) -> tuple[int, str, bool, bool]:
+        """Run the runner, hold its DROP, then report what happened.
+
+        Return the exit code, the error output, whether the runner had already
+        ended while the lock was held, and whether the database was then
+        still present.
+        """
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        failure = ""
+        returncode = -1
+        present = False
+        early = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            driver = base / "driver.py"
+            driver.write_text(NORMAL_DROP_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    token,
+                    budget,
+                    "1",
+                    "--root",
+                    str(root),
+                    "--runner-dir",
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists() and marker.read_text(encoding="utf-8") == "ready":
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(
+                    marker.exists() and marker.read_text(encoding="utf-8") == "ready",
+                    "the runner did not reach its real DROP",
+                )
+                with psycopg.connect(url) as blocker:
+                    with blocker.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT oid FROM pg_database WHERE datname = %s FOR UPDATE",
+                            (name,),
+                        )
+                    marker.write_text("drop", encoding="utf-8")
+                    started = time.monotonic()
+                    # Four seconds is past the 3 s cleanup budget that a stop
+                    # path uses, so an early end here is the defect.
+                    while time.monotonic() - started < 4.0:
+                        if process.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                    early = process.poll() is not None
+                    present = self.exists(url, name)
+                if process.poll() is None:
+                    returncode = process.wait(timeout=90)
+                else:
+                    returncode = process.returncode
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stderr is not None:
+                    failure = process.stderr.read()
+                    process.stderr.close()
+                self.drop(url, name)
+        return returncode if returncode is not None else -1, failure, early, present
+
+    def test_a_normal_end_waits_for_a_lock_past_the_cleanup_budget(
+        self: NormalDropCompletionTests,
+    ) -> None:
+        """The drop waits on a four-second lock instead of giving up at 3 s."""
+        returncode, failure, early, present = self.run_with_lock("")
+
+        self.assertFalse(early, "the runner gave up before the lock was released")
+        self.assertTrue(present, "the lock was not held while the runner waited")
+        self.assertEqual(0, returncode, failure)
+        self.assertNotIn("Cleanup failed", failure)
+
+    def test_a_normal_end_reports_a_drop_that_never_finishes(
+        self: NormalDropCompletionTests,
+    ) -> None:
+        """A drop that cannot finish in its budget fails the run and says so."""
+        returncode, failure, early, present = self.run_with_lock("1.5")
+
+        self.assertTrue(early, "the runner waited past its own budget")
+        self.assertTrue(present, "the lock was not held while the runner waited")
+        self.assertEqual(1, returncode, failure)
+        self.assertIn("Cleanup failed.", failure)
 
 
 CONSOLE_DRIVER = '''\
