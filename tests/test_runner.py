@@ -3507,6 +3507,13 @@ RESTORE_POINTS = (
 # remove. The restore points join them when the test also wants that report.
 FAILED_DROP_POINTS = REPORT_POINTS + ("restore-fail", "selftest-restore-fail")
 RESTORE_FAIL_POINTS = ("restore-fail", "selftest-restore-fail")
+# The points that send a second stop after the SIGINT handler changes. That is
+# the interval where the default Ctrl+C handler can replace the first stop's
+# code with the Windows control status.
+MIXED_RESTORE_POINTS = (
+    "console-mixed-restore",
+    "selftest-console-mixed-restore",
+)
 # The console stop that this run delivers, as the name of a Python signal.
 CONSOLE_SIGNAL = os.environ.get("CMSC127_CONSOLE_SIGNAL", "")
 
@@ -3620,11 +3627,33 @@ def restore(guard):
     The guard has already made its last check for a held signal when this
     runs, so a signal here is held and never replayed unless the guard checks
     once more after it puts the old handlers back.
+
+    The mixed points send a second stop after the SIGINT handler changes.
+    That is the interval where the default Ctrl+C handler can replace the
+    first stop's code, so the run must still end with the first code.
     """
     if POINT in RESTORE_POINTS or POINT in RESTORE_FAIL_POINTS:
         note("before restore")
         deliver()
-    return plain_restore(guard)
+    if POINT not in MIXED_RESTORE_POINTS:
+        return plain_restore(guard)
+    note("before restore")
+    console_stop()
+    old_signal = signal.signal
+
+    def restore_signal(number, handler):
+        result = old_signal(number, handler)
+        if number == signal.SIGINT:
+            note("SIGINT handler restored, first pending " + str(guard.pending))
+            signal.raise_signal(signal.SIGINT)
+            time.sleep(0.5)
+        return result
+
+    signal.signal = restore_signal
+    try:
+        return plain_restore(guard)
+    finally:
+        signal.signal = old_signal
 
 
 runner._execute = execute
@@ -3994,6 +4023,7 @@ class ConsoleStopSignalTests(unittest.TestCase):
         point: str,
         signal_name: str,
         self_test: bool = False,
+        mixed: bool = False,
     ) -> None:
         """Run the runner, deliver a console stop at one point, and check it."""
         url = os.environ["CMSC127_DATABASE_URL"]
@@ -4088,6 +4118,11 @@ class ConsoleStopSignalTests(unittest.TestCase):
         self.assertFalse(leftover, detail)
         self.assertIn("handler default", notes, detail)
         self.assertEqual(128 + getattr(signal, signal_name), returncode, detail)
+        if mixed:
+            # The second stop must not reach the default handler, which would
+            # print a traceback and replace the first stop's code.
+            self.assertIn("SIGINT handler restored", "\n".join(notes), detail)
+            self.assertNotIn("Traceback", output, detail)
 
     def test_sigint_at_the_drop_drops_the_race_database(
         self: ConsoleStopSignalTests,
@@ -4139,6 +4174,28 @@ class ConsoleStopSignalTests(unittest.TestCase):
     ) -> None:
         self.assert_console_stop_leaves_no_database(
             "selftest-console-restore", "SIGBREAK", self_test=True
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_sigbreak_at_restore_then_sigint_keeps_the_first_code(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        """A Ctrl+C after the SIGINT handler changes keeps the Ctrl+Break code.
+
+        Restoration puts the default Ctrl+C handler back. A Ctrl+C in that
+        interval raises KeyboardInterrupt through it, so the process must
+        still end with the first stop's code and print no traceback.
+        """
+        self.assert_console_stop_leaves_no_database(
+            "console-mixed-restore", "SIGBREAK", mixed=True
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_self_test_sigbreak_at_restore_then_sigint_keeps_the_first_code(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database(
+            "selftest-console-mixed-restore", "SIGBREAK", self_test=True, mixed=True
         )
 
 
