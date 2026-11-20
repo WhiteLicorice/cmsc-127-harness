@@ -168,8 +168,11 @@ class FakeCaches {
 }
 
 // The lock API of a worker. A test can hold a name before a step asks for it.
+// A waiting request queues behind the holder, as the browser does. An
+// ifAvailable request answers null at once.
 class FakeLocks {
   private readonly held = new Set<string>();
+  private readonly waiting = new Map<string, (() => void)[]>();
 
   hold(name: string): void {
     this.held.add(name);
@@ -177,6 +180,7 @@ class FakeLocks {
 
   release(name: string): void {
     this.held.delete(name);
+    this.waiting.get(name)?.shift()?.();
   }
 
   async request(
@@ -188,11 +192,18 @@ class FakeLocks {
     const step = (typeof optionsOrStep === "function" ? optionsOrStep : maybeStep) as
       (lock: unknown) => Promise<unknown>;
     if (options.ifAvailable && this.held.has(name)) return step(null);
+    while (this.held.has(name)) {
+      await new Promise<void>((resume) => {
+        const queue = this.waiting.get(name) ?? [];
+        queue.push(resume);
+        this.waiting.set(name, queue);
+      });
+    }
     this.held.add(name);
     try {
       return await step({ name });
     } finally {
-      this.held.delete(name);
+      this.release(name);
     }
   }
 }
@@ -996,6 +1007,39 @@ describe("offline worker requests", () => {
     await worker.dispatchFetch(navigate(scope));
 
     expect(await worker.names()).toEqual([]);
+  });
+});
+
+describe("offline worker build record", () => {
+  it("waits for the active snapshot's lock before it records the build", async () => {
+    // A cleanup holds the lock of the active snapshot while it checks and opens
+    // it. A navigation at that moment must still write its record. Without the
+    // record, the next takeover answers the document's files from the new
+    // snapshot. The document then fails on a changed element.
+    const build = "a".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+    });
+    await worker.install();
+    const name = `cmsc127-harness-${build}`;
+    const record = `${scope}__client__/tab`;
+    locks.hold(`${name}-lock`);
+
+    const navigation = worker.dispatchFetch(navigate(scope), { resultingClientId: "tab" });
+    await flush();
+    const cache = await caches.open(name);
+    expect(await cache.match(record)).toBeUndefined();
+
+    locks.release(`${name}-lock`);
+    await navigation;
+
+    const written = await cache.match(record);
+    expect(written === undefined ? "no record" : await written.text()).toContain(build);
   });
 });
 

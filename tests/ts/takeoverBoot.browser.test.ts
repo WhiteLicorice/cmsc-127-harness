@@ -6,8 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 // A build can take over the tab while the previous document still boots. The
 // document's later module request must then read its own build, not the new
-// one. This test starts a navigation during a successful activation and holds
-// the first module request until the new worker is in charge.
+// one. The first case starts a navigation during a successful activation and
+// holds the first module request until the new worker is in charge.
+//
+// The second case holds the lock of the active snapshot during a cleanup. A
+// second tab navigates in that window. Its record must still land, or the
+// takeover answers the document's files from the new snapshot.
 
 const root = resolve(import.meta.dirname, "../..");
 const fixtureRoot = resolve(root, ".vitest/takeover-boot");
@@ -67,11 +71,15 @@ export const version = "b";
 
 type Build = { directory: string };
 
-async function writeBuild(name: string, html: string, app: string): Promise<Build> {
+// The page loads app.js through its own script tag, so a later import of that
+// path answers from the module map and never reaches the worker. probe.js is
+// in the snapshot and in no script tag, so its import follows the worker.
+async function writeBuild(name: string, html: string, app: string, version: string): Promise<Build> {
   const directory = resolve(fixtureRoot, name);
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "index.html"), html, "utf-8");
   await writeFile(join(directory, "app.js"), app, "utf-8");
+  await writeFile(join(directory, "probe.js"), `export const version = "${version}";\n`, "utf-8");
   const { writeOfflineFiles } = await import("../../scripts/build-offline.mjs");
   await writeOfflineFiles(directory);
   return { directory };
@@ -82,6 +90,32 @@ async function snapshotName(build: Build): Promise<string> {
   return `cmsc127-harness-${manifest.match(/"buildId":"([0-9a-f]{64})"/)?.[1] ?? ""}`;
 }
 
+// Hold the cleanup inside the lock of the active snapshot. The pause stands in
+// for a slow check and open. A navigation in that window must still record its
+// build.
+async function holdInsideLock(build: Build, active: string): Promise<void> {
+  const file = join(build.directory, "service-worker.js");
+  const source = await readFile(file, "utf-8");
+  const marker = "cache = await openSnapshot(name);";
+  const target = source.indexOf(marker, source.indexOf("async function deleteUnusedSnapshots()"));
+  if (target < 0) throw new Error("The worker template has no cleanup open to hold.");
+  const held = `${source.slice(0, target)}if (name === ${JSON.stringify(active)}) await fetch(scoped("__held_lock__?n=" + holdCount++));\n${source.slice(target)}`;
+  await writeFile(file, `let holdCount = 0;\n${held}`, "utf-8");
+}
+
+// A reload starts a cleanup through the navigation handler. This listener
+// starts one on demand, so the test can hold the lock without a reload.
+async function addCleanupMessage(build: Build): Promise<void> {
+  const file = join(build.directory, "service-worker.js");
+  const source = await readFile(file, "utf-8");
+  await writeFile(file, `${source}
+self.addEventListener("message", (event) => {
+  if (event.data !== "cleanup") return;
+  event.waitUntil(deleteUnusedSnapshots().then(() => event.ports[0].postMessage("done")));
+});
+`, "utf-8");
+}
+
 let buildA: Build;
 let buildB: Build;
 let server: Server;
@@ -89,26 +123,55 @@ let browser: Browser;
 let origin = "";
 let served: Build;
 
+let holdLock = false;
+let announceHold: () => void = () => undefined;
+let releaseHold: () => void = () => undefined;
+const lockHeld = new Promise<void>((resolve) => {
+  announceHold = resolve;
+});
+
 function serveFile(response: import("node:http").ServerResponse, body: Buffer, type: string): void {
   response.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" });
   response.end(body);
 }
 
+async function handle(
+  request: import("node:http").IncomingMessage,
+  response: import("node:http").ServerResponse,
+): Promise<void> {
+  const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  const relative = pathname === "/" ? "index.html" : pathname.slice(1);
+  if (relative === "__held_lock__") {
+    if (holdLock) {
+      holdLock = false;
+      const gate = new Promise<void>((release) => {
+        releaseHold = release;
+      });
+      announceHold();
+      await gate;
+    }
+    response.writeHead(204, { "Cache-Control": "no-store" });
+    response.end();
+    return;
+  }
+  const file = join(served.directory, relative);
+  const body = await readFile(file).catch(() => null);
+  if (body === null) {
+    response.writeHead(404);
+    response.end();
+    return;
+  }
+  serveFile(response, body, TYPES[extname(file)] ?? "application/octet-stream");
+}
+
 beforeAll(async () => {
-  buildA = await writeBuild("build-a", PAGE_A, APP_A);
-  buildB = await writeBuild("build-b", PAGE_B, APP_B);
+  buildA = await writeBuild("build-a", PAGE_A, APP_A, "a");
+  await holdInsideLock(buildA, await snapshotName(buildA));
+  await addCleanupMessage(buildA);
+  buildB = await writeBuild("build-b", PAGE_B, APP_B, "b");
   served = buildA;
   server = createServer((request, response) => {
-    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
-    const relative = pathname === "/" ? "index.html" : pathname.slice(1);
-    const file = join(served.directory, relative);
-    void readFile(file).then(
-      (body) => serveFile(response, body, TYPES[extname(file)] ?? "application/octet-stream"),
-      () => {
-        response.writeHead(404);
-        response.end();
-      },
-    );
+    void handle(request, response);
   });
   const port = await listenOnLanePort(server);
   origin = `http://127.0.0.1:${port}`;
@@ -143,7 +206,7 @@ async function importVersion(page: Page): Promise<Imported> {
     target.imported = undefined;
     const script = document.createElement("script");
     script.type = "module";
-    script.textContent = `import("./app.js").then(
+    script.textContent = `import("./probe.js").then(
       (module) => { window.imported = { version: module.version }; },
       (error) => { window.imported = { error: error.message }; },
     );`;
@@ -210,6 +273,77 @@ describe("takeover while a document boots", () => {
     await page.reload({ waitUntil: "load" });
     expect(await page.evaluate(() => document.body.dataset["build"])).toBe("b");
     expect((await importVersion(page))["version"]).toBe("b");
+
+    await context.close();
+  }, 120_000);
+
+  it("records the build of a document that navigates during a cleanup lock", async () => {
+    const context = await browser.newContext();
+    const first = await context.newPage();
+    const errors: string[] = [];
+    first.on("pageerror", (error) => errors.push(error.message));
+
+    served = buildA;
+    await first.goto(`${origin}/`, { waitUntil: "load" });
+    await first.evaluate(async () => {
+      await navigator.serviceWorker.register("service-worker.js", { scope: "./" });
+      await navigator.serviceWorker.ready;
+    });
+    const cacheA = await snapshotName(buildA);
+    await waitForCache(first, cacheA);
+    await first.reload({ waitUntil: "load" });
+    expect(await first.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+
+    // The cleanup takes the lock of the active snapshot and holds it.
+    holdLock = true;
+    const cleanup = first.evaluate(() => new Promise<void>((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => resolve();
+      navigator.serviceWorker.controller?.postMessage("cleanup", [channel.port2]);
+    }));
+    await lockHeld;
+
+    // A second tab navigates in that window. The navigation must wait for the
+    // lock. Its record must land.
+    const second = await context.newPage();
+    const started = Date.now();
+    const navigation = second.goto(`${origin}/`, { waitUntil: "load" });
+    const settled = await Promise.race([
+      navigation.then(() => "done" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 500)),
+    ]);
+    releaseHold();
+    await navigation;
+    const waited = Date.now() - started;
+    await cleanup;
+
+    // The record holds build A, so the takeover keeps this document on A.
+    served = buildB;
+    await second.evaluate(() => {
+      window.before = navigator.serviceWorker.controller;
+    });
+    await second.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      await registration?.update();
+    });
+    const cacheB = await snapshotName(buildB);
+    await waitForCache(second, cacheB);
+    await second.waitForFunction(
+      () => navigator.serviceWorker.controller !== window.before,
+      undefined,
+      { timeout: 15_000 },
+    );
+
+    errors.length = 0;
+    const imported = await importVersion(second);
+    expect(errors).toEqual([]);
+    expect(imported["version"]).toBe("a");
+
+    // The navigation met the lock, so it waited for it. A navigation that
+    // finished inside the hold never met the lock. This case then proves
+    // nothing.
+    expect(settled).toBe("pending");
+    expect(waited).toBeGreaterThanOrEqual(400);
 
     await context.close();
   }, 120_000);

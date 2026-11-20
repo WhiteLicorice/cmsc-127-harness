@@ -240,12 +240,21 @@ function clientIdOf(url) {
 // The record sits in the snapshot that answers the document, so a later worker
 // reads it with one lookup. The record goes away with its snapshot. It holds
 // the time it was written, because a navigation has no client object yet.
+//
+// The check, the open, and the write run under the lock of the snapshot. A
+// cleanup holds that lock while it checks and opens the same cache. This step
+// waits for the lock because a document without a record reads the next
+// snapshot after a takeover. The wait is short. No step that holds the lock
+// waits for this one.
 async function rememberBuild(clientId, buildId) {
   if (!clientId) return;
+  const name = snapshotCacheName(buildId);
   try {
-    const cache = await existingSnapshot(buildId);
-    if (cache === null) return;
-    await cache.put(requestFor(clientKey(clientId)), new Response(`${buildId} ${Date.now()}`));
+    await holdSnapshot(name, async () => {
+      const cache = await openSnapshot(name);
+      if (cache === null) return;
+      await cache.put(requestFor(clientKey(clientId)), new Response(`${buildId} ${Date.now()}`));
+    });
   } catch {
     // The active snapshot still answers when the record is missing.
   }
