@@ -109,8 +109,11 @@ run_python() {
 
 python_ok=false
 if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
-    python_version=$(run_python --version 2>&1 | tr -d '\r' | tr '\n' ' ')
+    # A pipeline reports the status of its last command. Read the status of
+    # the tool itself.
+    python_version=$(run_python --version 2>&1)
     python_exit=$?
+    python_version=$(printf '%s\n' "$python_version" | tr -d '\r' | tr '\n' ' ')
     python_version=${python_version% }
     python_version=${python_version%.}
     if [ -z "$python_version" ]; then
@@ -146,8 +149,9 @@ fi
 postgres_major="${postgres_expected%%.*}"
 for tool in psql pg_dump pg_ctl; do
     if command -v "$tool" >/dev/null 2>&1; then
-        tool_version=$($tool --version 2>&1 | tr -d '\r' | head -n 1)
+        tool_version=$($tool --version 2>&1)
         tool_exit=$?
+        tool_version=$(printf '%s\n' "$tool_version" | tr -d '\r' | head -n 1)
         if [ -z "$tool_version" ] || [ "$tool_exit" -ne 0 ]; then
             bad "$tool did not report a version." \
                 "$postgres_fix"
@@ -167,8 +171,9 @@ if ! command -v git >/dev/null 2>&1; then
     bad 'Git is not on PATH.' \
         "$git_fix"
 else
-    git_version=$(git --version 2>&1 | tr -d '\r' | tr '\n' ' ')
+    git_version=$(git --version 2>&1)
     git_exit=$?
+    git_version=$(printf '%s\n' "$git_version" | tr -d '\r' | tr '\n' ' ')
     git_version=${git_version% }
     if [ -z "$git_version" ] || [ "$git_exit" -ne 0 ]; then
         bad 'Git did not report a version.' \
