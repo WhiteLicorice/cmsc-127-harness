@@ -1618,6 +1618,17 @@ class _StopGuard:
     finally block runs. The guard also registers a console control handler
     that drops the protected database itself, then lets the default handler
     end the process.
+
+    The guard has two exit paths. Each one has its own rule.
+
+    The CLI path runs in a process that ends when the run ends. It keeps the
+    guard installed until the process exits. No default handler comes back, so
+    a second stop cannot replace the first stop's code. The exit status comes
+    from the first signal that the guard recorded.
+
+    The library path runs in a caller that returns to a live interpreter. It
+    puts every previous handler back, SIGBREAK included, before it replays the
+    stop. The caller then owns its own handlers again.
     """
 
     def __init__(self) -> None:
@@ -1811,24 +1822,33 @@ class _StopGuard:
         self._install_console_handler()
 
     def restore(self) -> None:
-        """Put back the handlers that install replaced.
+        """Put back every handler that install replaced, then replay the stop.
 
         A stop that arrives while the handlers change reaches the handler that
-        was just put back. On Windows that is the default Ctrl+C handler,
-        which raises KeyboardInterrupt and prints a traceback. The run has
-        already recorded its stop by then, so this method ends the run with
-        that stop's code. A Ctrl+C with no stop recorded ends the run with
-        130.
+        was just put back. On Windows the default Ctrl+C handler raises
+        KeyboardInterrupt. The default Ctrl+Break handler ends the process.
+        This method finishes the loop before it replays the stop, so a caller
+        that catches the stop gets every handler back, SIGBREAK included.
+
+        A stop that arrives after the loop does what the caller's own handler
+        says. That is the caller's choice. This method does not change it.
         """
-        try:
-            self._remove_console_handler()
-            for number, handler in self.previous.items():
+        self._remove_console_handler()
+        interrupted = False
+        for number, handler in list(self.previous.items()):
+            # A stop can cut the first call short. The second call then puts
+            # the handler back, so the loop always finishes.
+            for _ in range(2):
                 try:
                     signal.signal(number, handler)
-                except (OSError, ValueError):
+                except KeyboardInterrupt:
+                    interrupted = True
                     continue
-            self.previous.clear()
-        except KeyboardInterrupt:
+                except (OSError, ValueError):
+                    pass
+                break
+            self.previous.pop(number, None)
+        if interrupted:
             self.stop_if_pending()
             raise SystemExit(128 + signal.SIGINT) from None
 
@@ -1892,11 +1912,13 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     never run, and the run would leave a database behind without naming it.
     The return value still tells the caller to end with an error.
 
-    The handlers stay installed after this returns. The caller puts them back
-    once it has chosen its exit status, so a stop that arrives while the run
-    ends still reaches the guard. The default action never runs. A default
-    Ctrl+C handler would raise KeyboardInterrupt and print a traceback, and
-    the process would end with the Windows control status.
+    The handlers stay installed after this returns. The caller chooses its
+    exit status next. Only then does it decide what to do with them. The
+    CLI path keeps them until the process exits. The library path puts them
+    back. Either way a stop that arrives while the run ends still reaches the
+    guard, and the default action never runs. A default Ctrl+C handler would
+    raise KeyboardInterrupt and print a traceback, and the process would end
+    with the Windows control status.
     """
     dropped = True
     try:
@@ -1925,6 +1947,33 @@ def _report_cleanup_failure(name: str) -> None:
         "Drop it by hand.",
         file=sys.stderr,
     )
+
+
+def _end_run(guard: _StopGuard, code: int, keep_guard: bool) -> int:
+    """Choose the exit status, then put the handlers back on the library path.
+
+    The rule differs by path.
+
+    The CLI path keeps the guard installed until the process exits. No default
+    handler comes back, so a second stop cannot replace the first stop's code.
+    The exit status comes from the first signal that the guard recorded.
+
+    The library path gives every previous handler back before the stop
+    replays, so a caller that catches the stop gets a live interpreter with
+    its own handlers. A stop that arrives while the handlers change reaches
+    the handler that was just put back, so restore finishes the loop first.
+    """
+    if keep_guard:
+        guard.stop_if_pending()
+        return code
+    try:
+        guard.stop_if_pending()
+    finally:
+        guard.restore()
+    # A stop that arrived while the handlers changed is held and never
+    # replayed. This check runs only when the first one returned.
+    guard.stop_if_pending()
+    return code
 
 
 def _migration_files(root: Path) -> list[Path]:
@@ -4125,13 +4174,12 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
     return 0 if counts["fail"] == 0 and checked_total > 0 else 1
 
 
-def _self_test() -> int:
-    """Run the self-test, then put the stop handlers back.
+def _self_test(keep_guard: bool = False) -> int:
+    """Run the self-test, then choose the exit status.
 
-    The handlers stay installed until this method has chosen its exit status,
-    so a stop that arrives while the run ends still reaches the guard. A
-    caller that keeps running after this returns gets the handlers it had
-    before.
+    The handlers stay installed until this method has chosen its exit status.
+    A caller that keeps running after this returns gets the handlers it had
+    before, unless it asked to keep the guard.
     """
     base_url = os.environ.get("CMSC127_DATABASE_URL")
     if not base_url:
@@ -4139,14 +4187,11 @@ def _self_test() -> int:
         return 2
     guard = _StopGuard()
     guard.install()
+    code = 0
     try:
         code = _run_self_test(base_url, guard)
-        guard.stop_if_pending()
     finally:
-        guard.restore()
-    # A stop that arrived while the handlers changed is held and never
-    # replayed. This check runs only when the first one returned.
-    guard.stop_if_pending()
+        code = _end_run(guard, code, keep_guard)
     return code
 
 
@@ -4195,13 +4240,13 @@ def _run_self_test(base_url: str, guard: _StopGuard) -> int:
     return code
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI, then put the stop handlers back.
+def main(argv: Sequence[str] | None = None, *, keep_guard: bool = False) -> int:
+    """Run the CLI, then choose the exit status.
 
-    The handlers stay installed until this method has chosen its exit status,
-    so a stop that arrives while the run ends still reaches the guard. A
-    caller that keeps running after this returns gets the handlers it had
-    before.
+    The handlers stay installed until this method has chosen its exit status.
+    A caller that keeps running after this returns gets the handlers it had
+    before, unless it asked to keep the guard. The process entry point asks
+    for that. The process ends when this returns.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", nargs="?", type=int, default=1)
@@ -4213,7 +4258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--select-stage", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.self_test:
-        return _self_test()
+        return _self_test(keep_guard)
     root = arguments.root.resolve()
     if arguments.select_stage:
         try:
@@ -4264,16 +4309,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     guard = _StopGuard()
     guard.install()
+    code = 0
     try:
         code = _run_stage(
             arguments, root, runner_dir, database_url, manifest, selected, guard
         )
-        guard.stop_if_pending()
     finally:
-        guard.restore()
-    # A stop that arrived while the handlers changed is held and never
-    # replayed. This check runs only when the first one returned.
-    guard.stop_if_pending()
+        code = _end_run(guard, code, keep_guard)
     return code
 
 
@@ -4450,4 +4492,4 @@ def _run_stage(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(keep_guard=True))

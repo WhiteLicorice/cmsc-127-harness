@@ -9,6 +9,7 @@ import socket
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -3476,12 +3477,15 @@ SIGNAL_DRIVER = '''\
 
 from __future__ import annotations
 
+import ctypes
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import sysconfig
 import threading
+import time
 
 HARNESS = Path(sys.argv[1])
 MARKER = Path(sys.argv[2])
@@ -3516,6 +3520,16 @@ MIXED_RESTORE_POINTS = (
 )
 # The console stop that this run delivers, as the name of a Python signal.
 CONSOLE_SIGNAL = os.environ.get("CMSC127_CONSOLE_SIGNAL", "")
+# The pair points deliver two stops at the boundary where the handlers used to
+# change. The first names the exit code, and the second must not replace it.
+PAIR_POINTS = ("pair", "selftest-pair")
+FIRST_SIGNAL = os.environ.get("CMSC127_FIRST_SIGNAL", "")
+SECOND_SIGNAL = os.environ.get("CMSC127_SECOND_SIGNAL", "")
+# The CLI path keeps the guard installed until the process exits. A private
+# console lets this process send a real Ctrl+C to itself, because Windows
+# cannot aim that event at a process group.
+KEEP_GUARD = os.environ.get("CMSC127_KEEP_GUARD") == "1"
+PRIVATE_CONSOLE = os.environ.get("CMSC127_PRIVATE_CONSOLE") == "1"
 
 
 class _Token:
@@ -3572,6 +3586,61 @@ def deliver() -> None:
         console_stop()
     else:
         stop()
+
+
+def console_event_number(signal_name: str) -> int:
+    """Return the console event number for a stop. Windows only.
+
+    The event numbers exist only on Windows, so they are looked up at run
+    time and the type checker on a POSIX host still reads this file.
+    """
+    name = "CTRL_C_EVENT" if signal_name == "SIGINT" else "CTRL_BREAK_EVENT"
+    return getattr(signal, name)
+
+
+def wait_for_arrival(seconds: float) -> bool:
+    """Wait for the guard to record a stop, and let its handler run.
+
+    A sleep returns to the interpreter loop, so a pending signal reaches the
+    Python handler. A blocking wait does not.
+    """
+    deadline = time.monotonic() + seconds
+    while not ARRIVED.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return ARRIVED.is_set()
+
+
+def send_console(signal_name: str) -> None:
+    """Send a console event to this process's own console. Windows only.
+
+    The console holds this process alone, so the event cannot reach another
+    process. The check below proves that before the event goes out.
+    """
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    processes = (ctypes.c_uint32 * 32)()
+    count = api.GetConsoleProcessList(processes, len(processes))
+    if count != 1 or processes[0] != os.getpid():
+        raise RuntimeError(f"Expected a private console: {count} {list(processes)}")
+    ARRIVED.clear()
+    # A parent that ignores Ctrl+C passes that flag to this process, and the
+    # console then drops every CTRL_C_EVENT. Clearing the flag makes the
+    # console deliver the event to this process's own handler.
+    api.SetConsoleCtrlHandler(None, False)
+    note("private console event " + signal_name)
+    if not api.GenerateConsoleCtrlEvent(console_event_number(signal_name), 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not wait_for_arrival(8):
+        raise RuntimeError("The guard did not receive the console event")
+
+
+def deliver_signal(signal_name: str) -> None:
+    """Deliver one stop to this process and wait for the guard to record it."""
+    if PRIVATE_CONSOLE:
+        send_console(signal_name)
+        return
+    note("signal " + signal_name)
+    os.kill(os.getpid(), getattr(signal, signal_name))
+    wait_for_arrival(8)
 
 
 runner.uuid4 = _Token
@@ -3661,6 +3730,24 @@ runner._run_pair = run_pair
 runner._drop_database = drop_database
 runner._report_cleanup_failure = report_cleanup_failure
 runner._StopGuard.restore = restore
+plain_end_run = runner._end_run
+
+
+def end_run(guard, code, keep_guard):
+    """Deliver the pair at the boundary where the handlers used to change.
+
+    The CLI path keeps the guard installed there, so the second stop is held
+    like the first. The first stop's code must still name the exit.
+    """
+    if POINT in PAIR_POINTS:
+        note("before end-run")
+        deliver_signal(FIRST_SIGNAL)
+        if SECOND_SIGNAL:
+            deliver_signal(SECOND_SIGNAL)
+    return plain_end_run(guard, code, keep_guard)
+
+
+runner._end_run = end_run
 
 
 class _SkipChild:
@@ -3675,6 +3762,14 @@ class _SkipChild:
             stop()
         return subprocess.CompletedProcess(args[0] if args else [], 0)
 
+
+if KEEP_GUARD:
+    # The CLI path. The process ends when the run ends, so the guard stays
+    # installed and the stop becomes the process exit status.
+    if POINT.startswith("selftest"):
+        runner.subprocess = _SkipChild
+        raise SystemExit(runner._self_test(keep_guard=True))
+    raise SystemExit(runner.main(sys.argv[5:], keep_guard=True))
 
 code = 0
 try:
@@ -4199,8 +4294,304 @@ class ConsoleStopSignalTests(unittest.TestCase):
         )
 
 
+# The two stops a student reaches on Windows, as Python signal names.
+CONSOLE_STOPS = ("SIGINT", "SIGBREAK")
+# The three stops a POSIX host has.
+POSIX_STOPS = ("SIGINT", "SIGTERM", "SIGHUP")
+
+
+def private_console_options() -> dict[str, Any]:
+    """The options that give a child its own hidden console. Windows only.
+
+    The names exist only on Windows, so they are looked up at run time and the
+    type checker on a POSIX host still reads this file.
+    """
+    startup = getattr(subprocess, "STARTUPINFO")()
+    startup.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW")
+    startup.wShowWindow = getattr(subprocess, "SW_HIDE")
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NEW_CONSOLE"),
+        "startupinfo": startup,
+    }
+
+
+class StopPairTests(unittest.TestCase):
+    """Two stops at the handler change keep the first stop's code.
+
+    The CLI path keeps the guard installed until the process exits, so the
+    second stop is held like the first. Each case runs main or _self_test in
+    its own process. The database must be gone.
+    """
+
+    def exists(self: StopPairTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: StopPairTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def process_options(self: StopPairTests) -> dict[str, Any]:
+        """The process options that this platform's delivery needs."""
+        return {}
+
+    def interpreter(self: StopPairTests) -> str:
+        """The interpreter that runs the driver."""
+        return sys.executable
+
+    def extra_environment(self: StopPairTests) -> dict[str, str]:
+        """The variables that this platform's delivery needs."""
+        return {}
+
+    def assert_pair_keeps_the_first_code(
+        self: StopPairTests,
+        first: str,
+        second: str,
+        self_test: bool = False,
+    ) -> None:
+        """Run the runner, deliver two stops at the boundary, and check it."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_KEEP_GUARD"] = "1"
+            environment["CMSC127_FIRST_SIGNAL"] = first
+            environment["CMSC127_SECOND_SIGNAL"] = second
+            environment.update(self.extra_environment())
+            process = subprocess.Popen(
+                [
+                    self.interpreter(),
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-pair" if self_test else "pair",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **self.process_options(),
+            )
+            try:
+                returncode = process.wait(timeout=120)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+                leftover = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"{first} then {second} exited {returncode} notes {notes}\n{output}"
+        self.assertIn(f"created {name}", notes, detail)
+        self.assertIn("before end-run", notes, detail)
+        self.assertFalse(leftover, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(128 + getattr(signal, first), returncode, detail)
+
+
+@unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+class ConsoleStopPairTests(StopPairTests):
+    """Two console stops at the handler change keep the first stop's code.
+
+    Each case runs in its own console, so the event cannot reach the test
+    runner. The driver proves the console holds it alone before it sends.
+    """
+
+    def process_options(self: ConsoleStopPairTests) -> dict[str, Any]:
+        return private_console_options()
+
+    def interpreter(self: ConsoleStopPairTests) -> str:
+        """The base interpreter, so the console holds one process.
+
+        A virtual environment's python.exe starts the base interpreter as a
+        child, and both then share the console. The base interpreter alone
+        keeps the console private.
+        """
+        return str(getattr(sys, "_base_executable", sys.executable))
+
+    def extra_environment(self: ConsoleStopPairTests) -> dict[str, str]:
+        paths = [sysconfig.get_paths()["purelib"]]
+        existing = os.environ.get("PYTHONPATH")
+        if existing:
+            paths.append(existing)
+        return {
+            "CMSC127_PRIVATE_CONSOLE": "1",
+            "PYTHONPATH": os.pathsep.join(paths),
+        }
+
+    def test_sigint_then_sigint_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGINT", "SIGINT")
+
+    def test_sigint_then_sigbreak_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGINT", "SIGBREAK")
+
+    def test_sigbreak_then_sigint_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGBREAK", "SIGINT")
+
+    def test_sigbreak_then_sigbreak_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGBREAK", "SIGBREAK")
+
+    def test_self_test_sigint_then_sigint_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGINT", "SIGINT", self_test=True)
+
+    def test_self_test_sigint_then_sigbreak_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGINT", "SIGBREAK", self_test=True)
+
+    def test_self_test_sigbreak_then_sigint_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGBREAK", "SIGINT", self_test=True)
+
+    def test_self_test_sigbreak_then_sigbreak_keeps_the_first_code(
+        self: ConsoleStopPairTests,
+    ) -> None:
+        self.assert_pair_keeps_the_first_code("SIGBREAK", "SIGBREAK", self_test=True)
+
+
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class StopSignalPairTests(StopPairTests):
+    """Two POSIX stops at the handler change keep the first stop's code.
+
+    The CLI path keeps the guard installed until the process exits, so the
+    second stop is held like the first. Every ordered pair runs on both entry
+    paths. The first signal sets the exit code.
+    """
+
+    def test_every_ordered_pair_keeps_the_first_code(
+        self: StopSignalPairTests,
+    ) -> None:
+        for self_test in (False, True):
+            for first in POSIX_STOPS:
+                for second in POSIX_STOPS:
+                    with self.subTest(first=first, second=second, self_test=self_test):
+                        self.assert_pair_keeps_the_first_code(
+                            first, second, self_test=self_test
+                        )
+
+
 class StopSignalHandlerTests(unittest.TestCase):
     """The stop handlers go in before the create and come off after the drop."""
+
+    def stop_numbers(self: StopSignalHandlerTests) -> list[int]:
+        """Every stop signal that this platform has."""
+        return [
+            getattr(signal, name)
+            for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
+            if hasattr(signal, name)
+        ]
+
+    def test_the_cli_path_keeps_the_guard_installed(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """The CLI path never puts a default handler back while it lives."""
+        original = signal.getsignal(signal.SIGTERM)
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.install()
+        try:
+            code = runner._end_run(guard, 7, True)  # pyright: ignore[reportPrivateUsage]
+            self.assertEqual(7, code)
+            self.assertEqual(guard.handle, signal.getsignal(signal.SIGTERM))
+        finally:
+            guard.restore()
+
+        self.assertIs(original, signal.getsignal(signal.SIGTERM))
+
+    def test_the_library_path_puts_every_handler_back(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        original = signal.getsignal(signal.SIGTERM)
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.install()
+        code = runner._end_run(guard, 7, False)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(7, code)
+        self.assertIs(original, signal.getsignal(signal.SIGTERM))
+
+    def test_a_caught_stop_leaves_every_previous_handler_in_place(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """A caller that catches the stop gets every handler back."""
+        numbers = self.stop_numbers()
+        before = {number: signal.getsignal(number) for number in numbers}
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.install()
+        guard.latch()
+        guard.handle(signal.SIGINT, None)
+
+        with self.assertRaises(SystemExit) as raised:
+            runner._end_run(guard, 0, False)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(128 + signal.SIGINT, raised.exception.code)
+        for number in numbers:
+            self.assertIs(before[number], signal.getsignal(number))
+
+    def test_a_stop_during_restore_still_puts_every_handler_back(
+        self: StopSignalHandlerTests,
+    ) -> None:
+        """A stop that cuts the loop short must not leave a guard handler."""
+        numbers = self.stop_numbers()
+        before = {number: signal.getsignal(number) for number in numbers}
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.install()
+        guard.latch()
+        guard.handle(signal.SIGINT, None)
+        real_signal = signal.signal
+        calls: list[int] = []
+
+        def interrupted(number: int, handler: Any) -> Any:
+            calls.append(number)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            return real_signal(number, handler)
+
+        with patch.object(signal, "signal", interrupted):
+            with self.assertRaises(SystemExit) as raised:
+                guard.restore()
+
+        self.assertEqual(128 + signal.SIGINT, raised.exception.code)
+        for number in numbers:
+            self.assertIs(before[number], signal.getsignal(number))
 
     def test_install_sets_the_handler_and_restore_puts_the_old_one_back(
         self: StopSignalHandlerTests,
@@ -4815,6 +5206,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import sysconfig
 import time
 
 HARNESS = Path(sys.argv[1])
@@ -5158,6 +5550,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import time
 
 HARNESS = Path(sys.argv[1])
@@ -5407,6 +5800,7 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 import sys
+import sysconfig
 
 HARNESS = Path(sys.argv[1])
 MARKER = Path(sys.argv[2])
