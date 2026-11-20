@@ -212,6 +212,7 @@ function gate(): Gate {
 class ScanningCaches extends FakeCaches {
   onScan: ((stack: string) => Promise<void>) | undefined;
   onOpen: ((name: string, stack: string) => Promise<void>) | undefined;
+  onHas: ((name: string, stack: string) => Promise<void>) | undefined;
 
   override async keys(): Promise<string[]> {
     const names = [...this.caches.keys()];
@@ -222,6 +223,16 @@ class ScanningCaches extends FakeCaches {
   override async open(name: string): Promise<FakeCache> {
     await this.onOpen?.(name, new Error().stack ?? "");
     return super.open(name);
+  }
+
+  // The hook runs after the answer is known and before the caller acts on it.
+  // A test can delete the snapshot in that window. The stack comes from the
+  // caller, so the hook can tell which step asked.
+  override async has(name: string): Promise<boolean> {
+    const stack = new Error().stack ?? "";
+    const answer = await super.has(name);
+    await this.onHas?.(name, stack);
+    return answer;
   }
 }
 
@@ -711,6 +722,84 @@ describe("offline worker activation", () => {
     await worker.settle();
 
     expect(await worker.names()).toEqual([]);
+  });
+
+  it("does not plant a snapshot that another cleanup deletes during the scan", async () => {
+    // Two cleanups overlap. The first reads the cache list. The second deletes
+    // an expired snapshot under its lock. The first then opens the missing
+    // name. An open outside the lock plants an empty cache, and the next pass
+    // keeps an empty cache because an install opens its snapshot before it
+    // writes its record.
+    const active = "d".repeat(64);
+    const orphan = "e".repeat(64);
+    const caches = new ScanningCaches();
+    const locks = new FakeLocks();
+    const worker = createWorker({
+      buildId: active,
+      fetch: siteFetch(active).fetch as never,
+      caches,
+      locks,
+    });
+    await worker.install();
+    await (await caches.open(`cmsc127-harness-${orphan}`)).put(`${scope}__building__`, new Response("0"));
+
+    const other = createWorker({
+      buildId: active,
+      fetch: siteFetch(active).fetch as never,
+      caches,
+      locks,
+    });
+    let overlapped = false;
+    caches.onScan = async (stack) => {
+      if (overlapped || !stack.includes("deleteUnusedSnapshots")) return;
+      overlapped = true;
+      // The second cleanup runs to its end while the first holds its list.
+      await other.activate();
+    };
+
+    await worker.dispatchFetch(navigate(scope), { clientId: "old", resultingClientId: "new" });
+    await worker.settle();
+
+    expect(await worker.names()).toEqual([`cmsc127-harness-${active}`]);
+  });
+
+  it("does not plant a snapshot that another cleanup deletes between the record check and the open", async () => {
+    // A navigation drops the record of the document it replaces. The record
+    // delete checks that the snapshot exists, then opens it. A cleanup in
+    // another worker can delete the snapshot between those two steps. The open
+    // then plants an empty cache, and the next pass keeps it.
+    const build = "f".repeat(64);
+    const retired = "1".repeat(64);
+    const caches = new ScanningCaches();
+    const locks = new FakeLocks();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+    });
+    await worker.install();
+    const old = await caches.open(`cmsc127-harness-${retired}`);
+    await old.put(`${scope}offline-manifest.json`, new Response(JSON.stringify(manifestFor(retired))));
+
+    const other = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+    });
+    let overlapped = false;
+    caches.onHas = async (name, stack) => {
+      if (overlapped || name !== `cmsc127-harness-${retired}` || !stack.includes("forgetBuild")) return;
+      overlapped = true;
+      // The second cleanup runs to its end between the check and the open.
+      await other.activate();
+    };
+
+    await worker.dispatchFetch(navigate(scope), { clientId: "old", resultingClientId: "new" });
+    await worker.settle();
+
+    expect(await worker.names()).toEqual([`cmsc127-harness-${build}`]);
   });
 
   it("keeps a snapshot that another install completes while this one fails", async () => {
