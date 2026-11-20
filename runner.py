@@ -1568,14 +1568,16 @@ def _create_database(
 ) -> tuple[str, _DbConnection]:
     """Create the race database while the guard holds a stop signal.
 
-    The guard stays latched after this call returns. The caller unlatches it
-    only after it owns the name and the connection, so a signal in this
-    section cannot arrive before cleanup can drop the database.
+    The phase moves to cleanup for this section, so a stop that arrives here
+    is recorded and returns. The caller moves the phase back to body only
+    after it owns the name and the connection, then replays the stop. A
+    signal in this section therefore cannot arrive before cleanup can drop
+    the database.
 
     The guard keeps the new name before this call returns, so a console close
     in the next line finds the database to drop.
     """
-    guard.latch()
+    guard.phase = "cleanup"
     name = f"cmsc127_race_{uuid4().hex}"
     guard.protect(name, base_url)
     admin = cast(_DbConnection, psycopg.connect(base_url, autocommit=True))
@@ -1604,9 +1606,10 @@ class _StopGuard:
     so the run's finally block never drops its database. The guard installs
     a handler that raises SystemExit.
 
-    A latched guard holds the signal instead. It records the first signal and
-    returns, so a cleanup section can finish. stop_if_pending raises that
-    signal after cleanup, and the exit code still names the signal.
+    A guard in its cleanup phase holds the signal instead. It records the
+    first signal and returns, so the section can finish. stop_if_pending
+    raises that signal after cleanup, and the exit code still reports the
+    signal.
 
     SIGINT and SIGBREAK are the two stops a student reaches on Windows, as
     Ctrl+C and Ctrl+Break. They take the same path as SIGTERM. A stop during
@@ -1629,33 +1632,65 @@ class _StopGuard:
     The library path runs in a caller that returns to a live interpreter. It
     puts every previous handler back, SIGBREAK included, before it replays the
     stop. The caller then owns its own handlers again.
+
+    The phase rules.
+
+    A handler can run between any two bytecodes, so no placement of checks can
+    keep it out of a critical section. The guard holds a phase instead. The
+    phase is one of four names.
+
+    In install, the guard replaces the stop handlers. The handler records
+    the first signal and returns. install records each previous handler
+    before it changes that handler, so a stop in this phase leaves nothing
+    to guess. install moves the phase to body when it finishes.
+
+    In body, the run does its work. The handler records the first signal
+    and raises SystemExit, so the run unwinds into its cleanup.
+
+    In cleanup, the run finishes a section that must not be cut short. It
+    drops its database and reports. The create section also runs here.
+    The caller does not own the database name until the create returns.
+    The handler records the first signal and returns, so the section
+    finishes.
+
+    In final, the run has chosen its exit status. The handler records the
+    first signal and ends the process at once with os._exit, so no later
+    stop can replace the code. The caller flushes stdout and stderr before
+    it sets this phase, because os._exit flushes nothing.
+
+    The handler records the first signal in every phase and never overwrites
+    it. The first stop a run receives sets the exit code, whenever it arrives,
+    until the process ends.
     """
 
     def __init__(self) -> None:
         self.previous: dict[int, Any] = {}
         self.pending: int | None = None
         self.stopped_at: float | None = None
-        self.latched = False
+        self.phase = "install"
         self.console_url: str | None = None
         self.console_name: str | None = None
         self.console_api: Any = None
         self.console_handler: Any = None
 
     def handle(self, signum: int, frame: object) -> None:
-        # Record the first signal before the raise. A later signal that arrives
-        # during cleanup then cannot replace its exit code, so the run names the
-        # signal that stopped it. The time of that first signal also starts the
-        # stop budget, so a stop that arrives late in a normal wait still gets
-        # its own budget instead of what is left of the normal one.
+        # Record the first signal before anything else. A later signal cannot
+        # replace its exit code, so the run reports the signal that stopped it.
+        # The time of that first signal also starts the stop budget, so a stop
+        # that arrives late in a normal wait still gets its own budget instead
+        # of what is left of the normal one.
         if self.pending is None:
             self.pending = signum
             self.stopped_at = time.monotonic()
-        if self.latched:
-            return
-        # Hold the next signal, so a second one during cleanup cannot cut the
-        # drop short while this one unwinds the stack.
-        self.latched = True
-        raise SystemExit(128 + signum)
+        code = self.pending
+        if self.phase == "final":
+            # The run has chosen its exit status and no cleanup is left. End
+            # the process at once, so a later stop cannot replace the code.
+            os._exit(128 + code)
+        if self.phase == "body":
+            raise SystemExit(128 + code)
+        # install and cleanup: record and return. The run finishes the section
+        # it is in, then replays the stop.
 
     def protect(self, name: str, base_url: str) -> None:
         """Keep the scratch database name, so a console close can drop it.
@@ -1808,49 +1843,61 @@ class _StopGuard:
         SIGBREAK is Ctrl+Break, which is how a student stops a run on Windows.
         Windows has no SIGHUP and POSIX has no SIGBREAK, so this loop sets only
         the signals the platform has.
+
+        Each previous handler is recorded before the call that replaces it. A
+        stop that arrives inside that call then finds the entry already in
+        place, so restore can put every handler back. The phase moves to body
+        at the end, so a stop recorded here is replayed by the caller.
         """
         if threading.current_thread() is not threading.main_thread():
+            self.phase = "body"
             return
         for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):
             number = getattr(signal, name, None)
             if number is None:
                 continue
             try:
-                self.previous[number] = signal.signal(number, self.handle)
+                previous = signal.getsignal(number)
             except (OSError, ValueError):
                 continue
+            self.previous[number] = previous
+            try:
+                signal.signal(number, self.handle)
+            except (OSError, ValueError):
+                self.previous.pop(number, None)
+                continue
         self._install_console_handler()
+        self.phase = "body"
 
     def restore(self) -> None:
-        """Put back every handler that install replaced, then replay the stop.
+        """Put back every handler that install replaced.
 
-        A stop that arrives while the handlers change reaches the handler that
-        was just put back. On Windows the default Ctrl+C handler raises
-        KeyboardInterrupt. The default Ctrl+Break handler ends the process.
-        This method finishes the loop before it replays the stop, so a caller
-        that catches the stop gets every handler back, SIGBREAK included.
+        The caller replays the stop after this returns. A stop that arrives
+        while the handlers change is recorded and returns, so the loop always
+        finishes and no guard handler stays behind.
+
+        A default Ctrl+C handler that comes back mid-loop raises
+        KeyboardInterrupt instead of recording. That signal is recorded here,
+        so the caller's replay still reports it. The second call then puts the
+        handler back. The loop finishes.
 
         A stop that arrives after the loop does what the caller's own handler
         says. That is the caller's choice. This method does not change it.
         """
         self._remove_console_handler()
-        interrupted = False
         for number, handler in list(self.previous.items()):
-            # A stop can cut the first call short. The second call then puts
-            # the handler back, so the loop always finishes.
             for _ in range(2):
                 try:
                     signal.signal(number, handler)
                 except KeyboardInterrupt:
-                    interrupted = True
+                    if self.pending is None:
+                        self.pending = signal.SIGINT
+                        self.stopped_at = time.monotonic()
                     continue
                 except (OSError, ValueError):
                     pass
                 break
             self.previous.pop(number, None)
-        if interrupted:
-            self.stop_if_pending()
-            raise SystemExit(128 + signal.SIGINT) from None
 
     def _install_console_handler(self) -> None:
         """Register the Windows console control handler. Windows only."""
@@ -1878,39 +1925,38 @@ class _StopGuard:
         self.console_handler = None
         self.console_api = None
 
-    def latch(self) -> None:
-        """Hold a stop signal until the caller finishes cleanup."""
-        self.latched = True
-
-    def unlatch(self) -> None:
-        """Let a stop signal end the run at once."""
-        self.latched = False
-
     def stop_if_pending(self) -> None:
-        """Raise the held stop signal. Call this after cleanup.
+        """Raise the first recorded stop. Call this after cleanup.
 
         The signal and its time stay recorded. A second signal during the
         cleanup then cannot replace the code that ends the run, and the drop
         keeps the budget that the first signal started. The caller reports its
         result before this call, so the report is never lost.
+
+        The loop reads the record again after the check. A stop can arrive
+        between the check and the raise. The first code must still set the
+        exit.
         """
-        if self.pending is None:
-            return
-        raise SystemExit(128 + self.pending)
+        while self.pending is not None:
+            raise SystemExit(128 + self.pending)
 
 
 def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bool:
     """Drop the scratch database on the way out. Report a failed drop.
+
+    The phase moves to cleanup first, so a stop that arrives during the drop
+    is recorded and returns. The drop then finishes. The caller replays the
+    stop after it chooses its exit status.
 
     A stop signal that arrived during the run ends it with its own code after
     the cleanup. The drop keeps the short budget on that path, counted from
     the moment the first signal arrived, because the process must return
     inside the Windows window. A normal end waits for a confirmed drop.
 
-    A failed drop is reported here, before the held signal replays. The signal
-    ends the process, so a caller that reported the failure afterwards would
-    never run, and the run would leave a database behind without naming it.
-    The return value still tells the caller to end with an error.
+    A failed drop is reported here, before the stop replays. The signal ends
+    the process, so a caller that reported the failure afterwards would never
+    run, and the run would leave a database behind without naming it. The
+    return value still tells the caller to end with an error.
 
     The handlers stay installed after this returns. The caller chooses its
     exit status next. Only then does it decide what to do with them. The
@@ -1920,9 +1966,9 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     raise KeyboardInterrupt and print a traceback, and the process would end
     with the Windows control status.
     """
+    guard.phase = "cleanup"
     dropped = True
     try:
-        guard.latch()
         if admin is not None and name:
             dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
     except (OSError, psycopg.Error) as error:
@@ -1934,9 +1980,6 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
         dropped = False
     if not dropped and name:
         _report_cleanup_failure(name)
-    # A held signal raises here, so its exit code stands and this result is
-    # never used on that path.
-    guard.stop_if_pending()
     return dropped
 
 
@@ -1954,26 +1997,34 @@ def _end_run(guard: _StopGuard, code: int, keep_guard: bool) -> int:
 
     The rule differs by path.
 
-    The CLI path keeps the guard installed until the process exits. No default
-    handler comes back, so a second stop cannot replace the first stop's code.
-    The exit status comes from the first signal that the guard recorded.
+    The CLI path flushes its output, then moves the guard to its final phase.
+    A stop from that moment ends the process at once with the first code, so
+    no later stop can replace it. The flush comes first because os._exit
+    flushes nothing. The guard stays installed until the process exits, so no
+    default handler comes back.
 
     The library path gives every previous handler back before the stop
     replays, so a caller that catches the stop gets a live interpreter with
-    its own handlers. A stop that arrives while the handlers change reaches
-    the handler that was just put back, so restore finishes the loop first.
+    its own handlers. The phase moves to cleanup first, so a stop during the
+    restore is recorded and the loop finishes.
     """
     if keep_guard:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        guard.phase = "final"
         guard.stop_if_pending()
         return code
+    guard.phase = "cleanup"
+    guard.restore()
     try:
-        guard.stop_if_pending()
+        return code
     finally:
-        guard.restore()
-    # A stop that arrived while the handlers changed is held and never
-    # replayed. This check runs only when the first one returned.
-    guard.stop_if_pending()
-    return code
+        # The replay is the last act of the library path, so a stop recorded
+        # after the restore still sets the exit.
+        guard.stop_if_pending()
 
 
 def _migration_files(root: Path) -> list[Path]:
@@ -4177,18 +4228,22 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
 def _self_test(keep_guard: bool = False) -> int:
     """Run the self-test, then choose the exit status.
 
-    The handlers stay installed until this method has chosen its exit status.
-    A caller that keeps running after this returns gets the handlers it had
-    before, unless it asked to keep the guard.
+    install runs inside the cleanup path's try, so a stop that arrives while
+    the handlers change still reaches the cleanup. The handlers stay installed
+    until this method has chosen its exit status. A caller that keeps running
+    after this returns gets the handlers it had before, unless it asked to
+    keep the guard.
     """
     base_url = os.environ.get("CMSC127_DATABASE_URL")
     if not base_url:
         print("CMSC127_DATABASE_URL is not set. Set it to the local PostgreSQL connection URL.")
         return 2
     guard = _StopGuard()
-    guard.install()
     code = 0
     try:
+        guard.install()
+        # A stop recorded during install replays here, into the cleanup path.
+        guard.stop_if_pending()
         code = _run_self_test(base_url, guard)
     finally:
         code = _end_run(guard, code, keep_guard)
@@ -4202,7 +4257,10 @@ def _run_self_test(base_url: str, guard: _StopGuard) -> int:
     code = 0
     try:
         name, admin = _create_database(base_url, guard)
-        guard.unlatch()
+        # The caller holds the database and the connection now, so a stop
+        # recorded
+        # during the create replays here, into the cleanup path.
+        guard.phase = "body"
         guard.stop_if_pending()
         test_url = _database_url(base_url, name)
         settings = conninfo_to_dict(test_url)
@@ -4308,9 +4366,11 @@ def main(argv: Sequence[str] | None = None, *, keep_guard: bool = False) -> int:
         print(f"No cases are listed for stage {arguments.stage} or an earlier stage.")
         return 1
     guard = _StopGuard()
-    guard.install()
     code = 0
     try:
+        guard.install()
+        # A stop recorded during install replays here, into the cleanup path.
+        guard.stop_if_pending()
         code = _run_stage(
             arguments, root, runner_dir, database_url, manifest, selected, guard
         )
@@ -4335,7 +4395,10 @@ def _run_stage(
     cleanup_failed = False
     try:
         database_name, admin = _create_database(database_url, guard)
-        guard.unlatch()
+        # The caller holds the database and the connection now, so a stop
+        # recorded
+        # during the create replays here, into the cleanup path.
+        guard.phase = "body"
         guard.stop_if_pending()
         scratch_url = _database_url(database_url, database_name)
         connection = cast(_DbConnection, psycopg.connect(scratch_url, autocommit=True))

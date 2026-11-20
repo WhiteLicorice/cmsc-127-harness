@@ -102,21 +102,35 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
-_ASCII_DIGITS = re.compile(r"[0-9]+")
+# The port rule. tests/ts/smokePort.test.ts holds the same rule and the same
+# cases, so one rule covers both languages.
+#
+# Absent: fall back to the default only when the variable is absent.
+#
+# Splitting and trimming: split on a comma. Trim only ASCII space and tab from
+# each entry. No other character counts as whitespace.
+#
+# Valid entry: each entry matches ^[0-9]{1,5}$ and its value is 1 to 65535. A
+# sixth digit, leading zeros past five digits, U+0085, U+FEFF, and a non-ASCII
+# digit are all faults with a message. None of them reaches a raw ValueError.
+#
+# Order of checks. An empty or whitespace-only value is a fault. Count the
+# distinct ports before the required count. Validate the whole list before
+# choosing any port.
+_ASCII_DIGITS = re.compile(r"[0-9]{1,5}")
+_TRIM = " \t"
 
 
 def listed_ports(listed: str) -> list[int]:
-    """The ports in a CMSC127_TEST_PORTS value.
-
-    The value is a comma-separated list of ASCII decimal ports. An empty
-    entry, a value that holds no port, a digit outside ASCII, and a port
-    outside 1 to 65535 are faults. Each one stops the run here, before a
-    socket opens, so the gate log carries the reason. The whole list is read
-    before any port is chosen.
-    """
+    """The ports in a CMSC127_TEST_PORTS value. Read the rule above."""
+    if not listed.strip(_TRIM):
+        raise RuntimeError(
+            "CMSC127_TEST_PORTS holds an empty entry. "
+            "Give a port number for each entry."
+        )
     ports: list[int] = []
     for entry in listed.split(","):
-        text = entry.strip()
+        text = entry.strip(_TRIM)
         if not text:
             raise RuntimeError(
                 "CMSC127_TEST_PORTS holds an empty entry. "
@@ -220,11 +234,14 @@ def drain_server_output(
 PORT_LIST_CASES: tuple[tuple[str, str, tuple[int, ...]], ...] = (
     ("55740,55741", "", (55740, 55741)),
     (" 55740 , 55741 ", "", (55740, 55741)),
+    ("\t55740\t,\t55741\t", "", (55740, 55741)),
     ("1", "", (1,)),
     ("65535", "", (65535,)),
+    ("00001", "", (1,)),
     ("55740,55740", "", (55740, 55740)),
     ("", "empty entry", ()),
     (" ", "empty entry", ()),
+    ("\t", "empty entry", ()),
     ("55740,,55741", "empty entry", ()),
     ("55740,", "empty entry", ()),
     ("55740,99999", "outside 1 to 65535", ()),
@@ -235,6 +252,12 @@ PORT_LIST_CASES: tuple[tuple[str, str, tuple[int, ...]], ...] = (
     ("http", "not a port number", ()),
     ("+55740", "not a port number", ()),
     ("55740.0", "not a port number", ()),
+    ("\u008555740", "not a port number", ()),
+    ("55740\u0085", "not a port number", ()),
+    ("\ufeff55740", "not a port number", ()),
+    ("55740\ufeff", "not a port number", ()),
+    ("000001", "not a port number", ()),
+    ("0" * 4300 + "55740", "not a port number", ()),
 )
 
 # The same table for the count rule. Each row is the value, the count the
@@ -251,6 +274,9 @@ PORT_RESERVE_CASES: tuple[
     (None, 3, (55750, 55751, 55752), (55750, 55751, 55752)),
     (" ", 1, (55750,), "empty entry"),
     ("55740,99999", 1, (), "outside 1 to 65535"),
+    ("\u008555740", 1, (), "not a port number"),
+    ("\ufeff55740", 1, (), "not a port number"),
+    ("0" * 4300 + "55740", 1, (), "not a port number"),
 )
 
 

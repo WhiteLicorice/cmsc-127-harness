@@ -53,18 +53,32 @@ syncBuiltinESMExports();
 
 const SCRIPTS = ["browser-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audit.mjs"];
 
-// The harness reserves its test ports through CMSC127_TEST_PORTS, the same
-// variable the Python tests read, so no gate's port is fixed in this file.
-// The rules match tests/test_server.py. The fallback applies only when the
-// variable is absent. An empty entry is a fault. Only ASCII decimal digits
-// are ports. Every port sits in 1 to 65535. The whole list is read before
-// any port is chosen.
-const ASCII_DIGITS = /^[0-9]+$/;
+// The port rule. tests/test_server.py holds the same rule and the same cases,
+// so one rule covers both languages.
+//
+// Absent: fall back to the default only when the variable is absent.
+//
+// Splitting and trimming: split on a comma. Trim only ASCII space and tab from
+// each entry. No other character counts as whitespace. String.trim() is not
+// used. It also trims U+0085 and U+FEFF.
+//
+// Valid entry: each entry matches ^[0-9]{1,5}$ and its value is 1 to 65535. A
+// sixth digit, leading zeros past five digits, U+0085, U+FEFF, and a non-ASCII
+// digit are all faults with a message.
+//
+// Order of checks. An empty or whitespace-only value is a fault. Count the
+// distinct ports before the required count. Validate the whole list before
+// choosing any port.
+const ASCII_DIGITS = /^[0-9]{1,5}$/;
+const TRIM = /^[ \t]+|[ \t]+$/g;
 
 function listedPorts(listed: string): number[] {
+  if (listed.replace(/[ \t]/g, "") === "") {
+    throw new Error("CMSC127_TEST_PORTS holds an empty entry. Give a port number for each entry.");
+  }
   const ports: number[] = [];
   for (const entry of listed.split(",")) {
-    const text = entry.trim();
+    const text = entry.replace(TRIM, "");
     if (text === "") {
       throw new Error("CMSC127_TEST_PORTS holds an empty entry. Give a port number for each entry.");
     }
@@ -160,11 +174,14 @@ describe("smoke script port", () => {
 const PORT_LIST_CASES: [string, string, number[]][] = [
   ["55740,55741", "", [55740, 55741]],
   [" 55740 , 55741 ", "", [55740, 55741]],
+  ["\t55740\t,\t55741\t", "", [55740, 55741]],
   ["1", "", [1]],
   ["65535", "", [65535]],
+  ["00001", "", [1]],
   ["55740,55740", "", [55740, 55740]],
   ["", "empty entry", []],
   [" ", "empty entry", []],
+  ["\t", "empty entry", []],
   ["55740,,55741", "empty entry", []],
   ["55740,", "empty entry", []],
   ["55740,99999", "outside 1 to 65535", []],
@@ -175,6 +192,12 @@ const PORT_LIST_CASES: [string, string, number[]][] = [
   ["http", "not a port number", []],
   ["+55740", "not a port number", []],
   ["55740.0", "not a port number", []],
+  ["\u008555740", "not a port number", []],
+  ["55740\u0085", "not a port number", []],
+  ["\ufeff55740", "not a port number", []],
+  ["55740\ufeff", "not a port number", []],
+  ["000001", "not a port number", []],
+  ["0".repeat(4300) + "55740", "not a port number", []],
 ];
 
 // The same table for the count rule. Each row holds the value, the count the
@@ -190,6 +213,9 @@ const PORT_RESERVE_CASES: [string | null, number, number[] | string][] = [
   [null, 3, "operating system"],
   [" ", 1, "empty entry"],
   ["55740,99999", 1, "outside 1 to 65535"],
+  ["\u008555740", 1, "not a port number"],
+  ["\ufeff55740", 1, "not a port number"],
+  ["0".repeat(4300) + "55740", 1, "not a port number"],
 ];
 
 // A gate that reserves its ports must not have a fixture bind outside them. A
