@@ -1811,14 +1811,26 @@ class _StopGuard:
         self._install_console_handler()
 
     def restore(self) -> None:
-        """Put back the handlers that install replaced."""
-        self._remove_console_handler()
-        for number, handler in self.previous.items():
-            try:
-                signal.signal(number, handler)
-            except (OSError, ValueError):
-                continue
-        self.previous.clear()
+        """Put back the handlers that install replaced.
+
+        A stop that arrives while the handlers change reaches the handler that
+        was just put back. On Windows that is the default Ctrl+C handler,
+        which raises KeyboardInterrupt and prints a traceback. The run has
+        already recorded its stop by then, so this method ends the run with
+        that stop's code. A Ctrl+C with no stop recorded ends the run with
+        130.
+        """
+        try:
+            self._remove_console_handler()
+            for number, handler in self.previous.items():
+                try:
+                    signal.signal(number, handler)
+                except (OSError, ValueError):
+                    continue
+            self.previous.clear()
+        except KeyboardInterrupt:
+            self.stop_if_pending()
+            raise SystemExit(128 + signal.SIGINT) from None
 
     def _install_console_handler(self) -> None:
         """Register the Windows console control handler. Windows only."""
@@ -1880,42 +1892,28 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     never run, and the run would leave a database behind without naming it.
     The return value still tells the caller to end with an error.
 
-    The handlers stay latched through the failure report and the replay, and
-    they come off while the stack unwinds. A second signal in that interval
-    then cannot reach its default action, which would end the process before
-    the report gives the database identifier and would replace the first
-    signal's code.
-
-    A signal that arrives after the last check and before the handlers change
-    is held and never replayed, so the run would report success and exit 0.
-    The guard therefore checks once more after the handlers come off. That
-    check runs only when the first one returned, so a held signal still
-    unwinds on its own path.
+    The handlers stay installed after this returns. The caller puts them back
+    once it has chosen its exit status, so a stop that arrives while the run
+    ends still reaches the guard. The default action never runs. A default
+    Ctrl+C handler would raise KeyboardInterrupt and print a traceback, and
+    the process would end with the Windows control status.
     """
     dropped = True
     try:
-        try:
-            guard.latch()
-            if admin is not None and name:
-                dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
-        except (OSError, psycopg.Error) as error:
-            # A server that refuses the drop, such as one that denies the
-            # permission, reaches here. Report it in one line rather than let a
-            # traceback replace the run's result.
-            detail = str(error).strip().rstrip(".!?")
-            print(f"Cleanup failed. {detail}.")
-            dropped = False
-        if not dropped and name:
-            _report_cleanup_failure(name)
-        # A held signal raises here, so its exit code stands and this result is
-        # never used on that path.
-        guard.stop_if_pending()
-    finally:
-        guard.restore()
-    # The guard holds a signal that arrives after the check above and before
-    # the handlers change. Nothing else looks for it. The run would then
-    # report success and exit 0. This check runs only when the first one
-    # returned.
+        guard.latch()
+        if admin is not None and name:
+            dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
+    except (OSError, psycopg.Error) as error:
+        # A server that refuses the drop, such as one that denies the
+        # permission, reaches here. Report it in one line rather than let a
+        # traceback replace the run's result.
+        detail = str(error).strip().rstrip(".!?")
+        print(f"Cleanup failed. {detail}.")
+        dropped = False
+    if not dropped and name:
+        _report_cleanup_failure(name)
+    # A held signal raises here, so its exit code stands and this result is
+    # never used on that path.
     guard.stop_if_pending()
     return dropped
 
@@ -4128,14 +4126,34 @@ def _print_results(results: Sequence[Mapping[str, object]], stage: int) -> int:
 
 
 def _self_test() -> int:
+    """Run the self-test, then put the stop handlers back.
+
+    The handlers stay installed until this method has chosen its exit status,
+    so a stop that arrives while the run ends still reaches the guard. A
+    caller that keeps running after this returns gets the handlers it had
+    before.
+    """
     base_url = os.environ.get("CMSC127_DATABASE_URL")
     if not base_url:
         print("CMSC127_DATABASE_URL is not set. Set it to the local PostgreSQL connection URL.")
         return 2
-    name = ""
-    admin: _DbConnection | None = None
     guard = _StopGuard()
     guard.install()
+    try:
+        code = _run_self_test(base_url, guard)
+        guard.stop_if_pending()
+    finally:
+        guard.restore()
+    # A stop that arrived while the handlers changed is held and never
+    # replayed. This check runs only when the first one returned.
+    guard.stop_if_pending()
+    return code
+
+
+def _run_self_test(base_url: str, guard: _StopGuard) -> int:
+    """Run the self-test suite against a scratch database."""
+    name = ""
+    admin: _DbConnection | None = None
     code = 0
     try:
         name, admin = _create_database(base_url, guard)
@@ -4178,6 +4196,13 @@ def _self_test() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI, then put the stop handlers back.
+
+    The handlers stay installed until this method has chosen its exit status,
+    so a stop that arrives while the run ends still reaches the guard. A
+    caller that keeps running after this returns gets the handlers it had
+    before.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", nargs="?", type=int, default=1)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -4237,11 +4262,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not selected:
         print(f"No cases are listed for stage {arguments.stage} or an earlier stage.")
         return 1
+    guard = _StopGuard()
+    guard.install()
+    try:
+        code = _run_stage(
+            arguments, root, runner_dir, database_url, manifest, selected, guard
+        )
+        guard.stop_if_pending()
+    finally:
+        guard.restore()
+    # A stop that arrived while the handlers changed is held and never
+    # replayed. This check runs only when the first one returned.
+    guard.stop_if_pending()
+    return code
+
+
+def _run_stage(
+    arguments: argparse.Namespace,
+    root: Path,
+    runner_dir: Path,
+    database_url: str,
+    manifest: dict[str, object],
+    selected: list[dict[str, object]],
+    guard: _StopGuard,
+) -> int:
+    """Run the selected cases against a scratch database and report them."""
     database_name = ""
     admin: _DbConnection | None = None
     results: list[dict[str, object]] = []
-    guard = _StopGuard()
-    guard.install()
     cleanup_failed = False
     try:
         database_name, admin = _create_database(database_url, guard)
