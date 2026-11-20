@@ -55,32 +55,64 @@ const SCRIPTS = ["browser-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audi
 
 // The harness reserves its test ports through CMSC127_TEST_PORTS, the same
 // variable the Python tests read, so no gate's port is fixed in this file.
-// Every port this returns comes from that list. A smoke script never binds
-// outside the range the gate reserved. A value that holds no port number
-// stops the run with a message. The gate then reads the fault. Without that
-// variable, ask the operating system for a free port.
-async function reservedPort(): Promise<number> {
-  const listed = process.env["CMSC127_TEST_PORTS"] ?? "";
-  if (listed.trim() !== "") {
-    for (const entry of listed.split(",")) {
-      const text = entry.trim();
-      if (text === "") continue;
-      if (!/^\d+$/.test(text)) {
-        throw new Error(`CMSC127_TEST_PORTS holds ${JSON.stringify(text)}, which is not a port number.`);
-      }
-      const port = Number(text);
-      if (!(port >= 1 && port <= 65535)) {
-        throw new Error(`CMSC127_TEST_PORTS holds ${port}, which is outside 1 to 65535.`);
-      }
-      return port;
+// The rules match tests/test_server.py. The fallback applies only when the
+// variable is absent. An empty entry is a fault. Only ASCII decimal digits
+// are ports. Every port sits in 1 to 65535. The whole list is read before
+// any port is chosen.
+const ASCII_DIGITS = /^[0-9]+$/;
+
+function listedPorts(listed: string): number[] {
+  const ports: number[] = [];
+  for (const entry of listed.split(",")) {
+    const text = entry.trim();
+    if (text === "") {
+      throw new Error("CMSC127_TEST_PORTS holds an empty entry. Give a port number for each entry.");
     }
+    if (!ASCII_DIGITS.test(text)) {
+      throw new Error(`CMSC127_TEST_PORTS holds ${JSON.stringify(text)}, which is not a port number.`);
+    }
+    const port = Number(text);
+    if (!(port >= 1 && port <= 65535)) {
+      throw new Error(`CMSC127_TEST_PORTS holds ${port}, which is outside 1 to 65535.`);
+    }
+    ports.push(port);
+  }
+  return ports;
+}
+
+// Every port this returns comes from the reserved list. No port repeats.
+// A smoke script never binds outside the range the gate reserved. A list that
+// holds too few distinct ports stops the run with a message. The gate then
+// reads the fault. Without that variable, ask the operating system.
+async function reservedPorts(count: number): Promise<number[]> {
+  const listed = process.env["CMSC127_TEST_PORTS"];
+  if (listed !== undefined) {
+    const chosen = [...new Set(listedPorts(listed))];
+    if (chosen.length < count) {
+      throw new Error(
+        `CMSC127_TEST_PORTS lists ${chosen.length} distinct ports. `
+        + `This fixture needs ${count}. Add ${count - chosen.length} more.`,
+      );
+    }
+    return chosen.slice(0, count);
+  }
+  const ports: number[] = [];
+  while (ports.length < count) {
+    const probe = createServer();
+    await new Promise<void>((ready) => probe.listen(0, "127.0.0.1", ready));
+    const address = probe.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    await new Promise<void>((done) => probe.close(() => done()));
+    if (!ports.includes(port)) ports.push(port);
+  }
+  return ports;
+}
+
+async function reservedPort(): Promise<number> {
+  const [port] = await reservedPorts(1);
+  if (port === undefined) {
     throw new Error("CMSC127_TEST_PORTS holds no port. This fixture needs 1.");
   }
-  const probe = createServer();
-  await new Promise<void>((ready) => probe.listen(0, "127.0.0.1", ready));
-  const address = probe.address();
-  const port = typeof address === "object" && address !== null ? address.port : 0;
-  await new Promise<void>((done) => probe.close(() => done()));
   return port;
 }
 
@@ -122,6 +154,44 @@ describe("smoke script port", () => {
   }
 });
 
+// One table for both languages. tests/test_server.py reads the same cases, so
+// one rule covers both. Each row is the value, the fault text it must raise,
+// and the ports it must return. An empty fault text means the value is good.
+const PORT_LIST_CASES: [string, string, number[]][] = [
+  ["55740,55741", "", [55740, 55741]],
+  [" 55740 , 55741 ", "", [55740, 55741]],
+  ["1", "", [1]],
+  ["65535", "", [65535]],
+  ["55740,55740", "", [55740, 55740]],
+  ["", "empty entry", []],
+  [" ", "empty entry", []],
+  ["55740,,55741", "empty entry", []],
+  ["55740,", "empty entry", []],
+  ["55740,99999", "outside 1 to 65535", []],
+  ["0", "outside 1 to 65535", []],
+  ["65536", "outside 1 to 65535", []],
+  ["\u00b2", "not a port number", []],
+  ["55740,\u00b2", "not a port number", []],
+  ["http", "not a port number", []],
+  ["+55740", "not a port number", []],
+  ["55740.0", "not a port number", []],
+];
+
+// The same table for the count rule. Each row holds the value, the count the
+// fixture needs, and the expected result. The result is either the ports it
+// must return or the fault text it must raise. A value of null means the
+// variable is absent.
+const PORT_RESERVE_CASES: [string | null, number, number[] | string][] = [
+  ["55740,55741,55742", 3, [55740, 55741, 55742]],
+  ["55740,55741", 3, "distinct ports"],
+  ["55740,55740,55741", 2, [55740, 55741]],
+  ["55740,55740", 2, "distinct ports"],
+  ["55740,55740,55740,55740,55740,55740", 6, "distinct ports"],
+  [null, 3, "operating system"],
+  [" ", 1, "empty entry"],
+  ["55740,99999", 1, "outside 1 to 65535"],
+];
+
 // A gate that reserves its ports must not have a fixture bind outside them. A
 // list that cannot serve the fixture stops the run and states the fault.
 describe("reserved port list", () => {
@@ -132,29 +202,35 @@ describe("reserved port list", () => {
     else process.env["CMSC127_TEST_PORTS"] = saved;
   });
 
-  it("takes the first port of the list", async () => {
-    process.env["CMSC127_TEST_PORTS"] = "55736,55737";
-    expect(await reservedPort()).toBe(55736);
+  it("reads every row of the shared parse table", () => {
+    for (const [listed, fault, expected] of PORT_LIST_CASES) {
+      if (fault === "") {
+        expect(listedPorts(listed), listed).toEqual(expected);
+      } else {
+        expect(() => listedPorts(listed), listed).toThrow(fault);
+      }
+    }
   });
 
-  it("stops on a port above 65535 and names the value", async () => {
-    process.env["CMSC127_TEST_PORTS"] = "99999,55737";
-    await expect(reservedPort()).rejects.toThrow("99999");
-  });
-
-  it("stops on a port of zero and names the value", async () => {
-    process.env["CMSC127_TEST_PORTS"] = "0,55737";
-    await expect(reservedPort()).rejects.toThrow("0");
-  });
-
-  it("stops on a value that is not a number and names it", async () => {
-    process.env["CMSC127_TEST_PORTS"] = "http,55737";
-    await expect(reservedPort()).rejects.toThrow("http");
-  });
-
-  it("stops on a list that holds no port", async () => {
-    process.env["CMSC127_TEST_PORTS"] = " , ";
-    await expect(reservedPort()).rejects.toThrow("needs 1");
+  it("reads every row of the shared count table", async () => {
+    for (const [listed, count, expected] of PORT_RESERVE_CASES) {
+      if (listed === null) delete process.env["CMSC127_TEST_PORTS"];
+      else process.env["CMSC127_TEST_PORTS"] = listed;
+      if (typeof expected === "string") {
+        if (expected === "operating system") {
+          const ports = await reservedPorts(count);
+          expect(ports, String(listed)).toHaveLength(count);
+          for (const port of ports) {
+            expect(port).toBeGreaterThan(0);
+            expect(port).toBeLessThan(65536);
+          }
+        } else {
+          await expect(reservedPorts(count), String(listed)).rejects.toThrow(expected);
+        }
+      } else {
+        expect(await reservedPorts(count), String(listed)).toEqual(expected);
+      }
+    }
   });
 
   it("asks the operating system when the variable is unset", async () => {

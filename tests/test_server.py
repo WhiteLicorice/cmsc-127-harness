@@ -102,19 +102,27 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
 def listed_ports(listed: str) -> list[int]:
     """The ports in a CMSC127_TEST_PORTS value.
 
-    A port outside 1 to 65535 cannot be bound. A value that holds letters or
-    symbols is a fault too. Either one stops the run here, before a socket
-    opens, so the gate log carries the reason.
+    The value is a comma-separated list of ASCII decimal ports. An empty
+    entry, a value that holds no port, a digit outside ASCII, and a port
+    outside 1 to 65535 are faults. Each one stops the run here, before a
+    socket opens, so the gate log carries the reason. The whole list is read
+    before any port is chosen.
     """
     ports: list[int] = []
     for entry in listed.split(","):
         text = entry.strip()
         if not text:
-            continue
-        if not text.isdigit():
+            raise RuntimeError(
+                "CMSC127_TEST_PORTS holds an empty entry. "
+                "Give a port number for each entry."
+            )
+        if _ASCII_DIGITS.fullmatch(text) is None:
             raise RuntimeError(
                 f"CMSC127_TEST_PORTS holds {text!r}, which is not a port number."
             )
@@ -132,18 +140,18 @@ def reserved_ports(count: int, fallback: Sequence[int] = ()) -> list[int]:
 
     A gate that runs beside another gate reserves its own ports. It sets
     CMSC127_TEST_PORTS to a comma-separated list. Every port this returns then
-    comes from that list. A fixture never binds outside the range the gate
-    reserved. A list that holds too few ports stops the run. The message gives
-    the count it needs, before any socket opens. Without that list the test
-    takes the fallback range when one is given. Otherwise it asks the
-    operating system for free ports.
+    comes from that list. No port repeats. A fixture never binds outside
+    the range the gate reserved. A list that holds too few distinct ports
+    stops the run. The message gives the count it needs, before any socket
+    opens. The fallback range applies only when the variable is absent.
+    Otherwise this asks the operating system for free ports.
     """
-    listed = os.environ.get("CMSC127_TEST_PORTS", "")
-    if listed.strip():
-        chosen = listed_ports(listed)
+    listed = os.environ.get("CMSC127_TEST_PORTS")
+    if listed is not None:
+        chosen = list(dict.fromkeys(listed_ports(listed)))
         if len(chosen) < count:
             raise RuntimeError(
-                f"CMSC127_TEST_PORTS lists {len(chosen)} ports. "
+                f"CMSC127_TEST_PORTS lists {len(chosen)} distinct ports. "
                 f"This fixture needs {count}. Add {count - len(chosen)} more."
             )
         return chosen[:count]
@@ -205,6 +213,47 @@ def drain_server_output(
     return "".join(output)
 
 
+# The TypeScript selector in tests/ts/smokePort.test.ts reads the same
+# cases, so one rule covers both languages.
+# Each row is the value, the fault text it must raise, and the ports it must
+# return. An empty fault text means the value is good.
+PORT_LIST_CASES: tuple[tuple[str, str, tuple[int, ...]], ...] = (
+    ("55740,55741", "", (55740, 55741)),
+    (" 55740 , 55741 ", "", (55740, 55741)),
+    ("1", "", (1,)),
+    ("65535", "", (65535,)),
+    ("55740,55740", "", (55740, 55740)),
+    ("", "empty entry", ()),
+    (" ", "empty entry", ()),
+    ("55740,,55741", "empty entry", ()),
+    ("55740,", "empty entry", ()),
+    ("55740,99999", "outside 1 to 65535", ()),
+    ("0", "outside 1 to 65535", ()),
+    ("65536", "outside 1 to 65535", ()),
+    ("\u00b2", "not a port number", ()),
+    ("55740,\u00b2", "not a port number", ()),
+    ("http", "not a port number", ()),
+    ("+55740", "not a port number", ()),
+    ("55740.0", "not a port number", ()),
+)
+
+# The same table for the count rule. Each row is the value, the count the
+# fixture needs, the fallback range, and the ports it must return or the fault
+# text it must raise. A value of None means the variable is absent.
+PORT_RESERVE_CASES: tuple[
+    tuple[str | None, int, tuple[int, ...], tuple[int, ...] | str], ...
+] = (
+    ("55740,55741,55742", 3, (), (55740, 55741, 55742)),
+    ("55740,55741", 3, (55750, 55751, 55752), "distinct ports"),
+    ("55740,55740,55741", 2, (), (55740, 55741)),
+    ("55740,55740", 2, (), "distinct ports"),
+    ("55740,55740,55740,55740,55740,55740", 6, (), "distinct ports"),
+    (None, 3, (55750, 55751, 55752), (55750, 55751, 55752)),
+    (" ", 1, (55750,), "empty entry"),
+    ("55740,99999", 1, (), "outside 1 to 65535"),
+)
+
+
 class ReservedPortTests(unittest.TestCase):
     """A reserved port list is the only range a fixture may bind.
 
@@ -224,42 +273,29 @@ class ReservedPortTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             return reserved_ports(count, fallback)
 
-    def test_a_full_list_is_used_in_order(self) -> None:
-        chosen = self.reserve("55736,55737,55738", 3, (55731, 55732, 55733))
-        self.assertEqual([55736, 55737, 55738], chosen)
+    def test_the_parse_table(self) -> None:
+        """Every row of the shared table gives its ports or its fault."""
+        for listed, fault, expected in PORT_LIST_CASES:
+            with self.subTest(listed=listed):
+                if fault:
+                    with self.assertRaises(RuntimeError) as raised:
+                        listed_ports(listed)
+                    self.assertIn(fault, str(raised.exception))
+                else:
+                    self.assertEqual(list(expected), listed_ports(listed))
 
-    def test_a_short_list_stops_the_run_and_names_the_count(self) -> None:
-        """A short list cannot serve a fixture that needs more ports.
-
-        The list is the gate's reservation. The fixture must not fall back to
-        a default range outside it. The message gives both counts, so the gate
-        can add the ports it lacks.
-        """
-        with self.assertRaises(RuntimeError) as raised:
-            self.reserve("55736,55737,55738,55739,55731", 6, (55721, 55722, 55723, 55724, 55725, 55726))
-        message = str(raised.exception)
-        self.assertIn("6", message)
-        self.assertIn("5", message)
-
-    def test_an_invalid_port_stops_the_run_and_names_the_value(self) -> None:
-        """A port above 65535 cannot be bound, so it must not reach a socket."""
-        with self.assertRaises(RuntimeError) as raised:
-            self.reserve("99999,55737,55738,55739,55731,55732", 6, ())
-        self.assertIn("99999", str(raised.exception))
-
-    def test_a_port_of_zero_stops_the_run_and_names_the_value(self) -> None:
-        with self.assertRaises(RuntimeError) as raised:
-            self.reserve("0,55737,55738,55739,55731,55732", 6, ())
-        self.assertIn("0", str(raised.exception))
-
-    def test_an_entry_that_is_not_a_number_stops_the_run_and_names_it(self) -> None:
-        with self.assertRaises(RuntimeError) as raised:
-            self.reserve("55736,http,55738", 3, ())
-        self.assertIn("http", str(raised.exception))
-
-    def test_an_unset_variable_keeps_the_fallback_range(self) -> None:
-        chosen = self.reserve(None, 3, (55731, 55732, 55733))
-        self.assertEqual([55731, 55732, 55733], chosen)
+    def test_the_reserve_table(self) -> None:
+        """Every row of the shared count table gives its ports or its fault."""
+        for listed, count, fallback, expected in PORT_RESERVE_CASES:
+            with self.subTest(listed=listed, count=count):
+                if isinstance(expected, str):
+                    with self.assertRaises(RuntimeError) as raised:
+                        self.reserve(listed, count, fallback)
+                    self.assertIn(expected, str(raised.exception))
+                else:
+                    self.assertEqual(
+                        list(expected), self.reserve(listed, count, fallback)
+                    )
 
     def test_an_unset_variable_without_a_fallback_asks_the_operating_system(self) -> None:
         chosen = self.reserve(None, 2, ())
