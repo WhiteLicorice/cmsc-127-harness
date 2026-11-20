@@ -88,8 +88,8 @@ let origin = "";
 let served: Build;
 
 // The install asks for the manifest first, then for each page file. The test
-// holds the first page file until the reload has run. That is the download
-// window in which the active worker runs its cleanup.
+// holds the first page file until it has captured the new worker. That is the
+// download window in which the active worker runs its cleanup.
 let holdApp = false;
 // The server answers the page file with 503, so build B cannot install. The
 // page then stays on build A, which is the case the failed-install test states.
@@ -100,10 +100,13 @@ let failApp = false;
 let refused = 0;
 const refusedWaiters: (() => void)[] = [];
 let releaseApp: () => void = () => undefined;
-let announceHeld: () => void = () => undefined;
-const held = new Promise<void>((resolve) => {
-  announceHeld = resolve;
-});
+// Each held page-file download announces itself, so the test can act while the
+// download is open. The queue lets both cases hold one.
+const holdWaiters: (() => void)[] = [];
+
+function nextHold(): Promise<void> {
+  return new Promise<void>((ready) => holdWaiters.push(ready));
+}
 
 // Wait for the fixture to refuse one page-file download. A run that serves
 // build A in place of build B never refuses one, so this wait reports it.
@@ -131,20 +134,22 @@ async function handle(
 ): Promise<void> {
   const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
+  // The hold comes first, so the test can capture the new worker while the
+  // download is open and only then decide how to answer it.
+  if (holdApp && relative === "app.js") {
+    holdApp = false;
+    const gate = new Promise<void>((release) => {
+      releaseApp = release;
+    });
+    for (const wake of holdWaiters.splice(0)) wake();
+    await gate;
+  }
   if (failApp && relative === "app.js") {
     refused += 1;
     for (const wake of refusedWaiters.splice(0)) wake();
     response.writeHead(503);
     response.end();
     return;
-  }
-  if (holdApp && relative === "app.js") {
-    holdApp = false;
-    const gate = new Promise<void>((release) => {
-      releaseApp = release;
-    });
-    announceHeld();
-    await gate;
   }
   const file = join(served.directory, relative);
   const body = await readFile(file).catch(() => null);
@@ -202,28 +207,47 @@ async function captureController(page: Page): Promise<void> {
   });
 }
 
-// Start the update and wait for build B's worker to become redundant. A
-// refused page-file download fails the install. The browser then retires the
-// worker. The loop runs inside the page, so it sees every state.
-async function updateUntilRedundant(page: Page): Promise<string> {
+// Attach the updatefound listener before the update, so the test holds the
+// worker that the browser would otherwise retire between two polls. The worker
+// and the update promise stay on the window, so the next call can wait for the
+// captured worker's state.
+async function startUpdateAndCapture(page: Page): Promise<string> {
   return page.evaluate(async () => {
     const registration = await navigator.serviceWorker.getRegistration();
     if (registration === null) return "no registration";
+    const found = new Promise<ServiceWorker | null>((ready) => {
+      registration.addEventListener(
+        "updatefound",
+        () => ready(registration.installing),
+        { once: true },
+      );
+    });
     const updating = registration.update();
-    const deadline = Date.now() + 20_000;
-    let worker: ServiceWorker | null = null;
-    while (worker === null && Date.now() < deadline) {
-      worker = registration.installing;
-      if (worker === null) await new Promise((ready) => setTimeout(ready, 10));
-    }
+    Object.assign(window, { harnessUpdating: updating });
+    const worker = await Promise.race([
+      found,
+      new Promise<null>((ready) => setTimeout(() => ready(null), 20_000)),
+    ]);
     if (worker === null) return "no installing worker";
-    const states: string[] = [];
+    Object.assign(window, { harnessWorkerB: worker });
+    return worker.state;
+  });
+}
+
+// Wait for the captured worker to become redundant. The wait reads the worker
+// the listener caught, so a browser that retires it between two polls cannot
+// hide it from this wait.
+async function waitForRedundant(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const worker = Reflect.get(window, "harnessWorkerB") as ServiceWorker | undefined;
+    if (worker === undefined) return "no captured worker";
+    const deadline = Date.now() + 20_000;
     while (worker.state !== "redundant" && Date.now() < deadline) {
-      states.push(worker.state);
       await new Promise((ready) => setTimeout(ready, 10));
     }
-    await updating.catch(() => undefined);
-    return worker.state === "redundant" ? "redundant" : `states ${states.join(",")}`;
+    const updating = Reflect.get(window, "harnessUpdating") as Promise<unknown> | undefined;
+    await updating?.catch(() => undefined);
+    return worker.state;
   });
 }
 
@@ -297,6 +321,7 @@ describe("a reload while a new build downloads", () => {
     // install writes its cache record and then waits inside the download.
     served = buildB;
     holdApp = true;
+    const held = nextHold();
     await page.evaluate(() => {
       void navigator.serviceWorker.getRegistration().then((registration) => registration?.update());
     });
@@ -353,12 +378,19 @@ describe("a reload while a new build downloads", () => {
     expect(await page.evaluate(() => document.body.dataset["build"])).toBe("a");
     expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
 
-    // The server answers the page file with 503, so build B cannot install.
-    // The test waits for the refusal and for build B's worker to become
-    // redundant, so a run that never reached build B's download cannot pass.
+    // The server offers build B and holds its page file, so the test captures
+    // build B's worker before the browser can retire it. The 503 goes out only
+    // after the capture, so the install cannot finish first.
     served = buildB;
+    failApp = false;
+    holdApp = true;
+    const held = nextHold();
+    const captured = await startUpdateAndCapture(page);
+    expect(captured).not.toBe("no installing worker");
+    await held;
     failApp = true;
-    expect(await updateUntilRedundant(page)).toBe("redundant");
+    releaseApp();
+    expect(await waitForRedundant(page)).toBe("redundant");
     await waitForRefusal(20);
     expect(refused).toBeGreaterThan(0);
 
