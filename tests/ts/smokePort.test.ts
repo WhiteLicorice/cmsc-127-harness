@@ -3,8 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
-
+import { afterEach, describe, expect, it } from "vitest";
 // The smoke scripts start the harness server on a port of their own. A gate
 // that runs beside another gate must reserve its own port, so each script
 // passes an explicit port through from its own environment and keeps its old
@@ -56,12 +55,26 @@ const SCRIPTS = ["browser-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audi
 
 // The harness reserves its test ports through CMSC127_TEST_PORTS, the same
 // variable the Python tests read, so no gate's port is fixed in this file.
-// Without that variable, ask the operating system for a free port.
+// Every port this returns comes from that list. A smoke script never binds
+// outside the range the gate reserved. A value that holds no port number
+// stops the run with a message. The gate then reads the fault. Without that
+// variable, ask the operating system for a free port.
 async function reservedPort(): Promise<number> {
   const listed = process.env["CMSC127_TEST_PORTS"] ?? "";
-  for (const entry of listed.split(",")) {
-    const port = Number(entry.trim());
-    if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+  if (listed.trim() !== "") {
+    for (const entry of listed.split(",")) {
+      const text = entry.trim();
+      if (text === "") continue;
+      if (!/^\d+$/.test(text)) {
+        throw new Error(`CMSC127_TEST_PORTS holds ${JSON.stringify(text)}, which is not a port number.`);
+      }
+      const port = Number(text);
+      if (!(port >= 1 && port <= 65535)) {
+        throw new Error(`CMSC127_TEST_PORTS holds ${port}, which is outside 1 to 65535.`);
+      }
+      return port;
+    }
+    throw new Error("CMSC127_TEST_PORTS holds no port. This fixture needs 1.");
   }
   const probe = createServer();
   await new Promise<void>((ready) => probe.listen(0, "127.0.0.1", ready));
@@ -107,4 +120,47 @@ describe("smoke script port", () => {
       expect(Number(port)).toBeGreaterThan(0);
     });
   }
+});
+
+// A gate that reserves its ports must not have a fixture bind outside them. A
+// list that cannot serve the fixture stops the run and states the fault.
+describe("reserved port list", () => {
+  const saved = process.env["CMSC127_TEST_PORTS"];
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env["CMSC127_TEST_PORTS"];
+    else process.env["CMSC127_TEST_PORTS"] = saved;
+  });
+
+  it("takes the first port of the list", async () => {
+    process.env["CMSC127_TEST_PORTS"] = "55736,55737";
+    expect(await reservedPort()).toBe(55736);
+  });
+
+  it("stops on a port above 65535 and names the value", async () => {
+    process.env["CMSC127_TEST_PORTS"] = "99999,55737";
+    await expect(reservedPort()).rejects.toThrow("99999");
+  });
+
+  it("stops on a port of zero and names the value", async () => {
+    process.env["CMSC127_TEST_PORTS"] = "0,55737";
+    await expect(reservedPort()).rejects.toThrow("0");
+  });
+
+  it("stops on a value that is not a number and names it", async () => {
+    process.env["CMSC127_TEST_PORTS"] = "http,55737";
+    await expect(reservedPort()).rejects.toThrow("http");
+  });
+
+  it("stops on a list that holds no port", async () => {
+    process.env["CMSC127_TEST_PORTS"] = " , ";
+    await expect(reservedPort()).rejects.toThrow("needs 1");
+  });
+
+  it("asks the operating system when the variable is unset", async () => {
+    delete process.env["CMSC127_TEST_PORTS"];
+    const port = await reservedPort();
+    expect(port).toBeGreaterThan(0);
+    expect(port).toBeLessThan(65536);
+  });
 });

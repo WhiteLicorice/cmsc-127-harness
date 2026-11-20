@@ -102,17 +102,50 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+def listed_ports(listed: str) -> list[int]:
+    """The ports in a CMSC127_TEST_PORTS value.
+
+    A port outside 1 to 65535 cannot be bound. A value that holds letters or
+    symbols is a fault too. Either one stops the run here, before a socket
+    opens, so the gate log carries the reason.
+    """
+    ports: list[int] = []
+    for entry in listed.split(","):
+        text = entry.strip()
+        if not text:
+            continue
+        if not text.isdigit():
+            raise RuntimeError(
+                f"CMSC127_TEST_PORTS holds {text!r}, which is not a port number."
+            )
+        port = int(text)
+        if not 1 <= port <= 65535:
+            raise RuntimeError(
+                f"CMSC127_TEST_PORTS holds {port}, which is outside 1 to 65535."
+            )
+        ports.append(port)
+    return ports
+
+
 def reserved_ports(count: int, fallback: Sequence[int] = ()) -> list[int]:
     """Loopback ports for a test that needs more than one server.
 
-    A gate that runs beside another gate reserves its own ports, so it sets
-    CMSC127_TEST_PORTS to a comma-separated list. Without that list the test
-    takes the fallback range when one is given, and otherwise asks the
+    A gate that runs beside another gate reserves its own ports. It sets
+    CMSC127_TEST_PORTS to a comma-separated list. Every port this returns then
+    comes from that list. A fixture never binds outside the range the gate
+    reserved. A list that holds too few ports stops the run. The message gives
+    the count it needs, before any socket opens. Without that list the test
+    takes the fallback range when one is given. Otherwise it asks the
     operating system for free ports.
     """
     listed = os.environ.get("CMSC127_TEST_PORTS", "")
-    chosen = [int(entry) for entry in listed.split(",") if entry.strip().isdigit()]
-    if len(chosen) >= count:
+    if listed.strip():
+        chosen = listed_ports(listed)
+        if len(chosen) < count:
+            raise RuntimeError(
+                f"CMSC127_TEST_PORTS lists {len(chosen)} ports. "
+                f"This fixture needs {count}. Add {count - len(chosen)} more."
+            )
         return chosen[:count]
     if len(fallback) >= count:
         return list(fallback[:count])
@@ -170,6 +203,71 @@ def drain_server_output(
         except queue.Empty:
             break
     return "".join(output)
+
+
+class ReservedPortTests(unittest.TestCase):
+    """A reserved port list is the only range a fixture may bind.
+
+    A gate that runs beside another gate reserves its own ports. A fixture
+    that then binds outside that list can take a port another gate holds. A
+    list that cannot serve the fixture must stop the run before any socket
+    opens. The message states the count the fixture needs.
+    """
+
+    def reserve(self, listed: str | None, count: int, fallback: Sequence[int]) -> list[int]:
+        """Call reserved_ports with the variable set to one value."""
+        environment = os.environ.copy()
+        if listed is None:
+            environment.pop("CMSC127_TEST_PORTS", None)
+        else:
+            environment["CMSC127_TEST_PORTS"] = listed
+        with patch.dict(os.environ, environment, clear=True):
+            return reserved_ports(count, fallback)
+
+    def test_a_full_list_is_used_in_order(self) -> None:
+        chosen = self.reserve("55736,55737,55738", 3, (55731, 55732, 55733))
+        self.assertEqual([55736, 55737, 55738], chosen)
+
+    def test_a_short_list_stops_the_run_and_names_the_count(self) -> None:
+        """A short list cannot serve a fixture that needs more ports.
+
+        The list is the gate's reservation. The fixture must not fall back to
+        a default range outside it. The message gives both counts, so the gate
+        can add the ports it lacks.
+        """
+        with self.assertRaises(RuntimeError) as raised:
+            self.reserve("55736,55737,55738,55739,55731", 6, (55721, 55722, 55723, 55724, 55725, 55726))
+        message = str(raised.exception)
+        self.assertIn("6", message)
+        self.assertIn("5", message)
+
+    def test_an_invalid_port_stops_the_run_and_names_the_value(self) -> None:
+        """A port above 65535 cannot be bound, so it must not reach a socket."""
+        with self.assertRaises(RuntimeError) as raised:
+            self.reserve("99999,55737,55738,55739,55731,55732", 6, ())
+        self.assertIn("99999", str(raised.exception))
+
+    def test_a_port_of_zero_stops_the_run_and_names_the_value(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self.reserve("0,55737,55738,55739,55731,55732", 6, ())
+        self.assertIn("0", str(raised.exception))
+
+    def test_an_entry_that_is_not_a_number_stops_the_run_and_names_it(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self.reserve("55736,http,55738", 3, ())
+        self.assertIn("http", str(raised.exception))
+
+    def test_an_unset_variable_keeps_the_fallback_range(self) -> None:
+        chosen = self.reserve(None, 3, (55731, 55732, 55733))
+        self.assertEqual([55731, 55732, 55733], chosen)
+
+    def test_an_unset_variable_without_a_fallback_asks_the_operating_system(self) -> None:
+        chosen = self.reserve(None, 2, ())
+        self.assertEqual(2, len(chosen))
+        self.assertEqual(2, len(set(chosen)))
+        for port in chosen:
+            self.assertGreater(port, 0)
+            self.assertLess(port, 65536)
 
 
 class HarnessPageTests(unittest.TestCase):
