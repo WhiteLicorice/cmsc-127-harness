@@ -3662,6 +3662,16 @@ raise SystemExit(code)
 '''
 
 
+def console_break_event() -> int:
+    """Return the Ctrl+Break console event number. Windows only.
+
+    The name exists only on Windows, so it is looked up at run time and the
+    type checker on a POSIX host still reads this file.
+    """
+    name = "CTRL_BREAK_EVENT"
+    return cast(int, getattr(signal, name))
+
+
 def race_database_exists(url: str, name: str) -> bool:
     """Report whether the named race database is still present."""
     with psycopg.connect(url, autocommit=True) as admin:
@@ -4060,7 +4070,7 @@ class ConsoleStopSignalTests(unittest.TestCase):
                             break
                         time.sleep(0.05)
                     if process.poll() is None:
-                        os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+                        os.kill(process.pid, console_break_event())
                 returncode = process.wait(timeout=90)
                 if marker.exists():
                     notes = marker.read_text(encoding="utf-8").splitlines()
