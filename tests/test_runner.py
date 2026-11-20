@@ -3487,9 +3487,11 @@ POINT = sys.argv[3]
 TOKEN = sys.argv[4]
 sys.path.insert(0, str(HARNESS))
 
+import psycopg
 import runner
 
 SENT = {"child-run": 0}
+REPORT_POINTS = ("report", "selftest-report")
 
 
 class _Token:
@@ -3510,6 +3512,8 @@ def stop(signum: int = signal.SIGTERM) -> None:
 runner.uuid4 = _Token
 plain_execute = runner._execute
 plain_run_pair = runner._run_pair
+plain_drop_database = runner._drop_database
+plain_report_cleanup_failure = runner._report_cleanup_failure
 
 
 def execute(cursor, statement, parameters=None):
@@ -3528,15 +3532,33 @@ def execute(cursor, statement, parameters=None):
 
 
 def run_pair(*args, **kwargs):
-    if POINT in ("drop", "mixed-before-drop") and SENT["child-run"] == 0:
+    if POINT in ("drop", "mixed-before-drop", "report") and SENT["child-run"] == 0:
         SENT["child-run"] = 1
         note("child-run")
         stop()
     return plain_run_pair(*args, **kwargs)
 
 
+def drop_database(name, admin):
+    """Fail the drop, so the run reports the database it could not remove."""
+    if POINT in REPORT_POINTS:
+        note("drop failed")
+        raise psycopg.OperationalError("the server refused the drop")
+    return plain_drop_database(name, admin)
+
+
+def report_cleanup_failure(name):
+    """Send the second signal at the report boundary, then report."""
+    if POINT in REPORT_POINTS:
+        note("second SIGHUP")
+        stop(signal.SIGHUP)
+    return plain_report_cleanup_failure(name)
+
+
 runner._execute = execute
 runner._run_pair = run_pair
+runner._drop_database = drop_database
+runner._report_cleanup_failure = report_cleanup_failure
 
 
 class _SkipChild:
@@ -3546,6 +3568,9 @@ class _SkipChild:
 
     @staticmethod
     def run(*args, **kwargs):
+        if POINT == "selftest-report":
+            note("child-run")
+            stop()
         return subprocess.CompletedProcess(args[0] if args else [], 0)
 
 
@@ -3708,6 +3733,124 @@ class StopSignalCleanupTests(unittest.TestCase):
         self.assert_stop_leaves_no_database("selftest-drop", self_test=True)
 
 
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class StopReportSignalTests(unittest.TestCase):
+    """A second signal during the failure report keeps the first code.
+
+    The drop fails, so the run reports the database it could not remove. A
+    SIGHUP arrives at that report. The handlers must still be latched, or the
+    default action ends the process before the report gives the database
+    identifier.
+    """
+
+    def exists(self: StopReportSignalTests, url: str, name: str) -> bool:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+                return cursor.fetchone() is not None
+
+    def drop(self: StopReportSignalTests, url: str, name: str) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                        psycopg_sql.Identifier(name)
+                    )
+                )
+
+    def assert_report_survives_the_second_signal(
+        self: StopReportSignalTests,
+        point: str,
+        self_test: bool = False,
+    ) -> None:
+        """Run the runner, fail its drop, and signal at the report."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nsleep 20\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    point,
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists():
+                        notes = marker.read_text(encoding="utf-8").splitlines()
+                    if f"created {name}" in notes:
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertIn(f"created {name}", notes, "the run made no race database")
+                returncode = process.wait(timeout=90)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"{point} exited {returncode} notes {notes}\n{output}"
+        self.assertIn("drop failed", notes, detail)
+        self.assertIn("second SIGHUP", notes, detail)
+        self.assertIn(name, output, detail)
+        self.assertEqual(128 + signal.SIGTERM, returncode, detail)
+        self.assertIn("handler default", notes, detail)
+
+    def test_a_second_signal_during_the_failure_report_keeps_the_first_code(
+        self: StopReportSignalTests,
+    ) -> None:
+        self.assert_report_survives_the_second_signal("report")
+
+    def test_the_self_test_keeps_the_first_code_at_the_failure_report(
+        self: StopReportSignalTests,
+    ) -> None:
+        self.assert_report_survives_the_second_signal("selftest-report", self_test=True)
+
+
 class StopSignalHandlerTests(unittest.TestCase):
     """The stop handlers go in before the create and come off after the drop."""
 
@@ -3832,9 +3975,9 @@ class StopSignalHandlerTests(unittest.TestCase):
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
 # A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster on 55660 and the browser tests on 55661 to 55669 stay
+# so the database cluster on 55690 and the browser tests on 55691 to 55699 stay
 # free. The Python stage and the browser stage never run at the same time.
-STALL_LANE = range(55662, 55667)
+STALL_LANE = range(55692, 55697)
 
 
 def stall_drop(*arguments: object) -> None:

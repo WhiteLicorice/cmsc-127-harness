@@ -9,6 +9,10 @@ const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.ex
 const projectRoot = resolve("smoke-project");
 const artifactRoot = resolve("smoke-artifacts");
 const serverScript = resolve("server.py");
+// A gate that runs beside another gate reserves its own port. CMSC127_PORT
+// sets that port. The value below is the one this script used before the port
+// became a choice.
+const port = process.env["CMSC127_PORT"] ?? "55442";
 
 if (!process.env["CMSC127_DATABASE_URL"]) {
   console.error("Set CMSC127_DATABASE_URL to a disposable database before the browser smoke.");
@@ -50,7 +54,7 @@ function record(line) {
 
 const server = spawn(python, [serverScript, "--no-browser"], {
   cwd: projectRoot,
-  env: { ...process.env, CMSC127_PORT: "55442" },
+  env: { ...process.env, CMSC127_PORT: port },
   stdio: ["ignore", "pipe", "pipe"],
   windowsHide: true,
 });
