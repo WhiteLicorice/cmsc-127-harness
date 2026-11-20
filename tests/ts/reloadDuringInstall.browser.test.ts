@@ -91,6 +91,9 @@ let served: Build;
 // holds the first page file until the reload has run. That is the download
 // window in which the active worker runs its cleanup.
 let holdApp = false;
+// The server answers the page file with 503, so build B cannot install. The
+// page then stays on build A, which is the case the failed-install test states.
+let failApp = false;
 let releaseApp: () => void = () => undefined;
 let announceHeld: () => void = () => undefined;
 const held = new Promise<void>((resolve) => {
@@ -108,6 +111,11 @@ async function handle(
 ): Promise<void> {
   const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
+  if (failApp && relative === "app.js") {
+    response.writeHead(503);
+    response.end();
+    return;
+  }
   if (holdApp && relative === "app.js") {
     holdApp = false;
     const gate = new Promise<void>((release) => {
@@ -161,38 +169,59 @@ type ControllerState = {
   active: string | null;
   controller: string | null;
   same: boolean;
+  changed: boolean;
 };
+
+// The controller that build A installed. The wait compares against it, so a
+// registration that still reports A cannot pass for the new build.
+async function captureController(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    Object.assign(window, { harnessControllerA: navigator.serviceWorker.controller });
+  });
+}
 
 // The install finishes when no install or wait sits in the registration. That
 // is not enough. Chromium can report both as null while the controller is
 // still activating. The offline navigation then reads the old build. Wait for
-// the controller to be the active worker and to have finished activating. The
-// states seen on the way are kept, so a later failure shows the order.
+// a controller that differs from the one build A installed, and for that
+// controller to have finished activating. The states seen on the way are
+// kept, so a later failure shows the order.
 async function waitForActivatedController(page: Page): Promise<void> {
   const seen: string[] = [];
+  let changed = false;
   for (let step = 0; step < 200; step += 1) {
     const state = await page.evaluate(async (): Promise<ControllerState> => {
       const registration = await navigator.serviceWorker.getRegistration();
       const controller = navigator.serviceWorker.controller;
+      const captured = Reflect.get(window, "harnessControllerA") as
+        | ServiceWorker
+        | null
+        | undefined;
       return {
         installing: registration?.installing?.state ?? null,
         waiting: registration?.waiting?.state ?? null,
         active: registration?.active?.state ?? null,
         controller: controller?.state ?? null,
         same: controller !== null && controller === registration?.active,
+        changed: captured !== undefined && controller !== captured,
       };
     });
     seen.push(JSON.stringify(state));
+    if (state.changed) changed = true;
     if (
       state.installing === null
       && state.waiting === null
       && state.active === "activated"
       && state.controller === "activated"
       && state.same
+      && state.changed
     ) {
       return;
     }
     await page.waitForTimeout(50);
+  }
+  if (!changed) {
+    throw new Error(`The old controller stayed in control. States: ${seen.join(" ")}`);
   }
   throw new Error(`The new controller never finished activating. States: ${seen.join(" ")}`);
 }
@@ -230,6 +259,9 @@ describe("a reload while a new build downloads", () => {
     // page must still come from build A, which answers it.
     await page.reload({ waitUntil: "load" });
     expect(await page.evaluate(() => document.body.dataset["build"])).toBe("a");
+    // Keep the controller that build A installed. The wait below must see a
+    // different one before the offline navigation can read build B.
+    await captureController(page);
 
     releaseApp();
     const cacheB = await snapshotName(buildB);
@@ -250,6 +282,34 @@ describe("a reload while a new build downloads", () => {
     // The cleanup of the retired build may still run. This test states that the
     // new snapshot is still there, not the order of the older one's removal.
     expect(await caches(page)).toContain(cacheB);
+
+    await context.close();
+  }, 120_000);
+
+  it("reports that the old controller stayed in control when the install fails", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    served = buildA;
+    failApp = false;
+    await page.goto(`${origin}/`, { waitUntil: "load" });
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.register("service-worker.js", { scope: "./" });
+      await navigator.serviceWorker.ready;
+    });
+    await waitForCache(page, await snapshotName(buildA));
+    await page.reload({ waitUntil: "load" });
+    await captureController(page);
+
+    // The server answers the page file with 503, so build B cannot install and
+    // build A keeps the page. The wait must report that state. A later snapshot
+    // check would report the wrong fault.
+    served = buildB;
+    failApp = true;
+    await page.evaluate(() => {
+      void navigator.serviceWorker.getRegistration().then((registration) => registration?.update());
+    });
+    await expect(waitForActivatedController(page)).rejects.toThrow("stayed in control");
+    failApp = false;
 
     await context.close();
   }, 120_000);
