@@ -3795,6 +3795,7 @@ class StopSignalHandlerTests(unittest.TestCase):
     def test_pending_stop_signal_ends_the_run_after_cleanup(
         self: StopSignalHandlerTests,
     ) -> None:
+        """The signal stays recorded, so a later one cannot replace it."""
         guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
         guard.latch()
         guard.handle(signal.SIGTERM, None)
@@ -3804,7 +3805,7 @@ class StopSignalHandlerTests(unittest.TestCase):
             guard.stop_if_pending()
 
         self.assertEqual(128 + signal.SIGTERM, raised.exception.code)
-        self.assertIsNone(guard.pending)
+        self.assertEqual(signal.SIGTERM, guard.pending)
 
     @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
     def test_a_later_latched_signal_keeps_the_first_exit_code(
@@ -3831,9 +3832,9 @@ class StopSignalHandlerTests(unittest.TestCase):
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
 # A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster on 55620 and the browser tests on 55624 to 55628 stay
-# free.
-STALL_LANE = range(55621, 55626)
+# so the database cluster on 55660 and the browser tests on 55661 to 55669 stay
+# free. The Python stage and the browser stage never run at the same time.
+STALL_LANE = range(55662, 55667)
 
 
 def stall_drop(*arguments: object) -> None:
@@ -4251,6 +4252,38 @@ class CleanupDeadlineTests(unittest.TestCase):
             f"the stop cut the drop short at {elapsed:.2f} s",
         )
 
+    def test_a_stop_before_the_wait_gets_the_budget_from_its_own_time(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """A stop recorded before the wait still counts from the signal.
+
+        The guard holds a signal that arrives during CREATE. The drop then
+        runs after that section, so the wait begins with the signal already
+        recorded. The budget starts at the signal. The wait keeps that start.
+        """
+        name = f"cmsc127_race_{uuid4().hex}"
+        guard = runner._StopGuard()  # pyright: ignore[reportPrivateUsage]
+        guard.protect(name, "postgresql://127.0.0.1/postgres")
+        guard.latch()
+        guard.handle(signal.SIGTERM, None)
+
+        with patch.object(runner, "_drop_database", side_effect=stall_drop):
+            returned, elapsed = run_with_watch(
+                lambda: guard.drop(
+                    name, cast(Any, Mock()), runner.NORMAL_DROP_SECONDS
+                ),
+                NORMAL_WATCH_SECONDS,
+            )
+
+        self.assertTrue(
+            returned, f"the stop was still blocked at {elapsed:.2f} s"
+        )
+        self.assertLess(
+            elapsed,
+            runner.CLEANUP_SECONDS + 1.0,
+            f"the stop waited {elapsed:.2f} s on a stalled drop",
+        )
+
     def test_the_self_test_cleanup_gives_up_at_its_budget(
         self: CleanupDeadlineTests,
     ) -> None:
@@ -4621,6 +4654,255 @@ class StoppedDropReportTests(unittest.TestCase):
             runner.CLEANUP_SECONDS + 1.5,
             f"the stop waited {waited:.2f} s on a stalled drop",
         )
+
+
+STOPPED_CREATE_DRIVER = '''\
+"""Run the runner, hold its CREATE, then hold its real DROP."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+TOKEN = sys.argv[3]
+SELF_TEST = sys.argv[4] == "self-test"
+sys.path.insert(0, str(HARNESS))
+
+import runner
+
+
+class _Token:
+    """Stand in for the UUID, so the parent knows the database name."""
+
+    hex = TOKEN
+
+
+class _SkipChild:
+    """Stand in for subprocess, so the self-test skips its child suite."""
+
+    CompletedProcess = subprocess.CompletedProcess
+
+    @staticmethod
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0] if args else [], 0)
+
+
+runner.uuid4 = _Token
+plain_execute = runner._execute
+
+
+def execute(cursor, statement, parameters=None):
+    if statement.startswith("CREATE DATABASE"):
+        # Hold the latched CREATE section open, so the parent can send its
+        # first signal while the guard holds it.
+        MARKER.write_text("create", encoding="utf-8")
+        plain_execute(cursor, "SELECT pg_sleep(1.5)")
+    if statement.startswith("DROP DATABASE"):
+        MARKER.write_text("ready", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while MARKER.read_text(encoding="utf-8") != "drop":
+            if time.monotonic() >= deadline:
+                raise SystemExit("the parent never released the drop")
+            time.sleep(0.01)
+    return plain_execute(cursor, statement, parameters)
+
+
+runner._execute = execute
+if SELF_TEST:
+    runner.subprocess = _SkipChild
+    raise SystemExit(runner._self_test())
+raise SystemExit(runner.main(sys.argv[5:]))
+'''
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class StoppedCreateReportTests(unittest.TestCase):
+    """A stop during CREATE keeps its code, its time, and its report."""
+
+    def exists(self: StoppedCreateReportTests, url: str, name: str) -> bool:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+                return cursor.fetchone() is not None
+
+    def drop(self: StoppedCreateReportTests, url: str, name: str) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                        psycopg_sql.Identifier(name)
+                    )
+                )
+
+    def stop_during_create(
+        self: StoppedCreateReportTests, self_test: bool, second: str | None
+    ) -> tuple[int, str, float, bool]:
+        """Hold CREATE, send SIGTERM, hold the DROP, then report.
+
+        Return the exit code, the output, the seconds from the first signal to
+        the exit, and whether the database was still present at that moment.
+        """
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        application = f"c127_t20fo_create_{token[:8]}"
+        base = url + ("&" if "?" in url else "?") + "application_name=" + application
+        output = ""
+        returncode = -1
+        waited = 0.0
+        present = False
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "starter"
+            runner_dir = Path(directory) / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            driver = Path(directory) / "driver.py"
+            driver.write_text(STOPPED_CREATE_DRIVER, encoding="utf-8")
+            marker = Path(directory) / "marker.txt"
+            environment = dict(os.environ, CMSC127_DATABASE_URL=base)
+            arguments = (
+                ["self-test"]
+                if self_test
+                else ["run", "1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists() and marker.read_text(encoding="utf-8") == "create":
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(
+                    marker.exists() and marker.read_text(encoding="utf-8") == "create",
+                    "the runner did not reach its latched CREATE",
+                )
+                signal_at = time.monotonic()
+                process.send_signal(signal.SIGTERM)
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists() and marker.read_text(encoding="utf-8") == "ready":
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(
+                    marker.exists() and marker.read_text(encoding="utf-8") == "ready",
+                    "the runner did not reach its real DROP",
+                )
+                with psycopg.connect(url) as blocker:
+                    with blocker.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT oid FROM pg_database WHERE datname = %s FOR UPDATE",
+                            (name,),
+                        )
+                    marker.write_text("drop", encoding="utf-8")
+                    with psycopg.connect(url, autocommit=True) as watcher:
+                        deadline = time.monotonic() + 5
+                        row: tuple[object, ...] | None = None
+                        while time.monotonic() < deadline:
+                            row = watcher.execute(
+                                "SELECT wait_event_type FROM pg_stat_activity "
+                                "WHERE application_name = %s AND query LIKE %s",
+                                (application, "DROP DATABASE%"),
+                            ).fetchone()
+                            if row and row[0] == "Lock":
+                                break
+                            time.sleep(0.02)
+                        self.assertTrue(
+                            row and row[0] == "Lock",
+                            f"the DROP never blocked on the lock: {row}",
+                        )
+                    if second is not None:
+                        time.sleep(0.3)
+                        process.send_signal(getattr(signal, second))
+                    returncode = process.wait(timeout=60)
+                    waited = time.monotonic() - signal_at
+                    present = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+        return returncode, output, waited, present
+
+    def assert_stop_keeps_its_budget(
+        self: StoppedCreateReportTests,
+        returncode: int,
+        output: str,
+        waited: float,
+        present: bool,
+    ) -> None:
+        """The first signal sets the exit code and starts the stop budget."""
+        self.assertEqual(128 + signal.SIGTERM, returncode, output)
+        self.assertTrue(present, "the lock was not held while the runner waited")
+        self.assertIn("Cleanup failed.", output)
+        self.assertIn("cmsc127_race_", output)
+        self.assertIn("is still present", output)
+        self.assertGreaterEqual(
+            waited,
+            runner.CLEANUP_SECONDS - 0.5,
+            f"the stop cut the drop short at {waited:.2f} s",
+        )
+        self.assertLess(
+            waited,
+            runner.CLEANUP_SECONDS + 1.5,
+            f"the stop waited {waited:.2f} s on a stalled drop",
+        )
+
+    def test_a_stop_during_create_keeps_the_cleanup_budget(
+        self: StoppedCreateReportTests,
+    ) -> None:
+        """A signal held during CREATE must not hand the drop the normal wait."""
+        self.assert_stop_keeps_its_budget(*self.stop_during_create(False, None))
+
+    def test_a_stop_during_create_keeps_the_first_code(
+        self: StoppedCreateReportTests,
+    ) -> None:
+        """A second signal during the drop must not replace the first code."""
+        self.assert_stop_keeps_its_budget(*self.stop_during_create(False, "SIGHUP"))
+
+    def test_the_self_test_keeps_the_cleanup_budget_after_a_stop_in_create(
+        self: StoppedCreateReportTests,
+    ) -> None:
+        """The self-test shares the guard, so it shares the stop budget."""
+        self.assert_stop_keeps_its_budget(*self.stop_during_create(True, None))
+
+    def test_the_self_test_keeps_the_first_code_after_a_stop_in_create(
+        self: StoppedCreateReportTests,
+    ) -> None:
+        """The self-test keeps the first signal through its own cleanup."""
+        self.assert_stop_keeps_its_budget(*self.stop_during_create(True, "SIGHUP"))
 
 
 CONSOLE_DRIVER = '''\
