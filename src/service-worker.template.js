@@ -201,12 +201,25 @@ async function holdsManifest(cache) {
   }
 }
 
-// Read a snapshot without creating it. Opening a missing cache would plant an
-// empty one, which a later failed install would then keep.
-async function existingSnapshot(buildId) {
-  const name = snapshotCacheName(buildId);
+// Open a snapshot only when it exists. An open of a missing cache plants an
+// empty one, which a later cleanup keeps. The caller holds the lock of the
+// snapshot, so no delete can remove the cache between the check and the open.
+async function openSnapshot(name) {
   if (!(await caches.has(name))) return null;
   return caches.open(name);
+}
+
+// Open a snapshot only when it exists, under the lock of the snapshot. A
+// cleanup in another worker deletes under the same lock, so the check and the
+// open never meet a delete. A busy lock means an install or a delete owns the
+// snapshot, so this read skips it.
+async function existingSnapshot(buildId) {
+  const name = snapshotCacheName(buildId);
+  let cache = null;
+  await holdSnapshotIfFree(name, async () => {
+    cache = await openSnapshot(name);
+  });
+  return cache;
 }
 
 // Read one file from one snapshot without opening the cache. Opening a missing
@@ -243,11 +256,14 @@ async function forgetBuild(clientId) {
   try {
     for (const name of await caches.keys()) {
       if (buildOf(name) === null) continue;
-      // A cleanup can remove the snapshot after the list. A write needs a
-      // handle, so check the name again before the open plants a cache.
-      if (!(await caches.has(name))) continue;
-      const cache = await caches.open(name);
-      await cache.delete(requestFor(clientKey(clientId)));
+      // A cleanup can remove the snapshot after the list. The check and the
+      // open run under the lock of the snapshot, so the open never plants a
+      // cache that the cleanup then keeps. A busy lock leaves the record to
+      // age out at the next pass.
+      await holdSnapshotIfFree(name, async () => {
+        const cache = await openSnapshot(name);
+        await cache?.delete(requestFor(clientKey(clientId)));
+      });
     }
   } catch {
     // A cache delete can fail. The record then ages out at the next pass.
@@ -301,6 +317,10 @@ async function adoptClients() {
 // scan is not in the list, so the cleanup never meets it. The delete then runs
 // under the lock of the snapshot, which keeps it apart from an install that
 // fills the same cache.
+//
+// The open of each snapshot also runs under its lock. A cleanup in another
+// worker deletes under the same lock, so this open never plants a cache that
+// the other cleanup then keeps.
 async function deleteUnusedSnapshots() {
   const current = snapshotCacheName();
   const unused = [];
@@ -309,7 +329,13 @@ async function deleteUnusedSnapshots() {
     const now = Date.now();
     for (const name of await caches.keys()) {
       if (buildOf(name) === null) continue;
-      const cache = await caches.open(name);
+      // A busy lock means an install or a delete owns the snapshot, so this
+      // pass leaves it alone.
+      let cache = null;
+      const opened = await holdSnapshotIfFree(name, async () => {
+        cache = await openSnapshot(name);
+      });
+      if (!opened || cache === null) continue;
       if (name === current) {
         // The current snapshot answers files. Its records still age out.
         await pruneClientRecords(cache, live, now);
@@ -342,7 +368,7 @@ async function snapshotIsUnused(cache, live, now) {
 async function deleteSnapshot(name) {
   await holdSnapshotIfFree(name, async () => {
     try {
-      const cache = await existingSnapshot(buildOf(name));
+      const cache = await openSnapshot(name);
       if (cache === null) return;
       if (!(await snapshotIsUnused(cache, await liveClientIds(), Date.now()))) return;
       await caches.delete(name);
