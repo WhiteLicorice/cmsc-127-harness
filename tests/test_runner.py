@@ -3831,9 +3831,9 @@ class StopSignalHandlerTests(unittest.TestCase):
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
 # A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster on 55610 and the browser tests on 55616 to 55619 stay
+# so the database cluster on 55620 and the browser tests on 55624 to 55628 stay
 # free.
-STALL_LANE = range(55611, 55616)
+STALL_LANE = range(55621, 55626)
 
 
 def stall_drop(*arguments: object) -> None:
@@ -4099,6 +4099,40 @@ class CleanupDeadlineTests(unittest.TestCase):
 
         self.assertEqual(
             "-c default_transaction_read_only=off "
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            conninfo_to_dict(built)["options"],
+        )
+
+    def test_an_empty_url_option_wins_over_the_environment(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """An empty option list is a value, so PGOPTIONS does not apply.
+
+        libpq uses PGOPTIONS only when the connection string leaves options
+        unset. An explicit empty value is set, so the cleanup connection must
+        keep it and add only its own limits.
+        """
+        url = "postgresql://postgres:password@127.0.0.1:55460/postgres?options="
+        with patch.dict(
+            os.environ, {"PGOPTIONS": "-c default_transaction_read_only=on"}
+        ):
+            built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(
+            "-c statement_timeout=2000 -c lock_timeout=2000",
+            conninfo_to_dict(built)["options"],
+        )
+
+    def test_an_empty_url_option_without_the_environment_gets_only_the_limits(
+        self: CleanupDeadlineTests,
+    ) -> None:
+        """The empty value must not leave a stray space before the limits."""
+        url = "postgresql://postgres:password@127.0.0.1:55460/postgres?options="
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PGOPTIONS", None)
+            built = runner._cleanup_conninfo(url)  # pyright: ignore[reportPrivateUsage]
+
+        self.assertEqual(
             "-c statement_timeout=2000 -c lock_timeout=2000",
             conninfo_to_dict(built)["options"],
         )
@@ -4424,6 +4458,169 @@ class NormalDropCompletionTests(unittest.TestCase):
         self.assertTrue(present, "the lock was not held while the runner waited")
         self.assertEqual(1, returncode, failure)
         self.assertIn("Cleanup failed.", failure)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class StoppedDropReportTests(unittest.TestCase):
+    """A stop during the normal drop wait names the database and keeps its budget."""
+
+    def exists(self: StoppedDropReportTests, url: str, name: str) -> bool:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+                return cursor.fetchone() is not None
+
+    def drop(self: StoppedDropReportTests, url: str, name: str) -> None:
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                        psycopg_sql.Identifier(name)
+                    )
+                )
+
+    def stop_during_lock(
+        self: StoppedDropReportTests, budget: str, delay: float
+    ) -> tuple[int, str, float, bool]:
+        """Hold the real DROP, send SIGTERM after the delay, and report.
+
+        Return the exit code, the output, the seconds from the signal to the
+        exit, and whether the database was still present at that moment.
+        """
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        application = f"c127_t20fl_stop_{token[:8]}"
+        base = url + ("&" if "?" in url else "?") + "application_name=" + application
+        output = ""
+        returncode = -1
+        waited = 0.0
+        present = False
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "starter"
+            runner_dir = Path(directory) / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
+            )
+            driver = Path(directory) / "driver.py"
+            driver.write_text(NORMAL_DROP_DRIVER, encoding="utf-8")
+            marker = Path(directory) / "marker.txt"
+            environment = dict(os.environ, CMSC127_DATABASE_URL=base)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    token,
+                    budget,
+                    "1",
+                    "--root",
+                    str(root),
+                    "--runner-dir",
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists() and marker.read_text(encoding="utf-8") == "ready":
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(
+                    marker.exists() and marker.read_text(encoding="utf-8") == "ready",
+                    "the runner did not reach its real DROP",
+                )
+                with psycopg.connect(url) as blocker:
+                    with blocker.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT oid FROM pg_database WHERE datname = %s FOR UPDATE",
+                            (name,),
+                        )
+                    marker.write_text("drop", encoding="utf-8")
+                    # Wait for the real DROP to block, so the delay counts from
+                    # the moment the normal wait began.
+                    with psycopg.connect(url, autocommit=True) as watcher:
+                        deadline = time.monotonic() + 5
+                        row: tuple[object, ...] | None = None
+                        while time.monotonic() < deadline:
+                            row = watcher.execute(
+                                "SELECT wait_event_type FROM pg_stat_activity "
+                                "WHERE application_name = %s AND query LIKE %s",
+                                (application, "DROP DATABASE%"),
+                            ).fetchone()
+                            if row and row[0] == "Lock":
+                                break
+                            time.sleep(0.02)
+                        self.assertTrue(
+                            row and row[0] == "Lock",
+                            f"the DROP never blocked on the lock: {row}",
+                        )
+                    time.sleep(delay)
+                    signal_at = time.monotonic()
+                    process.send_signal(signal.SIGTERM)
+                    returncode = process.wait(timeout=60)
+                    waited = time.monotonic() - signal_at
+                    present = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+        return returncode, output, waited, present
+
+    def test_a_stop_during_the_normal_wait_names_the_database(
+        self: StoppedDropReportTests,
+    ) -> None:
+        """The run must say which database it left behind before it exits."""
+        returncode, output, _, present = self.stop_during_lock("", 0.5)
+
+        self.assertEqual(128 + signal.SIGTERM, returncode, output)
+        self.assertTrue(present, "the lock was not held while the runner waited")
+        self.assertIn("Cleanup failed.", output)
+        self.assertIn("cmsc127_race_", output)
+        self.assertIn("is still present", output)
+
+    def test_a_stop_during_the_normal_wait_keeps_the_cleanup_budget(
+        self: StoppedDropReportTests,
+    ) -> None:
+        """The normal deadline must not cut the stop budget short.
+
+        The normal wait is two seconds and the stop arrives one second in, so
+        the normal deadline would end the drop one second after the signal.
+        The stop gets its own three seconds from the moment it arrives.
+        """
+        returncode, output, waited, present = self.stop_during_lock("2.0", 1.0)
+
+        self.assertEqual(128 + signal.SIGTERM, returncode, output)
+        self.assertTrue(present, "the lock was not held while the runner waited")
+        self.assertGreaterEqual(
+            waited,
+            runner.CLEANUP_SECONDS - 0.5,
+            f"the stop cut the drop short at {waited:.2f} s",
+        )
+        self.assertLess(
+            waited,
+            runner.CLEANUP_SECONDS + 1.5,
+            f"the stop waited {waited:.2f} s on a stalled drop",
+        )
 
 
 CONSOLE_DRIVER = '''\

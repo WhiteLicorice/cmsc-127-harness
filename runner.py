@@ -1493,38 +1493,39 @@ def _cleanup_conninfo(url: str) -> str:
 
     libpq reads PGOPTIONS only when the connection string leaves options
     unset, so the run's own connection can take its options from there. Keep
-    that setting too, in the same order of precedence.
+    that setting too, in the same order of precedence. An empty value in the
+    URL is still a value, so it wins over the environment.
     """
     settings = conninfo_to_dict(url)
     settings["connect_timeout"] = str(CLEANUP_CONNECT_TIMEOUT)
-    supplied = str(
-        settings.get("options") or os.environ.get("PGOPTIONS") or ""
-    ).strip()
+    if "options" in settings:
+        supplied = str(settings["options"]).strip()
+    else:
+        supplied = str(os.environ.get("PGOPTIONS") or "").strip()
     settings["options"] = f"{supplied} {CLEANUP_OPTIONS}" if supplied else CLEANUP_OPTIONS
     return make_conninfo("", **settings)
 
 
 def _run_in_budget(
     action: Callable[[], None],
-    seconds: float,
+    deadline: Callable[[float], float],
     subject: str,
-    stop: Callable[[], bool] | None = None,
 ) -> bool:
-    """Run one cleanup action and stop waiting when the budget ends.
+    """Run one cleanup action and stop waiting when the deadline ends.
 
-    Return True when the action finished. Return False when the budget ended
+    Return True when the action finished. Return False when the deadline ended
     first. A failure from the action reaches the caller as it did before. When
-    the budget ends first, the worker thread stays behind and the process ends
-    without it, so a stalled server cannot hold the process open.
+    the deadline ends first, the worker thread stays behind and the process
+    ends without it, so a stalled server cannot hold the process open.
 
     A worker thread can fail to start while the interpreter shuts down. The
-    action would then run on this thread, where no budget can stop a server
+    action would then run on this thread, where no deadline can stop a server
     that answers and then stalls a statement. Skip the action and name what it
     did not drop, so the caller always returns inside its budget.
 
-    The stop callback ends the wait when it returns True. The caller decides
-    how long a stop may wait, so a stop signal never holds the process open
-    for the whole budget.
+    The deadline call takes the moment the wait began and returns the moment
+    it must end. The caller decides how long a stop may wait, so a stop signal
+    never holds the process open for the whole budget.
     """
     finished = threading.Event()
     failure: list[BaseException] = []
@@ -1550,15 +1551,13 @@ def _run_in_budget(
         except (OSError, ValueError):
             pass
         return False
-    deadline = time.monotonic() + seconds
+    started = time.monotonic()
     while True:
-        remaining = deadline - time.monotonic()
+        remaining = deadline(started) - time.monotonic()
         if remaining <= 0:
             return False
         if finished.wait(min(CLEANUP_POLL_SECONDS, remaining)):
             break
-        if stop is not None and stop():
-            return False
     if failure:
         raise failure[0]
     return True
@@ -1619,6 +1618,7 @@ class _StopGuard:
     def __init__(self) -> None:
         self.previous: dict[int, Any] = {}
         self.pending: int | None = None
+        self.stopped_at: float | None = None
         self.latched = False
         self.console_url: str | None = None
         self.console_name: str | None = None
@@ -1628,9 +1628,12 @@ class _StopGuard:
     def handle(self, signum: int, frame: object) -> None:
         # Record the first signal before the raise. A later signal that arrives
         # during cleanup then cannot replace its exit code, so the run names the
-        # signal that stopped it.
+        # signal that stopped it. The time of that first signal also starts the
+        # stop budget, so a stop that arrives late in a normal wait still gets
+        # its own budget instead of what is left of the normal one.
         if self.pending is None:
             self.pending = signum
+            self.stopped_at = time.monotonic()
         if self.latched:
             return
         # Hold the next signal, so a second one during cleanup cannot cut the
@@ -1663,31 +1666,38 @@ class _StopGuard:
         A normal end passes a longer budget, because the run must not report
         success while its database is still there. A stop path keeps the
         cleanup budget. A stop signal that arrives during the wait gets that
-        same budget from the moment it arrives. The drop still gets its
-        chance, and the stop waits no longer than a stop path does. A drop
-        that did not finish keeps the name, so a later console close still
-        tries once more. The worker owns the connection until its call
-        returns.
+        same budget from the moment the handler recorded it, so the normal
+        deadline cannot cut the stop short. The drop still gets its chance,
+        and the stop waits no longer than a stop path does. A drop that did
+        not finish keeps the name, so a later console close still tries once
+        more. The worker owns the connection until its call returns.
         """
         seen = self.pending
-        stop_started: float | None = None
+        noticed: float | None = None
 
-        def stop() -> bool:
-            """End the wait once a new stop has had the cleanup budget."""
-            nonlocal stop_started
-            if self.pending is None or self.pending == seen:
-                return False
-            if stop_started is None:
-                stop_started = time.monotonic()
-            return time.monotonic() - stop_started >= CLEANUP_SECONDS
+        def deadline(started: float) -> float:
+            """The moment this wait must end.
+
+            A stop that arrives during the wait gets the cleanup budget from
+            the moment the handler recorded it. A stop that the handler did
+            not record, such as one a test sets, gets the budget from the
+            moment the wait sees it.
+            """
+            nonlocal noticed
+            if self.pending is not None and self.pending != seen:
+                if self.stopped_at is not None:
+                    return self.stopped_at + CLEANUP_SECONDS
+                if noticed is None:
+                    noticed = time.monotonic()
+                return noticed + CLEANUP_SECONDS
+            return started + seconds
 
         finished = False
         try:
             finished = _run_in_budget(
                 lambda: _drop_database(name, admin),
-                seconds,
+                deadline,
                 name,
-                stop,
             )
         finally:
             if finished:
@@ -1717,7 +1727,9 @@ class _StopGuard:
             return 0
         try:
             _run_in_budget(
-                lambda: self._drop_console_database(name), CLEANUP_SECONDS, name
+                lambda: self._drop_console_database(name),
+                lambda started: started + CLEANUP_SECONDS,
+                name,
             )
         except BaseException:
             # A callback that lets an exception escape can leave the process in
@@ -1852,13 +1864,17 @@ def _cleanup_seconds(guard: _StopGuard) -> float:
 
 
 def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bool:
-    """Drop the scratch database on the way out. Report a normal failure.
+    """Drop the scratch database on the way out. Report a failed drop.
 
     A stop signal that arrived during the run ends it with its own code after
     the cleanup. The drop keeps the short budget on that path, because the
     process must return inside the Windows window. A normal end waits for a
-    confirmed drop. When that drop fails, this returns False and the caller
-    reports the failure and ends with an error.
+    confirmed drop.
+
+    A failed drop is reported here, before the held signal replays. The signal
+    ends the process, so a caller that reported the failure afterwards would
+    never run, and the run would leave a database behind without naming it.
+    The return value still tells the caller to end with an error.
     """
     dropped = True
     try:
@@ -1874,6 +1890,8 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
         dropped = False
     finally:
         guard.restore()
+    if not dropped and name:
+        _report_cleanup_failure(name)
     # A held signal raises here, so its exit code stands and this result is
     # never used on that path.
     guard.stop_if_pending()
@@ -4133,7 +4151,6 @@ def _self_test() -> int:
         code = 1
     finally:
         if not _finish_run(guard, name, admin):
-            _report_cleanup_failure(name)
             code = 1
     return code
 
@@ -4313,7 +4330,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         if not _finish_run(guard, database_name, admin):
-            _report_cleanup_failure(database_name)
             cleanup_failed = True
     if cleanup_failed:
         return 1
