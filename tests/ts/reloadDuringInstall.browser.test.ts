@@ -94,11 +94,31 @@ let holdApp = false;
 // The server answers the page file with 503, so build B cannot install. The
 // page then stays on build A, which is the case the failed-install test states.
 let failApp = false;
+// The number of page-file downloads the fixture refused. The failed-install
+// test waits for the first one, so a run that never reached build B's download
+// cannot pass for a failed install.
+let refused = 0;
+const refusedWaiters: (() => void)[] = [];
 let releaseApp: () => void = () => undefined;
 let announceHeld: () => void = () => undefined;
 const held = new Promise<void>((resolve) => {
   announceHeld = resolve;
 });
+
+// Wait for the fixture to refuse one page-file download. A run that serves
+// build A in place of build B never refuses one, so this wait reports it.
+async function waitForRefusal(seconds: number): Promise<void> {
+  if (refused > 0) return;
+  await Promise.race([
+    new Promise<void>((resolve) => refusedWaiters.push(resolve)),
+    new Promise<void>((_, reject) => {
+      setTimeout(
+        () => reject(new Error("The fixture never refused build B's download.")),
+        seconds * 1000,
+      );
+    }),
+  ]);
+}
 
 function serveFile(response: import("node:http").ServerResponse, body: Buffer, type: string): void {
   response.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" });
@@ -112,6 +132,8 @@ async function handle(
   const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
   const relative = pathname === "/" ? "index.html" : pathname.slice(1);
   if (failApp && relative === "app.js") {
+    refused += 1;
+    for (const wake of refusedWaiters.splice(0)) wake();
     response.writeHead(503);
     response.end();
     return;
@@ -177,6 +199,31 @@ type ControllerState = {
 async function captureController(page: Page): Promise<void> {
   await page.evaluate(() => {
     Object.assign(window, { harnessControllerA: navigator.serviceWorker.controller });
+  });
+}
+
+// Start the update and wait for build B's worker to become redundant. A
+// refused page-file download fails the install. The browser then retires the
+// worker. The loop runs inside the page, so it sees every state.
+async function updateUntilRedundant(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (registration === null) return "no registration";
+    const updating = registration.update();
+    const deadline = Date.now() + 20_000;
+    let worker: ServiceWorker | null = null;
+    while (worker === null && Date.now() < deadline) {
+      worker = registration.installing;
+      if (worker === null) await new Promise((ready) => setTimeout(ready, 10));
+    }
+    if (worker === null) return "no installing worker";
+    const states: string[] = [];
+    while (worker.state !== "redundant" && Date.now() < deadline) {
+      states.push(worker.state);
+      await new Promise((ready) => setTimeout(ready, 10));
+    }
+    await updating.catch(() => undefined);
+    return worker.state === "redundant" ? "redundant" : `states ${states.join(",")}`;
   });
 }
 
@@ -291,6 +338,7 @@ describe("a reload while a new build downloads", () => {
     const page = await context.newPage();
     served = buildA;
     failApp = false;
+    refused = 0;
     await page.goto(`${origin}/`, { waitUntil: "load" });
     await page.evaluate(async () => {
       await navigator.serviceWorker.register("service-worker.js", { scope: "./" });
@@ -300,16 +348,30 @@ describe("a reload while a new build downloads", () => {
     await page.reload({ waitUntil: "load" });
     await captureController(page);
 
-    // The server answers the page file with 503, so build B cannot install and
-    // build A keeps the page. The wait must report that state. A later snapshot
-    // check would report the wrong fault.
+    // Build A controls the page before the update. The case states that A
+    // keeps the page, so the test must first see A in control.
+    expect(await page.evaluate(() => document.body.dataset["build"])).toBe("a");
+    expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+
+    // The server answers the page file with 503, so build B cannot install.
+    // The test waits for the refusal and for build B's worker to become
+    // redundant, so a run that never reached build B's download cannot pass.
     served = buildB;
     failApp = true;
-    await page.evaluate(() => {
-      void navigator.serviceWorker.getRegistration().then((registration) => registration?.update());
-    });
+    expect(await updateUntilRedundant(page)).toBe("redundant");
+    await waitForRefusal(20);
+    expect(refused).toBeGreaterThan(0);
+
+    // The wait must report that A stayed in control. A later snapshot check
+    // would report the wrong fault. The fixture keeps refusing the page file,
+    // so a retry cannot install build B and pass for the failed install.
     await expect(waitForActivatedController(page)).rejects.toThrow("stayed in control");
     failApp = false;
+
+    // Build A still controls the page. Its snapshot is still there.
+    expect(await page.evaluate(() => document.body.dataset["build"])).toBe("a");
+    expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+    expect(await caches(page)).toContain(await snapshotName(buildA));
 
     await context.close();
   }, 120_000);
