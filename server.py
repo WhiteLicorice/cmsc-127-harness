@@ -28,6 +28,8 @@ POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
 API_VERSION = 1
 ALLOWED_ORIGIN = "https://whitelicorice.github.io"
+# The port the launcher tries when CMSC127_PORT is unset.
+DEFAULT_PORT = 55440
 _NO_SCHEMA_MESSAGE = (
     "No schema is visible to this role. Check that CMSC127_DATABASE_URL names "
     "the right database and role."
@@ -772,14 +774,26 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _preferred_port() -> int:
+    """The port to try first.
+
+    CMSC127_PORT sets an explicit port, so a gate that runs beside another gate
+    can reserve its own. Any port from 1 to 65535 is accepted. A value outside
+    that range, or no value at all, gives the default. A port that is busy
+    still falls back to one the operating system selects.
+    """
+    try:
+        preferred = int(os.environ.get("CMSC127_PORT", str(DEFAULT_PORT)))
+    except ValueError:
+        return DEFAULT_PORT
+    if 1 <= preferred <= 65535:
+        return preferred
+    return DEFAULT_PORT
+
+
 def main() -> int:
     arguments = _arguments()
-    try:
-        preferred = int(os.environ.get("CMSC127_PORT", "55440"))
-    except ValueError:
-        preferred = 55440
-    if preferred < 55440 or preferred > 55449 or preferred == 55445:
-        preferred = 55440
+    preferred = _preferred_port()
 
     asset_root = Path(__file__).resolve().parent
     project_root = Path.cwd().resolve()

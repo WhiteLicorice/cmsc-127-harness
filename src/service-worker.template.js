@@ -17,6 +17,11 @@ const MANIFEST_PATH = "offline-manifest.json";
 const PAGE_PATH = "index.html";
 const SCHEMA_VERSION = 1;
 const NAVIGATION_TIMEOUT = 3000;
+// Activation records the build of each open document. A lock that another
+// worker holds would otherwise hold activation open. The browser would then
+// keep the replaced worker in place. The adoption wait is bounded by this
+// limit.
+const ADOPTION_TIMEOUT = 3000;
 // A navigation writes its record before the browser lists the new document.
 // Until that document appears in the client list, the record holds its snapshot
 // for this long. The grace also covers a replaced document that has not closed.
@@ -246,17 +251,24 @@ function clientIdOf(url) {
 // waits for the lock because a document without a record reads the next
 // snapshot after a takeover. The wait is short. No step that holds the lock
 // waits for this one.
+//
+// The answer is true when the document has its record, or needs none. It is
+// false when a snapshot exists and the record did not land. The caller chooses
+// what a missing record means for the page it is about to serve.
 async function rememberBuild(clientId, buildId) {
-  if (!clientId) return;
+  if (!clientId) return true;
   const name = snapshotCacheName(buildId);
   try {
-    await holdSnapshot(name, async () => {
+    return await holdSnapshot(name, async () => {
       const cache = await openSnapshot(name);
-      if (cache === null) return;
+      // No snapshot means no record to keep and no files to protect.
+      if (cache === null) return true;
       await cache.put(requestFor(clientKey(clientId)), new Response(`${buildId} ${Date.now()}`));
+      return true;
     });
   } catch {
     // The active snapshot still answers when the record is missing.
+    return false;
   }
 }
 
@@ -301,6 +313,12 @@ async function liveClientIds() {
 // that claims that page is the build that installed just after the load, so it
 // records its own build. A page with a record keeps it, and a takeover leaves
 // the older page on its older build.
+//
+// The wait for each record is bounded by ADOPTION_TIMEOUT. A lock that another
+// worker holds past that limit ends the adoption, so activation still finishes
+// and the browser still swaps the worker. A document that keeps no record reads
+// the active snapshot for its files, which is the build this worker just
+// installed.
 async function adoptClients() {
   let clients;
   try {
@@ -308,11 +326,22 @@ async function adoptClients() {
   } catch {
     return;
   }
-  for (const client of clients) {
-    if (!client.id) continue;
-    if (await buildFor(client.id) === null) {
-      await rememberBuild(client.id, OFFLINE_BUILD_ID);
+  let timer = 0;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(resolve, ADOPTION_TIMEOUT);
+  });
+  try {
+    for (const client of clients) {
+      if (!client.id) continue;
+      if (await buildFor(client.id) !== null) continue;
+      const adopted = await Promise.race([
+        rememberBuild(client.id, OFFLINE_BUILD_ID),
+        deadline.then(() => false),
+      ]);
+      if (!adopted) return;
     }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -479,6 +508,15 @@ async function pageForActiveBuild(response) {
 // The worker never aborts the navigation fetch. An abort fails the navigation
 // before the cached page can answer. The deadline races the body read instead,
 // and the network fetch runs on unseen.
+//
+// The record write waits for the lock of the active snapshot, so the same
+// deadline bounds that wait. A lock that another worker holds past the deadline
+// would otherwise stall the navigation. The browser would show nothing until
+// the lock came free. A record that does not land in time leaves the document
+// without a build. A later takeover would then answer its files from another
+// snapshot. The navigation answers with a bounded retry response in that case,
+// because the saved page and its files would no longer come from the same
+// build.
 async function handleNavigation(event) {
   const { request } = event;
   const documentId = event.resultingClientId || event.clientId;
@@ -494,7 +532,14 @@ async function handleNavigation(event) {
   // Record the build before the fetch. A takeover can then find the record
   // while the navigation is still in flight. The previous document in this tab
   // is replaced, so its record goes now.
-  await rememberBuild(documentId, OFFLINE_BUILD_ID);
+  const recorded = await Promise.race([
+    rememberBuild(documentId, OFFLINE_BUILD_ID),
+    deadline.then(() => false),
+  ]);
+  if (!recorded) {
+    clearTimeout(timer);
+    return offlineResponse(503, "The page is not ready. Reload in a moment.");
+  }
   if (event.clientId && event.clientId !== documentId) {
     await forgetBuild(event.clientId);
     event.waitUntil(deleteUnusedSnapshots());

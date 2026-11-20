@@ -1868,26 +1868,33 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     ends the process, so a caller that reported the failure afterwards would
     never run, and the run would leave a database behind without naming it.
     The return value still tells the caller to end with an error.
+
+    The handlers stay latched through the failure report and the replay, and
+    they come off while the stack unwinds. A second signal in that interval
+    then cannot reach its default action, which would end the process before
+    the report gives the database identifier and would replace the first
+    signal's code.
     """
     dropped = True
     try:
-        guard.latch()
-        if admin is not None and name:
-            dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
-    except (OSError, psycopg.Error) as error:
-        # A server that refuses the drop, such as one that denies the
-        # permission, reaches here. Report it in one line rather than let a
-        # traceback replace the run's result.
-        detail = str(error).strip().rstrip(".!?")
-        print(f"Cleanup failed. {detail}.")
-        dropped = False
+        try:
+            guard.latch()
+            if admin is not None and name:
+                dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
+        except (OSError, psycopg.Error) as error:
+            # A server that refuses the drop, such as one that denies the
+            # permission, reaches here. Report it in one line rather than let a
+            # traceback replace the run's result.
+            detail = str(error).strip().rstrip(".!?")
+            print(f"Cleanup failed. {detail}.")
+            dropped = False
+        if not dropped and name:
+            _report_cleanup_failure(name)
+        # A held signal raises here, so its exit code stands and this result is
+        # never used on that path.
+        guard.stop_if_pending()
     finally:
         guard.restore()
-    if not dropped and name:
-        _report_cleanup_failure(name)
-    # A held signal raises here, so its exit code stands and this result is
-    # never used on that path.
-    guard.stop_if_pending()
     return dropped
 
 

@@ -102,6 +102,30 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
+def reserved_ports(count: int) -> list[int]:
+    """Loopback ports for a test that needs more than one server.
+
+    A gate that runs beside another gate reserves its own ports, so it sets
+    CMSC127_TEST_PORTS to a comma-separated list. Without that list the test
+    asks the operating system for free ports.
+    """
+    listed = os.environ.get("CMSC127_TEST_PORTS", "")
+    chosen = [int(entry) for entry in listed.split(",") if entry.strip().isdigit()]
+    if len(chosen) >= count:
+        return chosen[:count]
+    ports: list[int] = []
+    while len(ports) < count:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        finally:
+            probe.close()
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
 def wait_for_server_port(
     process: subprocess.Popen[str], timeout: float
 ) -> tuple[int | None, list[str], queue.Queue[str], threading.Thread]:
@@ -192,11 +216,12 @@ class HarnessPageTests(unittest.TestCase):
 
     def test_startup_uses_and_prints_a_free_port(self) -> None:
         self.load_server()
-        # Hold a free port from the range server.py accepts, so a busy 55440 on the runner
-        # can't break the test.
+        # Hold a port that this gate reserved, so a busy default port on the
+        # runner cannot break the test and the test stays inside the gate's
+        # own range.
         held_socket = socket.socket()
         held_port = 0
-        for candidate in (55440, 55441, 55442, 55443, 55444, 55446, 55447, 55448, 55449):
+        for candidate in reserved_ports(1):
             try:
                 held_socket.bind(("127.0.0.1", candidate))
             except OSError:
@@ -205,7 +230,7 @@ class HarnessPageTests(unittest.TestCase):
             break
         if held_port == 0:
             held_socket.close()
-            self.skipTest("Every port from 55440 to 55449 is busy.")
+            self.skipTest("The reserved port is busy.")
         held_socket.listen()
         environment = os.environ.copy()
         environment["CMSC127_PORT"] = str(held_port)
@@ -243,6 +268,101 @@ class HarnessPageTests(unittest.TestCase):
             self.assertNotEqual(held_port, selected_port)
             self.assertIn(f":{selected_port}/", output)
         self.assertIsNotNone(selected_port, output)
+
+    def test_main_keeps_an_explicit_port_outside_the_default_range(self) -> None:
+        """A gate that reserves a port gets that port."""
+        server_module = self.load_server()
+        server = Mock()
+        server.server_port = 55691
+        server.serve_forever.side_effect = KeyboardInterrupt
+        with (
+            patch.object(server_module, "create_server", return_value=server) as create_server,
+            patch.dict(os.environ, {"CMSC127_PORT": "55691"}),
+            patch.object(sys, "argv", ["server.py", "--no-browser"]),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            exit_code = server_module.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(55691, create_server.call_args.args[3])
+
+    def test_main_uses_the_default_port_when_none_is_given(self) -> None:
+        server_module = self.load_server()
+        server = Mock()
+        server.server_port = 55440
+        server.serve_forever.side_effect = KeyboardInterrupt
+        environment = os.environ.copy()
+        environment.pop("CMSC127_PORT", None)
+        with (
+            patch.object(server_module, "create_server", return_value=server) as create_server,
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(sys, "argv", ["server.py", "--no-browser"]),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            exit_code = server_module.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(55440, create_server.call_args.args[3])
+
+    def test_main_ignores_an_explicit_port_that_is_not_usable(self) -> None:
+        """A value outside the port range falls back to the default."""
+        server_module = self.load_server()
+        for requested in ("not-a-port", "0", "70000", "-1"):
+            server = Mock()
+            server.server_port = 55440
+            server.serve_forever.side_effect = KeyboardInterrupt
+            with (
+                patch.object(server_module, "create_server", return_value=server) as create_server,
+                patch.dict(os.environ, {"CMSC127_PORT": requested}),
+                patch.object(sys, "argv", ["server.py", "--no-browser"]),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = server_module.main()
+
+            self.assertEqual(0, exit_code, requested)
+            self.assertEqual(55440, create_server.call_args.args[3], requested)
+
+    def test_two_launchers_keep_two_explicit_ports(self) -> None:
+        """Two gates on one host each bind the port they reserved."""
+        self.load_server()
+        ports = reserved_ports(2)
+        processes: list[subprocess.Popen[str]] = []
+        outputs: list[str] = []
+        try:
+            for port in ports:
+                environment = os.environ.copy()
+                environment["CMSC127_PORT"] = str(port)
+                environment.pop("CMSC127_DATABASE_URL", None)
+                processes.append(
+                    subprocess.Popen(
+                        [sys.executable, str(REPOSITORY_ROOT / "server.py"), "--no-browser"],
+                        cwd=REPOSITORY_ROOT,
+                        env=environment,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                )
+            for process, port in zip(processes, ports):
+                selected, lines, output_queue, reader = wait_for_server_port(process, 10)
+                self.assertEqual(port, selected, "".join(lines))
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/", timeout=3
+                ) as response:
+                    self.assertEqual(200, response.status)
+                outputs.append(drain_server_output(lines, output_queue, reader))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+        for port, output in zip(ports, outputs):
+            self.assertIn(f"http://127.0.0.1:{port}/", output)
 
     def test_non_get_requests_are_rejected(self) -> None:
         self.load_server()
@@ -721,7 +841,7 @@ class HarnessPageTests(unittest.TestCase):
         database_url = DATABASE_URL
         environment = os.environ.copy()
         environment["CMSC127_DATABASE_URL"] = database_url
-        environment["CMSC127_PORT"] = "55442"
+        environment["CMSC127_PORT"] = str(reserved_ports(1)[0])
         environment["CMSC127_NO_BROWSER"] = "1"
         environment["PATH"] = os.pathsep.join(
             entry for entry in environment.get("PATH", "").split(os.pathsep) if "node" not in entry.lower()

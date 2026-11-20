@@ -48,7 +48,10 @@ const THEMES = [
   "solarized-light", "solarized-dark", "catppuccin-latte", "catppuccin-mocha",
   "tokyo-night", "gruvbox-light", "gruvbox-dark",
 ];
-const PORT = "55447";
+// A gate that runs beside another gate reserves its own port. CMSC127_PORT
+// sets that port. The value below is the one this script used before the port
+// became a choice.
+const PORT = process.env["CMSC127_PORT"] ?? "55447";
 const VIEWPORT = { width: 1440, height: 900 };
 const TABLE = "audit_student";
 const EMPTY_SCHEMA = "audit_empty";

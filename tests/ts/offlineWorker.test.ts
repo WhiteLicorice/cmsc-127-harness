@@ -1043,6 +1043,119 @@ describe("offline worker build record", () => {
   });
 });
 
+describe("offline worker lock deadline", () => {
+  // A lock that another worker holds must not hold a navigation or an
+  // activation open. Short contention still waits. The record keeps a document
+  // on one build. A lock that outlasts the deadline gets a bounded answer
+  // instead of a stalled page.
+
+  it("serves the saved page when the lock frees inside the deadline", async () => {
+    const build = "b".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const timers = new FakeTimers();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+      timers,
+    });
+    await worker.install();
+    const name = `cmsc127-harness-${build}`;
+    locks.hold(`${name}-lock`);
+
+    const navigation = worker.dispatchFetch(navigate(scope), { resultingClientId: "tab" });
+    await flush();
+    locks.release(`${name}-lock`);
+    const response = await navigation;
+
+    expect(await response?.text()).toBe(PAGE["index.html"]);
+    const cache = await caches.open(name);
+    const record = await cache.match(`${scope}__client__/tab`);
+    expect(record === undefined ? "no record" : await record.text()).toContain(build);
+  });
+
+  it("answers a bounded retry when the lock outlasts the deadline", async () => {
+    const build = "c".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const timers = new FakeTimers();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+      timers,
+    });
+    await worker.install();
+    const name = `cmsc127-harness-${build}`;
+    locks.hold(`${name}-lock`);
+
+    const navigation = worker.dispatchFetch(navigate(scope), { resultingClientId: "tab" });
+    await flush();
+    await timers.advance(3000);
+    const response = await navigation;
+
+    expect(response?.status).toBe(503);
+    expect(await response?.text()).toContain("Reload");
+    locks.release(`${name}-lock`);
+  });
+
+  it("adopts a document when the lock frees inside the adoption bound", async () => {
+    const build = "d".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const timers = new FakeTimers();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+      timers,
+      clientIds: ["tab"],
+    });
+    await worker.install();
+    const name = `cmsc127-harness-${build}`;
+    locks.hold(`${name}-lock`);
+
+    const activation = worker.activate();
+    await flush();
+    locks.release(`${name}-lock`);
+    await activation;
+
+    const cache = await caches.open(name);
+    const record = await cache.match(`${scope}__client__/tab`);
+    expect(record === undefined ? "no record" : await record.text()).toContain(build);
+  });
+
+  it("finishes activation when the lock outlasts the adoption bound", async () => {
+    const build = "e".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const timers = new FakeTimers();
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build).fetch as never,
+      caches,
+      locks,
+      timers,
+      clientIds: ["tab"],
+    });
+    await worker.install();
+    const name = `cmsc127-harness-${build}`;
+    locks.hold(`${name}-lock`);
+
+    const activation = worker.activate();
+    await flush();
+    await timers.advance(3000);
+    await activation;
+
+    expect(worker.claimed).toBe(1);
+    locks.release(`${name}-lock`);
+  });
+});
+
 describe("offline kill switch", () => {
   it("clears only harness caches and unregisters itself", async () => {
     const caches = new FakeCaches();
