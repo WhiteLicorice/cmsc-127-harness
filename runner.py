@@ -1874,6 +1874,12 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     then cannot reach its default action, which would end the process before
     the report gives the database identifier and would replace the first
     signal's code.
+
+    A signal that arrives after the last check and before the handlers change
+    is held and never replayed, so the run would report success and exit 0.
+    The guard therefore checks once more after the handlers come off. That
+    check runs only when the first one returned, so a held signal still
+    unwinds on its own path.
     """
     dropped = True
     try:
@@ -1895,6 +1901,11 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
         guard.stop_if_pending()
     finally:
         guard.restore()
+    # The guard holds a signal that arrives after the check above and before
+    # the handlers change. Nothing else looks for it. The run would then
+    # report success and exit 0. This check runs only when the first one
+    # returned.
+    guard.stop_if_pending()
     return dropped
 
 

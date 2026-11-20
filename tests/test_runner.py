@@ -3492,6 +3492,14 @@ import runner
 
 SENT = {"child-run": 0}
 REPORT_POINTS = ("report", "selftest-report")
+# The points that send the first stop signal at the boundary where the guard
+# puts the old handlers back. The last check for a held signal runs before
+# that boundary, so a signal that arrives here is the one that can be lost.
+RESTORE_POINTS = ("restore", "selftest-restore")
+# The points whose drop fails, so the run reports the database it could not
+# remove. The restore points join them when the test also wants that report.
+FAILED_DROP_POINTS = REPORT_POINTS + ("restore-fail", "selftest-restore-fail")
+RESTORE_FAIL_POINTS = ("restore-fail", "selftest-restore-fail")
 
 
 class _Token:
@@ -3514,6 +3522,7 @@ plain_execute = runner._execute
 plain_run_pair = runner._run_pair
 plain_drop_database = runner._drop_database
 plain_report_cleanup_failure = runner._report_cleanup_failure
+plain_restore = runner._StopGuard.restore
 
 
 def execute(cursor, statement, parameters=None):
@@ -3541,7 +3550,7 @@ def run_pair(*args, **kwargs):
 
 def drop_database(name, admin):
     """Fail the drop, so the run reports the database it could not remove."""
-    if POINT in REPORT_POINTS:
+    if POINT in FAILED_DROP_POINTS:
         note("drop failed")
         raise psycopg.OperationalError("the server refused the drop")
     return plain_drop_database(name, admin)
@@ -3555,10 +3564,24 @@ def report_cleanup_failure(name):
     return plain_report_cleanup_failure(name)
 
 
+def restore(guard):
+    """Send the first stop signal at the boundary where the handlers change.
+
+    The guard has already made its last check for a held signal when this
+    runs, so a signal here is held and never replayed unless the guard checks
+    once more after it puts the old handlers back.
+    """
+    if POINT in RESTORE_POINTS or POINT in RESTORE_FAIL_POINTS:
+        note("before restore")
+        stop()
+    return plain_restore(guard)
+
+
 runner._execute = execute
 runner._run_pair = run_pair
 runner._drop_database = drop_database
 runner._report_cleanup_failure = report_cleanup_failure
+runner._StopGuard.restore = restore
 
 
 class _SkipChild:
@@ -3617,8 +3640,13 @@ class StopSignalCleanupTests(unittest.TestCase):
         point: str,
         self_test: bool = False,
         signal_name: str = "SIGTERM",
+        failed_drop: bool = False,
     ) -> None:
-        """Run the runner, send a signal at one point, and check the drop."""
+        """Run the runner, send a signal at one point, and check the drop.
+
+        A failed drop leaves the database behind on purpose, so the run reports
+        the identifier it could not remove. The test then checks that report.
+        """
         url = os.environ["CMSC127_DATABASE_URL"]
         token = uuid4().hex
         name = f"cmsc127_race_{token}"
@@ -3689,7 +3717,11 @@ class StopSignalCleanupTests(unittest.TestCase):
                 self.drop(url, name)
 
         detail = f"{point} exited {returncode} notes {notes}\n{output}"
-        self.assertFalse(leftover, detail)
+        if failed_drop:
+            self.assertIn("drop failed", notes, detail)
+            self.assertIn(name, output, detail)
+        else:
+            self.assertFalse(leftover, detail)
         self.assertIn("handler default", notes, detail)
         if point == "run":
             self.assertEqual(128 + getattr(signal, signal_name), returncode, detail)
@@ -3731,6 +3763,35 @@ class StopSignalCleanupTests(unittest.TestCase):
         self: StopSignalCleanupTests,
     ) -> None:
         self.assert_stop_leaves_no_database("selftest-drop", self_test=True)
+
+    def test_sigterm_at_restore_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        """The first signal at the restore boundary still ends the run.
+
+        The guard makes its last check for a held signal before it puts the old
+        handlers back. A signal in that interval is held, so the guard must
+        check once more after the restore and replay it.
+        """
+        self.assert_stop_leaves_no_database("restore")
+
+    def test_self_test_sigterm_at_restore_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_stop_leaves_no_database("selftest-restore", self_test=True)
+
+    def test_sigterm_at_restore_after_a_failed_drop_names_the_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        """The report keeps the identifier. The held signal still replays."""
+        self.assert_stop_leaves_no_database("restore-fail", failed_drop=True)
+
+    def test_self_test_sigterm_at_restore_after_a_failed_drop_names_the_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_stop_leaves_no_database(
+            "selftest-restore-fail", self_test=True, failed_drop=True
+        )
 
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
@@ -3975,9 +4036,9 @@ class StopSignalHandlerTests(unittest.TestCase):
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
 # A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster on 55690 and the browser tests on 55691 to 55699 stay
+# so the database cluster on 55720 and the browser tests on 55721 to 55729 stay
 # free. The Python stage and the browser stage never run at the same time.
-STALL_LANE = range(55692, 55697)
+STALL_LANE = range(55721, 55727)
 
 
 def stall_drop(*arguments: object) -> None:
