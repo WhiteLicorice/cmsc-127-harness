@@ -1661,6 +1661,11 @@ class _StopGuard:
     The handler records the first signal in every phase and never overwrites
     it. The first stop a run receives sets the exit code, whenever it arrives,
     until the process ends.
+
+    A caller handler that raises during the restore does not change the exit.
+    The latched stop already sets the exit, so the caller sees that stop. With
+    no latched stop, the caller sees the first exception that a caller handler
+    raised. Every slot goes back either way.
     """
 
     def __init__(self) -> None:
@@ -1859,26 +1864,58 @@ class _StopGuard:
         stop that arrives inside that call then finds the entry already in
         place, so restore can put every handler back. The phase moves to body
         at the end, so a stop recorded here is replayed by the caller.
+
+        A Ctrl+C that arrives before this loop reaches SIGINT runs whatever
+        handler was in place. Python's default handler raises
+        KeyboardInterrupt. The guard records that as a SIGINT stop, so the run
+        takes the same cleanup path as any other stop. A caller's own handler
+        runs as the caller wrote it. The guard records no stop for its
+        exception.
         """
         if threading.current_thread() is not threading.main_thread():
             self.phase = "body"
             return
-        for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):
-            number = getattr(signal, name, None)
-            if number is None:
-                continue
-            try:
-                previous = signal.getsignal(number)
-            except (OSError, ValueError):
-                continue
-            self.previous[number] = previous
-            try:
-                signal.signal(number, self.handle)
-            except (OSError, ValueError):
-                self.previous.pop(number, None)
-                continue
+        try:
+            for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):
+                number = getattr(signal, name, None)
+                if number is None:
+                    continue
+                try:
+                    previous = signal.getsignal(number)
+                except (OSError, ValueError):
+                    continue
+                self.previous[number] = previous
+                try:
+                    signal.signal(number, self.handle)
+                except (OSError, ValueError):
+                    self.previous.pop(number, None)
+                    continue
+        except KeyboardInterrupt:
+            if not self.record_interrupt():
+                raise
         self._install_console_handler()
         self.phase = "body"
+
+    def record_interrupt(self) -> bool:
+        """Record a Ctrl+C that Python's default handler raised.
+
+        Before the guard owns SIGINT, a Ctrl+C runs whatever handler was in
+        place. Python's default handler raises KeyboardInterrupt. The guard
+        records that as a SIGINT stop, so the run takes the same cleanup path
+        as any other stop. A caller's own handler runs as the caller wrote it,
+        and the guard records no stop for its exception. The return value says
+        which case this was.
+        """
+        try:
+            current = signal.getsignal(signal.SIGINT)
+        except (OSError, ValueError):
+            return False
+        if current is not signal.default_int_handler:
+            return False
+        if self.pending is None:
+            self.pending = signal.SIGINT
+            self.stopped_at = time.monotonic()
+        return True
 
     def restore(self) -> None:
         """Put back every handler that install replaced, then replay the stop.
@@ -1888,10 +1925,10 @@ class _StopGuard:
         handler, which records it and returns, so the loop finishes and every
         handler comes back.
 
-        The replay of the first recorded stop is built before the SIGINT
-        handler goes back, so nothing but the replay follows it. A Ctrl+C
-        after that point runs the caller's own handler. That is the settled
-        contract.
+        Every slot goes back even when an already-restored caller handler
+        raises between the calls. The loop records the first exception, puts
+        the remaining handlers back, and then decides what the caller sees.
+        The guard's own comment states that rule.
 
         A default Ctrl+C handler that comes back mid-loop raises
         KeyboardInterrupt. That signal is recorded here, so the replay still
@@ -1899,20 +1936,23 @@ class _StopGuard:
         finishes.
         """
         self._remove_console_handler()
-        for number in [n for n in self.previous if n != signal.SIGINT]:
-            self._restore_handler(number)
-        # Build the replay before the SIGINT handler goes back, so nothing but
-        # the replay follows it.
-        replay = None if self.pending is None else SystemExit(128 + self.pending)
-        if signal.SIGINT in self.previous:
-            self._restore_handler(signal.SIGINT)
-        # The loop reads the record again at the raise. A stop that arrives
-        # between the check and the raise still sets the exit. A stop that
-        # arrived during the SIGINT restore is replayed here.
-        while self.pending is not None:
-            if replay is None:
-                replay = SystemExit(128 + self.pending)
-            raise replay
+        failure: BaseException | None = None
+        while True:
+            try:
+                for number in [n for n in self.previous if n != signal.SIGINT]:
+                    self._restore_handler(number)
+                if signal.SIGINT in self.previous:
+                    self._restore_handler(signal.SIGINT)
+                break
+            except BaseException as error:
+                # A caller handler that was already restored raised between
+                # the calls. Keep the first exception and finish every slot.
+                if failure is None:
+                    failure = error
+        if self.pending is not None:
+            raise SystemExit(128 + self.pending)
+        if failure is not None:
+            raise failure
 
     def _restore_handler(self, number: int) -> None:
         """Put one previous handler back, and retry a Ctrl+C once.
@@ -1920,8 +1960,13 @@ class _StopGuard:
         A default Ctrl+C handler that comes back mid-loop raises
         KeyboardInterrupt. That signal is recorded here, so the replay still
         reports it. The second call then puts the handler back.
+
+        A slot that is already back is skipped, so the caller of this method
+        can retry a pass after a caller handler raised.
         """
-        handler = self.previous[number]
+        handler = self.previous.get(number)
+        if handler is None:
+            return
         for _ in range(2):
             try:
                 signal.signal(number, handler)
@@ -4285,7 +4330,14 @@ def _self_test(keep_guard: bool = False) -> int:
     guard = _StopGuard()
     code = 0
     try:
-        guard.install()
+        try:
+            guard.install()
+        except KeyboardInterrupt:
+            # Python's default Ctrl+C handler was still in place, so the
+            # interrupt arrived before the guard owned SIGINT. Record it as a
+            # SIGINT stop. The cleanup below then replays code 130.
+            if not guard.record_interrupt():
+                raise
         # A stop recorded during install replays here, into the cleanup path.
         guard.stop_if_pending()
         code = _run_self_test(base_url, guard)
@@ -4422,7 +4474,14 @@ def main(argv: Sequence[str] | None = None, *, keep_guard: bool = False) -> int:
     guard = _StopGuard()
     code = 0
     try:
-        guard.install()
+        try:
+            guard.install()
+        except KeyboardInterrupt:
+            # Python's default Ctrl+C handler was still in place, so the
+            # interrupt arrived before the guard owned SIGINT. Record it as a
+            # SIGINT stop. The cleanup below then replays code 130.
+            if not guard.record_interrupt():
+                raise
         # A stop recorded during install replays here, into the cleanup path.
         guard.stop_if_pending()
         code = _run_stage(
