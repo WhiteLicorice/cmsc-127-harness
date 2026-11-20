@@ -60,6 +60,9 @@ CASE_SUFFIXES = {".json", ".md", ".erd", ".sql", ".sh"}
 MIGRATION_NAME = re.compile(r"(?P<number>[0-9]{4})_[a-z0-9_]+\.sql\Z")
 ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 CONSOLE_EVENTS = frozenset({2, 5, 6})  # close, logoff, shutdown
+# The stop signals the guard replaces. Windows has no SIGHUP and POSIX has no
+# SIGBREAK, so install sets only the signals the platform has.
+GUARD_SIGNALS = ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK")
 # Windows ends the process about 5 s after a close event. A stop path and a
 # close handler stop waiting at this budget, so the handler always returns in
 # time. A normal end waits longer, because a run that drops its database is
@@ -1599,6 +1602,33 @@ def _drop_database(name: str, admin: _DbConnection) -> None:
         admin.close()
 
 
+def _signal_mask() -> tuple[Any, Any, Any] | None:
+    """The pthread_sigmask function and its two mask operations.
+
+    Windows has no signal mask. POSIX and macOS do, so the guard uses it to
+    hold every stop signal for the length of a critical section. The names are
+    read at run time, so the type checker on a Windows host still reads this
+    file.
+    """
+    block = getattr(signal, "pthread_sigmask", None)
+    if block is None:
+        return None
+    return block, getattr(signal, "SIG_BLOCK"), getattr(signal, "SIG_SETMASK")
+
+
+def _console_stop_number(event: int) -> int | None:
+    """The signal number for a console stop event. Windows only.
+
+    The event numbers exist only on Windows, so they are read at run time and
+    the type checker on a POSIX host still reads this file.
+    """
+    if event == getattr(signal, "CTRL_C_EVENT", -1):
+        return signal.SIGINT
+    if event == getattr(signal, "CTRL_BREAK_EVENT", -1):
+        return getattr(signal, "SIGBREAK", None)
+    return None
+
+
 class _StopGuard:
     """Turn a stop request into a dropped database, except during cleanup.
 
@@ -1666,6 +1696,37 @@ class _StopGuard:
     The latched stop already sets the exit, so the caller sees that stop. With
     no latched stop, the caller sees the first exception that a caller handler
     raised. Every slot goes back either way.
+
+    The section rules.
+
+    install and restore each change several handlers. A Python handler can run
+    between any two of those calls, so each one is a critical section. No
+    Python handler runs inside a section.
+
+    POSIX and macOS hold the section with a signal mask. The guard blocks
+    every stop signal before the first handler change and puts the previous
+    mask back after the last one. The kernel holds a blocked signal, so the C
+    handler never runs and CPython queues no Python handler. When the mask
+    goes back, the kernel delivers the signal and CPython runs its handler
+    inside the call that restores the mask. That call is the last act of the
+    section, so the handler runs after the section's work is done.
+
+    Windows has no signal mask. A Ctrl+C or Ctrl+Break arrives as a console
+    control event, and the C runtime turns it into a Python signal. The guard
+    registers one native console handler before the first Python handler
+    change. Inside a section that handler records the first stop event and
+    returns TRUE, so the C runtime never raises the Python signal. Outside a
+    section it returns FALSE, so the event reaches the Python guard as before.
+    The same handler keeps the close, logoff, and shutdown drop.
+
+    Each section ends the same way. The mask goes back, or the native handler
+    stops holding. A stop that arrived during the section then becomes the
+    first stop, by the same rule as a delivered signal. The first stop a run
+    receives sets the exit code, whenever it arrives, until the process ends.
+
+    A stop that arrives after the section ends runs the caller's own handler.
+    Its exception reaches the caller unchanged. That is the settled library
+    contract.
     """
 
     def __init__(self) -> None:
@@ -1677,6 +1738,93 @@ class _StopGuard:
         self.console_name: str | None = None
         self.console_api: Any = None
         self.console_handler: Any = None
+        # The critical section. section is True from the first handler change
+        # of install or restore until the last one. mask holds the signal mask
+        # that was in place before the section, or None when no section is
+        # open. console_stop holds the first console stop event that arrived
+        # inside the section, as a signal number.
+        self.section_lock = threading.Lock()
+        self.section = False
+        self.mask: Any = None
+        self.console_stop: int | None = None
+
+    def _guarded_signals(self) -> set[int]:
+        """The signal numbers that install replaces on this platform."""
+        return {
+            number
+            for number in (getattr(signal, name, None) for name in GUARD_SIGNALS)
+            if number is not None
+        }
+
+    def _begin_section(self) -> None:
+        """Open a critical section. No Python handler runs inside it.
+
+        The section rules are in the class comment. The mask goes on before
+        the first handler change, so a stop that arrives during the section
+        waits for the end of it.
+        """
+        with self.section_lock:
+            self.section = True
+            self.console_stop = None
+        operations = _signal_mask()
+        if operations is None:
+            return
+        block, how, _ = operations
+        self.mask = block(how, self._guarded_signals())
+
+    def _end_section(self) -> None:
+        """Close a critical section and deliver any stop that it held.
+
+        The section closes before the mask goes back, so a handler that runs
+        when the mask lifts is outside the section. A console stop that the
+        native handler recorded then goes to whichever handler owns that
+        signal now, by the same rule as a delivered signal.
+        """
+        mask = self.mask
+        self.mask = None
+        with self.section_lock:
+            self.section = False
+            number = self.console_stop
+            self.console_stop = None
+        operations = _signal_mask()
+        if mask is not None and operations is not None:
+            block, _, how = operations
+            block(how, mask)
+        if number is not None:
+            self._deliver_console_stop(number)
+
+    def _deliver_console_stop(self, number: int) -> None:
+        """Give a held console stop to the handler that owns it now.
+
+        The guard's own handler records the stop, so the first stop still sets
+        the exit. A caller's handler runs as the caller wrote it, so its
+        exception reaches the caller unchanged. A signal with no Python
+        handler is recorded here, because the guard always takes the stop.
+        """
+        try:
+            handler = signal.getsignal(number)
+        except (OSError, ValueError):
+            handler = None
+        if callable(handler):
+            handler(number, None)
+            return
+        if self.pending is None:
+            self.pending = number
+            self.stopped_at = time.monotonic()
+
+    def _hold_console_stop(self, number: int) -> int:
+        """Record a console stop inside a section. Return TRUE to consume it.
+
+        The console calls this on its own thread, so the record takes the
+        section lock. Outside a section the event goes back to the C runtime,
+        which raises the Python signal as before.
+        """
+        with self.section_lock:
+            if not self.section:
+                return 0
+            if self.console_stop is None:
+                self.console_stop = number
+        return 1
 
     def handle(self, signum: int, frame: object) -> None:
         # Record the first signal before anything else. A later signal cannot
@@ -1771,11 +1919,17 @@ class _StopGuard:
         return finished
 
     def console_event(self, event: int) -> int:
-        """Drop the scratch database on a Windows console close.
+        """Handle a Windows console control event.
 
-        Windows calls a close handler on a new thread and gives it about 5 s.
-        The handler returns 0 after the drop, so the default handler ends the
-        process with the close status the console already chose.
+        A Ctrl+C or Ctrl+Break inside a critical section is recorded and
+        consumed, so the C runtime never raises the Python signal. Outside a
+        section this returns FALSE, so the event reaches the Python guard as
+        before. The section rules are in the class comment.
+
+        A close, logoff, or shutdown drops the scratch database. Windows calls
+        that handler on a new thread and gives it about 5 s. The handler
+        returns 0 after the drop, so the default handler ends the process with
+        the status the console already chose.
 
         The drop waits at most the cleanup budget. A server that stops
         answering then cannot hold the callback past the Windows window, and
@@ -1786,6 +1940,9 @@ class _StopGuard:
         only way to keep a run that dies in that moment from leaving the
         database behind.
         """
+        number = _console_stop_number(event)
+        if number is not None:
+            return self._hold_console_stop(number)
         if event not in CONSOLE_EVENTS:
             return 0
         name = self.console_name
@@ -1860,51 +2017,62 @@ class _StopGuard:
         Windows has no SIGHUP and POSIX has no SIGBREAK, so this loop sets only
         the signals the platform has.
 
-        Each previous handler is recorded before the call that replaces it. A
-        stop that arrives inside that call then finds the entry already in
-        place, so restore can put every handler back. The phase moves to body
-        at the end, so a stop recorded here is replayed by the caller.
+        The native console handler goes in first, so a Ctrl+Break during the
+        loop is held. The section then opens, and the loop replaces each
+        handler. Each previous handler is recorded before the call that
+        replaces it. The section closes at the end, and a stop that it held
+        becomes the first stop. The phase moves to body, so the caller replays
+        that stop.
 
-        A Ctrl+C that arrives before this loop reaches SIGINT runs whatever
-        handler was in place. Python's default handler raises
-        KeyboardInterrupt. The guard records that as a SIGINT stop, so the run
-        takes the same cleanup path as any other stop. A caller's own handler
-        runs as the caller wrote it. The guard records no stop for its
-        exception.
+        A Ctrl+C that arrives before the section opens runs whatever handler
+        was in place. Python's default handler raises KeyboardInterrupt. The
+        guard records that as a SIGINT stop, so the run takes the same cleanup
+        path as any other stop. A caller's own handler runs as the caller
+        wrote it. The guard records no stop for its exception.
         """
         if threading.current_thread() is not threading.main_thread():
             self.phase = "body"
             return
-        try:
-            for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):
-                number = getattr(signal, name, None)
-                if number is None:
-                    continue
-                try:
-                    previous = signal.getsignal(number)
-                except (OSError, ValueError):
-                    continue
-                self.previous[number] = previous
-                try:
-                    signal.signal(number, self.handle)
-                except (OSError, ValueError):
-                    self.previous.pop(number, None)
-                    continue
-        except KeyboardInterrupt:
-            if not self.record_interrupt():
-                raise
         self._install_console_handler()
+        try:
+            try:
+                self._begin_section()
+                for name in GUARD_SIGNALS:
+                    number = getattr(signal, name, None)
+                    if number is None:
+                        continue
+                    try:
+                        previous = signal.getsignal(number)
+                    except (OSError, ValueError):
+                        continue
+                    self.previous[number] = previous
+                    try:
+                        signal.signal(number, self.handle)
+                    except (OSError, ValueError):
+                        self.previous.pop(number, None)
+                        continue
+            except KeyboardInterrupt:
+                # A Ctrl+C that arrived before the section opened. The section
+                # still holds every other stop, so this record cannot be
+                # overtaken by a later one.
+                if not self.record_interrupt():
+                    raise
+        finally:
+            self._end_section()
         self.phase = "body"
 
     def record_interrupt(self) -> bool:
         """Record a Ctrl+C that Python's default handler raised.
 
-        Before the guard owns SIGINT, a Ctrl+C runs whatever handler was in
-        place. Python's default handler raises KeyboardInterrupt. The guard
-        records that as a SIGINT stop, so the run takes the same cleanup path
-        as any other stop. A caller's own handler runs as the caller wrote it,
-        and the guard records no stop for its exception. The return value says
-        which case this was.
+        A Ctrl+C that arrives before the section opens runs whatever handler
+        was in place. Python's default handler raises KeyboardInterrupt. The
+        guard records that as a SIGINT stop, so the run takes the same cleanup
+        path as any other stop. A caller's own handler runs as the caller
+        wrote it, and the guard records no stop for its exception. The return
+        value says which case this was.
+
+        The caller runs this inside the section, so no later stop can latch
+        its own code first.
         """
         try:
             current = signal.getsignal(signal.SIGINT)
@@ -1920,64 +2088,44 @@ class _StopGuard:
     def restore(self) -> None:
         """Put back every handler that install replaced, then replay the stop.
 
-        SIGINT goes back last, after every other handler is back. A Ctrl+C
-        that arrives between the replacements then still reaches the guard's
-        handler, which records it and returns, so the loop finishes and every
-        handler comes back.
+        The section opens first, so no caller handler runs between the
+        replacements. Every slot goes back in one pass. A real registration
+        failure comes from signal.signal itself and reaches the caller.
 
-        Every slot goes back even when an already-restored caller handler
-        raises between the calls. The loop records the first exception, puts
-        the remaining handlers back, and then decides what the caller sees.
-        The guard's own comment states that rule.
+        The section closes after the last slot. A signal that arrived during
+        the section then runs the caller's own handler, and its exception
+        reaches the caller unchanged. That is the settled library contract.
 
-        A default Ctrl+C handler that comes back mid-loop raises
-        KeyboardInterrupt. That signal is recorded here, so the replay still
-        reports it. The second call then puts the handler back. The loop
-        finishes.
+        The native console handler goes last, so a Ctrl+Break during the
+        section is held. The replay of the first recorded stop is the last
+        act, so nothing follows it.
         """
-        self._remove_console_handler()
-        failure: BaseException | None = None
-        while True:
+        try:
+            self._begin_section()
+            for number in [n for n in self.previous if n != signal.SIGINT]:
+                self._restore_handler(number)
+            if signal.SIGINT in self.previous:
+                self._restore_handler(signal.SIGINT)
+        finally:
             try:
-                for number in [n for n in self.previous if n != signal.SIGINT]:
-                    self._restore_handler(number)
-                if signal.SIGINT in self.previous:
-                    self._restore_handler(signal.SIGINT)
-                break
-            except BaseException as error:
-                # A caller handler that was already restored raised between
-                # the calls. Keep the first exception and finish every slot.
-                if failure is None:
-                    failure = error
+                self._end_section()
+            finally:
+                self._remove_console_handler()
         if self.pending is not None:
             raise SystemExit(128 + self.pending)
-        if failure is not None:
-            raise failure
 
     def _restore_handler(self, number: int) -> None:
-        """Put one previous handler back, and retry a Ctrl+C once.
+        """Put one previous handler back.
 
-        A default Ctrl+C handler that comes back mid-loop raises
-        KeyboardInterrupt. That signal is recorded here, so the replay still
-        reports it. The second call then puts the handler back.
-
-        A slot that is already back is skipped, so the caller of this method
-        can retry a pass after a caller handler raised.
+        A real registration failure comes from signal.signal itself. It
+        reaches the caller, and the slot stays in the list. The section keeps
+        every caller handler out of this call, so no exception here comes from
+        a restored handler.
         """
         handler = self.previous.get(number)
         if handler is None:
             return
-        for _ in range(2):
-            try:
-                signal.signal(number, handler)
-            except KeyboardInterrupt:
-                if self.pending is None:
-                    self.pending = signal.SIGINT
-                    self.stopped_at = time.monotonic()
-                continue
-            except (OSError, ValueError):
-                pass
-            break
+        signal.signal(number, handler)
         self.previous.pop(number, None)
 
     def _install_console_handler(self) -> None:
