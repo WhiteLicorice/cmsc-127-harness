@@ -14,7 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import ModuleType
@@ -102,17 +102,20 @@ def get_json(url: str) -> dict[str, Any]:
         return json.loads(response.read())
 
 
-def reserved_ports(count: int) -> list[int]:
+def reserved_ports(count: int, fallback: Sequence[int] = ()) -> list[int]:
     """Loopback ports for a test that needs more than one server.
 
     A gate that runs beside another gate reserves its own ports, so it sets
     CMSC127_TEST_PORTS to a comma-separated list. Without that list the test
-    asks the operating system for free ports.
+    takes the fallback range when one is given, and otherwise asks the
+    operating system for free ports.
     """
     listed = os.environ.get("CMSC127_TEST_PORTS", "")
     chosen = [int(entry) for entry in listed.split(",") if entry.strip().isdigit()]
     if len(chosen) >= count:
         return chosen[:count]
+    if len(fallback) >= count:
+        return list(fallback[:count])
     ports: list[int] = []
     while len(ports) < count:
         probe = socket.socket()

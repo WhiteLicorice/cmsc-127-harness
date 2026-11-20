@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -53,6 +54,23 @@ syncBuiltinESMExports();
 
 const SCRIPTS = ["browser-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audit.mjs"];
 
+// The harness reserves its test ports through CMSC127_TEST_PORTS, the same
+// variable the Python tests read, so no gate's port is fixed in this file.
+// Without that variable, ask the operating system for a free port.
+async function reservedPort(): Promise<number> {
+  const listed = process.env["CMSC127_TEST_PORTS"] ?? "";
+  for (const entry of listed.split(",")) {
+    const port = Number(entry.trim());
+    if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+  }
+  const probe = createServer();
+  await new Promise<void>((ready) => probe.listen(0, "127.0.0.1", ready));
+  const address = probe.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  await new Promise<void>((done) => probe.close(() => done()));
+  return port;
+}
+
 async function requestedPort(script: string, port: string | undefined): Promise<string> {
   const folder = resolve(fixtureBase, script.replace(/\W/g, "-"));
   await mkdir(folder, { recursive: true });
@@ -79,7 +97,8 @@ async function requestedPort(script: string, port: string | undefined): Promise<
 describe("smoke script port", () => {
   for (const script of SCRIPTS) {
     it(`${script} passes an explicit port through`, async () => {
-      expect(await requestedPort(script, "55691")).toBe("55691");
+      const port = String(await reservedPort());
+      expect(await requestedPort(script, port)).toBe(port);
     });
 
     it(`${script} keeps its own port when none is given`, async () => {

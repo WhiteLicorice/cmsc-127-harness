@@ -1608,11 +1608,16 @@ class _StopGuard:
     returns, so a cleanup section can finish. stop_if_pending raises that
     signal after cleanup, and the exit code still names the signal.
 
-    Windows has no SIGHUP, so install names only the signals the platform has.
-    A console close on Windows is not a Python signal: Windows ends the process
-    about 5 s after CTRL_CLOSE_EVENT, and no finally block runs. The guard also
-    registers a console control handler that drops the protected database
-    itself, then lets the default handler end the process.
+    SIGINT and SIGBREAK are the two stops a student reaches on Windows, as
+    Ctrl+C and Ctrl+Break. They take the same path as SIGTERM. A stop during
+    cleanup is held, so the process does not end mid-drop.
+
+    Windows has no SIGHUP and POSIX has no SIGBREAK, so install sets only the
+    signals the platform has. A console close on Windows is not a Python
+    signal: Windows ends the process about 5 s after CTRL_CLOSE_EVENT, and no
+    finally block runs. The guard also registers a console control handler
+    that drops the protected database itself, then lets the default handler
+    end the process.
     """
 
     def __init__(self) -> None:
@@ -1786,10 +1791,16 @@ class _StopGuard:
             admin.close()
 
     def install(self) -> None:
-        """Replace the SIGTERM and SIGHUP handlers and keep the old ones."""
+        """Replace the stop handlers and keep the old ones.
+
+        SIGTERM and SIGHUP are the POSIX stop signals. SIGINT is Ctrl+C and
+        SIGBREAK is Ctrl+Break, which is how a student stops a run on Windows.
+        Windows has no SIGHUP and POSIX has no SIGBREAK, so this loop sets only
+        the signals the platform has.
+        """
         if threading.current_thread() is not threading.main_thread():
             return
-        for name in ("SIGTERM", "SIGHUP"):
+        for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):
             number = getattr(signal, name, None)
             if number is None:
                 continue
@@ -1874,6 +1885,12 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     then cannot reach its default action, which would end the process before
     the report gives the database identifier and would replace the first
     signal's code.
+
+    A signal that arrives after the last check and before the handlers change
+    is held and never replayed, so the run would report success and exit 0.
+    The guard therefore checks once more after the handlers come off. That
+    check runs only when the first one returned, so a held signal still
+    unwinds on its own path.
     """
     dropped = True
     try:
@@ -1895,6 +1912,11 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
         guard.stop_if_pending()
     finally:
         guard.restore()
+    # The guard holds a signal that arrives after the check above and before
+    # the handlers change. Nothing else looks for it. The run would then
+    # report success and exit 0. This check runs only when the first one
+    # returned.
+    guard.stop_if_pending()
     return dropped
 
 

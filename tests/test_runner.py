@@ -29,6 +29,7 @@ import runner
 
 from runner import compare_dataset, load_manifest, main, select_cases
 from tests.test_lint import make_root as make_starter_root
+from tests.test_server import reserved_ports
 
 
 class _TestCursor(Protocol):
@@ -3480,6 +3481,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 
 HARNESS = Path(sys.argv[1])
 MARKER = Path(sys.argv[2])
@@ -3492,6 +3494,21 @@ import runner
 
 SENT = {"child-run": 0}
 REPORT_POINTS = ("report", "selftest-report")
+# The points that send the first stop signal at the boundary where the guard
+# puts the old handlers back. The last check for a held signal runs before
+# that boundary, so a signal that arrives here is the one that can be lost.
+RESTORE_POINTS = (
+    "restore",
+    "selftest-restore",
+    "console-restore",
+    "selftest-console-restore",
+)
+# The points whose drop fails, so the run reports the database it could not
+# remove. The restore points join them when the test also wants that report.
+FAILED_DROP_POINTS = REPORT_POINTS + ("restore-fail", "selftest-restore-fail")
+RESTORE_FAIL_POINTS = ("restore-fail", "selftest-restore-fail")
+# The console stop that this run delivers, as the name of a Python signal.
+CONSOLE_SIGNAL = os.environ.get("CMSC127_CONSOLE_SIGNAL", "")
 
 
 class _Token:
@@ -3509,11 +3526,53 @@ def stop(signum: int = signal.SIGTERM) -> None:
     os.kill(os.getpid(), signum)
 
 
+# Set when the guard's own handler records a signal, so a point that waits for
+# a console event wakes as soon as the event arrives.
+ARRIVED = threading.Event()
+plain_handle = runner._StopGuard.handle
+
+
+def handle(guard, signum, frame):
+    ARRIVED.set()
+    return plain_handle(guard, signum, frame)
+
+
+runner._StopGuard.handle = handle
+
+
+def console_stop() -> None:
+    """Deliver the console stop for this run at the current point.
+
+    Ctrl+Break is a real console event, so the parent sends it to this
+    process's own group and this call waits for the guard to record it.
+    Ctrl+C cannot be sent to a process group on Windows, and a console-wide
+    event would reach the test runner, so this process raises SIGINT itself.
+    CPython's console handler for CTRL_C_EVENT calls the same
+    signal_handler(SIGINT) that raise_signal calls, so the run meets the same
+    code either way.
+    """
+    if CONSOLE_SIGNAL == "SIGINT":
+        note("raising SIGINT")
+        signal.raise_signal(signal.SIGINT)
+    else:
+        note("waiting for SIGBREAK")
+        ARRIVED.wait(8)
+
+
+def deliver() -> None:
+    """Deliver the stop that this point asks for."""
+    if POINT.startswith("console") or POINT.startswith("selftest-console"):
+        console_stop()
+    else:
+        stop()
+
+
 runner.uuid4 = _Token
 plain_execute = runner._execute
 plain_run_pair = runner._run_pair
 plain_drop_database = runner._drop_database
 plain_report_cleanup_failure = runner._report_cleanup_failure
+plain_restore = runner._StopGuard.restore
 
 
 def execute(cursor, statement, parameters=None):
@@ -3522,7 +3581,7 @@ def execute(cursor, statement, parameters=None):
         stop(signal.SIGHUP)
     if POINT.endswith("drop") and statement.startswith("DROP DATABASE"):
         note("before-drop")
-        stop()
+        deliver()
     result = plain_execute(cursor, statement, parameters)
     if statement.startswith("CREATE DATABASE"):
         note("created " + statement.split('"')[1])
@@ -3541,7 +3600,7 @@ def run_pair(*args, **kwargs):
 
 def drop_database(name, admin):
     """Fail the drop, so the run reports the database it could not remove."""
-    if POINT in REPORT_POINTS:
+    if POINT in FAILED_DROP_POINTS:
         note("drop failed")
         raise psycopg.OperationalError("the server refused the drop")
     return plain_drop_database(name, admin)
@@ -3555,10 +3614,24 @@ def report_cleanup_failure(name):
     return plain_report_cleanup_failure(name)
 
 
+def restore(guard):
+    """Send the first stop signal at the boundary where the handlers change.
+
+    The guard has already made its last check for a held signal when this
+    runs, so a signal here is held and never replayed unless the guard checks
+    once more after it puts the old handlers back.
+    """
+    if POINT in RESTORE_POINTS or POINT in RESTORE_FAIL_POINTS:
+        note("before restore")
+        deliver()
+    return plain_restore(guard)
+
+
 runner._execute = execute
 runner._run_pair = run_pair
 runner._drop_database = drop_database
 runner._report_cleanup_failure = report_cleanup_failure
+runner._StopGuard.restore = restore
 
 
 class _SkipChild:
@@ -3589,6 +3662,35 @@ raise SystemExit(code)
 '''
 
 
+def console_break_event() -> int:
+    """Return the Ctrl+Break console event number. Windows only.
+
+    The name exists only on Windows, so it is looked up at run time and the
+    type checker on a POSIX host still reads this file.
+    """
+    name = "CTRL_BREAK_EVENT"
+    return cast(int, getattr(signal, name))
+
+
+def race_database_exists(url: str, name: str) -> bool:
+    """Report whether the named race database is still present."""
+    with psycopg.connect(url, autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            return cursor.fetchone() is not None
+
+
+def drop_race_database(url: str, name: str) -> None:
+    """Drop the named race database, whatever state the run left it in."""
+    with psycopg.connect(url, autocommit=True) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    psycopg_sql.Identifier(name)
+                )
+            )
+
+
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 @unittest.skipIf(
     sys.platform == "win32",
@@ -3598,27 +3700,23 @@ class StopSignalCleanupTests(unittest.TestCase):
     """A stop signal during a run leaves no race database behind."""
 
     def exists(self: StopSignalCleanupTests, url: str, name: str) -> bool:
-        with psycopg.connect(url, autocommit=True) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
-                return cursor.fetchone() is not None
+        return race_database_exists(url, name)
 
     def drop(self: StopSignalCleanupTests, url: str, name: str) -> None:
-        with psycopg.connect(url, autocommit=True) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute(
-                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                        psycopg_sql.Identifier(name)
-                    )
-                )
+        drop_race_database(url, name)
 
     def assert_stop_leaves_no_database(
         self: StopSignalCleanupTests,
         point: str,
         self_test: bool = False,
         signal_name: str = "SIGTERM",
+        failed_drop: bool = False,
     ) -> None:
-        """Run the runner, send a signal at one point, and check the drop."""
+        """Run the runner, send a signal at one point, and check the drop.
+
+        A failed drop leaves the database behind on purpose, so the run reports
+        the identifier it could not remove. The test then checks that report.
+        """
         url = os.environ["CMSC127_DATABASE_URL"]
         token = uuid4().hex
         name = f"cmsc127_race_{token}"
@@ -3689,7 +3787,11 @@ class StopSignalCleanupTests(unittest.TestCase):
                 self.drop(url, name)
 
         detail = f"{point} exited {returncode} notes {notes}\n{output}"
-        self.assertFalse(leftover, detail)
+        if failed_drop:
+            self.assertIn("drop failed", notes, detail)
+            self.assertIn(name, output, detail)
+        else:
+            self.assertFalse(leftover, detail)
         self.assertIn("handler default", notes, detail)
         if point == "run":
             self.assertEqual(128 + getattr(signal, signal_name), returncode, detail)
@@ -3732,6 +3834,35 @@ class StopSignalCleanupTests(unittest.TestCase):
     ) -> None:
         self.assert_stop_leaves_no_database("selftest-drop", self_test=True)
 
+    def test_sigterm_at_restore_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        """The first signal at the restore boundary still ends the run.
+
+        The guard makes its last check for a held signal before it puts the old
+        handlers back. A signal in that interval is held, so the guard must
+        check once more after the restore and replay it.
+        """
+        self.assert_stop_leaves_no_database("restore")
+
+    def test_self_test_sigterm_at_restore_drops_the_race_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_stop_leaves_no_database("selftest-restore", self_test=True)
+
+    def test_sigterm_at_restore_after_a_failed_drop_names_the_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        """The report keeps the identifier. The held signal still replays."""
+        self.assert_stop_leaves_no_database("restore-fail", failed_drop=True)
+
+    def test_self_test_sigterm_at_restore_after_a_failed_drop_names_the_database(
+        self: StopSignalCleanupTests,
+    ) -> None:
+        self.assert_stop_leaves_no_database(
+            "selftest-restore-fail", self_test=True, failed_drop=True
+        )
+
 
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 @unittest.skipIf(
@@ -3748,19 +3879,10 @@ class StopReportSignalTests(unittest.TestCase):
     """
 
     def exists(self: StopReportSignalTests, url: str, name: str) -> bool:
-        with psycopg.connect(url, autocommit=True) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
-                return cursor.fetchone() is not None
+        return race_database_exists(url, name)
 
     def drop(self: StopReportSignalTests, url: str, name: str) -> None:
-        with psycopg.connect(url, autocommit=True) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute(
-                    psycopg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                        psycopg_sql.Identifier(name)
-                    )
-                )
+        drop_race_database(url, name)
 
     def assert_report_survives_the_second_signal(
         self: StopReportSignalTests,
@@ -3849,6 +3971,175 @@ class StopReportSignalTests(unittest.TestCase):
         self: StopReportSignalTests,
     ) -> None:
         self.assert_report_survives_the_second_signal("selftest-report", self_test=True)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class ConsoleStopSignalTests(unittest.TestCase):
+    """A Ctrl+C or Ctrl+Break during cleanup keeps the stop and the database.
+
+    Windows ends a process on SIGTERM without running a Python handler, so the
+    POSIX cases skip there. A student on Windows stops a run with Ctrl+C or
+    Ctrl+Break, and those reach the guard as SIGINT and SIGBREAK. This class
+    runs on every platform, because SIGINT is the same signal everywhere.
+    """
+
+    def exists(self: ConsoleStopSignalTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: ConsoleStopSignalTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def assert_console_stop_leaves_no_database(
+        self: ConsoleStopSignalTests,
+        point: str,
+        signal_name: str,
+        self_test: bool = False,
+    ) -> None:
+        """Run the runner, deliver a console stop at one point, and check it."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nsleep 20\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_CONSOLE_SIGNAL"] = signal_name
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    point,
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                # A console event reaches only this process's own group, so the
+                # test runner never meets the stop it sends.
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    if sys.platform == "win32"
+                    else 0
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists():
+                        notes = marker.read_text(encoding="utf-8").splitlines()
+                    if f"created {name}" in notes:
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertIn(f"created {name}", notes, "the run made no race database")
+                if signal_name == "SIGBREAK":
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        if marker.exists():
+                            notes = marker.read_text(encoding="utf-8").splitlines()
+                        if "waiting for SIGBREAK" in notes:
+                            break
+                        if process.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                    if process.poll() is None:
+                        os.kill(process.pid, console_break_event())
+                returncode = process.wait(timeout=90)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+                leftover = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"{point} {signal_name} exited {returncode} notes {notes}\n{output}"
+        self.assertFalse(leftover, detail)
+        self.assertIn("handler default", notes, detail)
+        self.assertEqual(128 + getattr(signal, signal_name), returncode, detail)
+
+    def test_sigint_at_the_drop_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database("console-drop", "SIGINT")
+
+    def test_sigint_at_restore_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database("console-restore", "SIGINT")
+
+    def test_self_test_sigint_at_the_drop_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database(
+            "selftest-console-drop", "SIGINT", self_test=True
+        )
+
+    def test_self_test_sigint_at_restore_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database(
+            "selftest-console-restore", "SIGINT", self_test=True
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_sigbreak_at_the_drop_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database("console-drop", "SIGBREAK")
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_sigbreak_at_restore_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database("console-restore", "SIGBREAK")
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_self_test_sigbreak_at_the_drop_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database(
+            "selftest-console-drop", "SIGBREAK", self_test=True
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_self_test_sigbreak_at_restore_drops_the_race_database(
+        self: ConsoleStopSignalTests,
+    ) -> None:
+        self.assert_console_stop_leaves_no_database(
+            "selftest-console-restore", "SIGBREAK", self_test=True
+        )
 
 
 class StopSignalHandlerTests(unittest.TestCase):
@@ -3975,9 +4266,12 @@ class StopSignalHandlerTests(unittest.TestCase):
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
 # A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster on 55690 and the browser tests on 55691 to 55699 stay
-# free. The Python stage and the browser stage never run at the same time.
-STALL_LANE = range(55692, 55697)
+# so the database cluster and the browser tests stay free. A gate that runs
+# beside another gate reserves its own ports through CMSC127_TEST_PORTS, the
+# same variable the launcher tests read, so no gate's ports are fixed here.
+# Without that variable the lane is the one CI uses.
+STALL_DEFAULT_LANE = range(55721, 55727)
+STALL_LANE = tuple(reserved_ports(len(STALL_DEFAULT_LANE), STALL_DEFAULT_LANE))
 
 
 def stall_drop(*arguments: object) -> None:
