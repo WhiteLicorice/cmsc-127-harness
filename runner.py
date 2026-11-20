@@ -1665,26 +1665,25 @@ class _StopGuard:
 
         A normal end passes a longer budget, because the run must not report
         success while its database is still there. A stop path keeps the
-        cleanup budget. A stop signal that arrives during the wait gets that
-        same budget from the moment the handler recorded it, so the normal
-        deadline cannot cut the stop short. The drop still gets its chance,
-        and the stop waits no longer than a stop path does. A drop that did
-        not finish keeps the name, so a later console close still tries once
-        more. The worker owns the connection until its call returns.
+        cleanup budget, counted from the moment the first signal arrived. That
+        moment can be before this wait begins, when the signal arrived during
+        CREATE, or during the wait. Either way the stop waits no longer than a
+        stop path does. A drop that did not finish keeps the name, so a later
+        console close still tries once more. The worker owns the connection
+        until its call returns.
         """
-        seen = self.pending
         noticed: float | None = None
 
         def deadline(started: float) -> float:
             """The moment this wait must end.
 
-            A stop that arrives during the wait gets the cleanup budget from
-            the moment the handler recorded it. A stop that the handler did
-            not record, such as one a test sets, gets the budget from the
-            moment the wait sees it.
+            A stop gets the cleanup budget from the moment the handler
+            recorded it, whether it arrived before this wait or during it. A
+            stop that the handler did not record, such as one a test sets,
+            gets the budget from the moment the wait sees it.
             """
             nonlocal noticed
-            if self.pending is not None and self.pending != seen:
+            if self.pending is not None:
                 if self.stopped_at is not None:
                     return self.stopped_at + CLEANUP_SECONDS
                 if noticed is None:
@@ -1845,31 +1844,25 @@ class _StopGuard:
         self.latched = False
 
     def stop_if_pending(self) -> None:
-        """Raise the held stop signal. Call this after cleanup."""
+        """Raise the held stop signal. Call this after cleanup.
+
+        The signal and its time stay recorded. A second signal during the
+        cleanup then cannot replace the code that ends the run, and the drop
+        keeps the budget that the first signal started. The caller reports its
+        result before this call, so the report is never lost.
+        """
         if self.pending is None:
             return
-        signum = self.pending
-        self.pending = None
-        raise SystemExit(128 + signum)
-
-
-def _cleanup_seconds(guard: _StopGuard) -> float:
-    """The drop budget for the path that is ending now.
-
-    A stop or a console close must return inside the Windows window. A normal
-    end waits for its drop, because a run that reports success while its
-    database is still there is wrong about what it did.
-    """
-    return CLEANUP_SECONDS if guard.pending is not None else NORMAL_DROP_SECONDS
+        raise SystemExit(128 + self.pending)
 
 
 def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bool:
     """Drop the scratch database on the way out. Report a failed drop.
 
     A stop signal that arrived during the run ends it with its own code after
-    the cleanup. The drop keeps the short budget on that path, because the
-    process must return inside the Windows window. A normal end waits for a
-    confirmed drop.
+    the cleanup. The drop keeps the short budget on that path, counted from
+    the moment the first signal arrived, because the process must return
+    inside the Windows window. A normal end waits for a confirmed drop.
 
     A failed drop is reported here, before the held signal replays. The signal
     ends the process, so a caller that reported the failure afterwards would
@@ -1880,7 +1873,7 @@ def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bo
     try:
         guard.latch()
         if admin is not None and name:
-            dropped = guard.drop(name, admin, _cleanup_seconds(guard))
+            dropped = guard.drop(name, admin, NORMAL_DROP_SECONDS)
     except (OSError, psycopg.Error) as error:
         # A server that refuses the drop, such as one that denies the
         # permission, reaches here. Report it in one line rather than let a
