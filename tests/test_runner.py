@@ -3545,6 +3545,13 @@ FINISH_POINTS = ("finish", "selftest-finish")
 BETWEEN_POINTS = ("restore-between", "selftest-restore-between")
 # The point that nests a second stop at the entry of the first stop's handler.
 NESTED_POINTS = ("nested", "selftest-nested")
+# The point that delivers a native Ctrl+C just before the guard registers
+# SIGINT. Python's default handler is still in place there, so the interrupt
+# arrives as KeyboardInterrupt.
+INSTALL_BEFORE_POINTS = ("install-before", "selftest-install-before")
+# The point where the caller's own handler raises between the restore calls.
+# Every slot must still go back.
+CALLER_RAISES_POINTS = ("caller-raises", "selftest-caller-raises")
 # The console stop that this run delivers, as the name of a Python signal.
 CONSOLE_SIGNAL = os.environ.get("CMSC127_CONSOLE_SIGNAL", "")
 # The pair points deliver two stops at the boundary where the handlers used to
@@ -3728,14 +3735,38 @@ def finish_run(guard, name, admin):
 runner._finish_run = finish_run
 
 
-def nested_install(guard):
-    """Install the guard, then wrap its handler to nest a second stop.
+def install_before(guard):
+    """Deliver a native Ctrl+C just before the guard registers SIGINT.
 
-    The wrapper sends the second stop before it calls the guard's handler, so
-    the second stop is pending at that handler's entry. CPython runs it first,
-    at the entry check point, before any statement of the first handler. That
-    is the documented tool gap.
+    Python's default handler is still in place at that moment, so the
+    interrupt arrives as KeyboardInterrupt. The guard must record it as a
+    SIGINT stop, finish its cleanup, and replay code 130.
     """
+    real_signal = signal.signal
+    sent = {"done": False}
+
+    def change(number, handler):
+        if not sent["done"] and number == signal.SIGINT:
+            sent["done"] = True
+            note("before installing SIGINT")
+            deliver_signal("SIGINT")
+        return real_signal(number, handler)
+
+    signal.signal = change
+    try:
+        return plain_install(guard)
+    finally:
+        signal.signal = real_signal
+
+
+def nested_install(guard):
+    """Install the guard, with this point's delivery around the call.
+
+    The install-before point sends a native Ctrl+C before the guard registers
+    SIGINT. The nested point wraps the guard's handler to nest a second stop.
+    """
+    if POINT in INSTALL_BEFORE_POINTS:
+        return install_before(guard)
     plain_install(guard)
     if POINT not in NESTED_POINTS:
         return
@@ -3852,6 +3883,42 @@ def restore_between(guard):
         sys.settrace(None)
 
 
+def caller_raises(guard):
+    """Latch the first stop, then let the caller's handler raise between calls.
+
+    The caller owns every stop handler and each one raises when it runs. The
+    first stop is latched while the guard still owns the handlers. Then a
+    native stop arrives once the last non-SIGINT handler is back. The caller's
+    handler raises there. Every slot must still go back.
+    """
+    note("before restore")
+    deliver_signal(FIRST_SIGNAL)
+    remaining = [number for number in guard.previous if number != signal.SIGINT]
+    last = remaining[-1] if remaining else None
+    expected = guard.previous[last] if last is not None else None
+    changed = {"done": False}
+    restore_code = plain_restore.__code__
+
+    def on_line(frame, event, argument):
+        if event == "line" and not changed["done"] and last is not None:
+            if signal.getsignal(last) is expected:
+                changed["done"] = True
+                note("restored " + signal.Signals(last).name + " before the caller stop")
+                deliver_signal(signal.Signals(last).name)
+        return on_line
+
+    def on_call(frame, event, argument):
+        if event == "call" and frame.f_code is restore_code:
+            return on_line
+        return None
+
+    sys.settrace(on_call)
+    try:
+        return plain_restore(guard)
+    finally:
+        sys.settrace(None)
+
+
 def restore(guard):
     """Send the first stop signal at the boundary where the handlers change.
 
@@ -3863,6 +3930,8 @@ def restore(guard):
     That is the interval where the default Ctrl+C handler can replace the
     first stop's code, so the run must still end with the first code.
     """
+    if POINT in CALLER_RAISES_POINTS:
+        return caller_raises(guard)
     if POINT in BETWEEN_POINTS:
         return restore_between(guard)
     if POINT in RESTORE_POINTS or POINT in RESTORE_FAIL_POINTS:
@@ -3928,6 +3997,20 @@ class _SkipChild:
         return subprocess.CompletedProcess(args[0] if args else [], 0)
 
 
+if POINT in CALLER_RAISES_POINTS:
+    # The caller's own handlers go in before the run, so install replaces
+    # them. Each one raises when it runs. The tail then reports whether every
+    # one of them came back.
+    def caller_handler(number, frame):
+        note("caller signal " + signal.Signals(number).name)
+        ARRIVED.set()
+        raise RuntimeError("caller custom stop")
+
+    for number in STOP_NUMBERS:
+        signal.signal(number, caller_handler)
+    ORIGINAL = {number: signal.getsignal(number) for number in STOP_NUMBERS}
+
+
 if KEEP_GUARD:
     # The CLI path. The process ends when the run ends, so the guard stays
     # installed and the stop becomes the process exit status.
@@ -3951,6 +4034,9 @@ note("non-SIGINT handlers restored " + str(all(
     signal.getsignal(number) is handler
     for number, handler in ORIGINAL.items()
     if number != signal.SIGINT)))
+note("all handlers restored " + str(all(
+    signal.getsignal(number) is handler
+    for number, handler in ORIGINAL.items())))
 raise SystemExit(code)
 '''
 
@@ -4092,6 +4178,8 @@ except SystemExit as requested:
 note("exit " + str(code))
 note("restored " + str(all(signal.getsignal(n) is h for n, h in ORIGINAL.items())))
 note("points " + str(len(SEEN)))
+for name, line in SEEN:
+    note(f"line {name}:{line}")
 raise SystemExit(code)
 '''
 
@@ -4989,6 +5077,343 @@ CONSOLE_STOPS = ("SIGINT", "SIGBREAK")
 POSIX_STOPS = ("SIGINT", "SIGTERM", "SIGHUP")
 
 
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class RestoreRaisesStopTests(unittest.TestCase):
+    """A caller handler that raises between the restore calls still gets every slot.
+
+    The caller owns every stop handler and each one raises when it runs. The
+    first stop is latched while the guard still owns the handlers. Then a
+    native stop arrives once the last non-SIGINT handler is back. The caller's
+    handler raises there. Every slot must still go back, so the caller owns
+    every handler afterwards. The latched stop names the exit.
+    """
+
+    def exists(self: RestoreRaisesStopTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: RestoreRaisesStopTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def process_options(self: RestoreRaisesStopTests) -> dict[str, Any]:
+        """The process options that this platform's delivery needs."""
+        return {}
+
+    def interpreter(self: RestoreRaisesStopTests) -> str:
+        """The interpreter that runs the driver."""
+        return sys.executable
+
+    def extra_environment(self: RestoreRaisesStopTests) -> dict[str, str]:
+        """The variables that this platform's delivery needs."""
+        return {}
+
+    def assert_every_slot_comes_back(
+        self: RestoreRaisesStopTests,
+        first: str,
+        self_test: bool = False,
+    ) -> None:
+        """Run the runner, raise from a restored handler, and check the slots."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_FIRST_SIGNAL"] = first
+            environment.update(self.extra_environment())
+            process = subprocess.Popen(
+                [
+                    self.interpreter(),
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-caller-raises" if self_test else "caller-raises",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **self.process_options(),
+            )
+            try:
+                returncode = process.wait(timeout=120)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+                leftover = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"{first} caller-raises exited {returncode} notes {notes}\n{output}"
+        self.assertIn(f"created {name}", notes, detail)
+        self.assertIn("before restore", notes, detail)
+        self.assertIn("before the caller stop", " ".join(notes), detail)
+        self.assertIn("caller signal", " ".join(notes), detail)
+        self.assertIn("all handlers restored True", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertFalse(leftover, detail)
+        self.assertEqual(128 + getattr(signal, first), returncode, detail)
+
+
+@unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+class ConsoleRestoreRaisesStopTests(RestoreRaisesStopTests):
+    """A native Ctrl+Break between the restore calls still restores every slot.
+
+    Each case runs in its own console, so the event cannot reach the test
+    runner. The driver proves the console holds it alone before it sends.
+    """
+
+    def process_options(self: ConsoleRestoreRaisesStopTests) -> dict[str, Any]:
+        return private_console_options()
+
+    def interpreter(self: ConsoleRestoreRaisesStopTests) -> str:
+        """The base interpreter, so the console holds one process."""
+        return str(getattr(sys, "_base_executable", sys.executable))
+
+    def extra_environment(self: ConsoleRestoreRaisesStopTests) -> dict[str, str]:
+        paths = [sysconfig.get_paths()["purelib"]]
+        existing = os.environ.get("PYTHONPATH")
+        if existing:
+            paths.append(existing)
+        return {
+            "CMSC127_PRIVATE_CONSOLE": "1",
+            "PYTHONPATH": os.pathsep.join(paths),
+        }
+
+    def test_sigbreak_between_the_restore_calls_restores_every_slot(
+        self: ConsoleRestoreRaisesStopTests,
+    ) -> None:
+        self.assert_every_slot_comes_back("SIGINT")
+
+    def test_self_test_sigbreak_between_the_restore_calls_restores_every_slot(
+        self: ConsoleRestoreRaisesStopTests,
+    ) -> None:
+        self.assert_every_slot_comes_back("SIGINT", self_test=True)
+
+
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class PosixRestoreRaisesStopTests(RestoreRaisesStopTests):
+    """A native SIGHUP between the restore calls still restores every slot."""
+
+    def test_sighup_between_the_restore_calls_restores_every_slot(
+        self: PosixRestoreRaisesStopTests,
+    ) -> None:
+        self.assert_every_slot_comes_back("SIGINT")
+
+    def test_self_test_sighup_between_the_restore_calls_restores_every_slot(
+        self: PosixRestoreRaisesStopTests,
+    ) -> None:
+        self.assert_every_slot_comes_back("SIGINT", self_test=True)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class InstallInterruptTests(unittest.TestCase):
+    """A Ctrl+C before the SIGINT registration still ends at 130.
+
+    Python's default handler is still in place at that moment, so the
+    interrupt arrives as KeyboardInterrupt. The guard records it as a SIGINT
+    stop, finishes its cleanup, and replays code 130. No traceback appears and
+    no database is left.
+    """
+
+    def exists(self: InstallInterruptTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: InstallInterruptTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def process_options(self: InstallInterruptTests) -> dict[str, Any]:
+        """The process options that this platform's delivery needs."""
+        return {}
+
+    def interpreter(self: InstallInterruptTests) -> str:
+        """The interpreter that runs the driver."""
+        return sys.executable
+
+    def extra_environment(self: InstallInterruptTests) -> dict[str, str]:
+        """The variables that this platform's delivery needs."""
+        return {}
+
+    def assert_interrupt_before_registration_ends_at_130(
+        self: InstallInterruptTests,
+        keep: bool,
+        self_test: bool = False,
+    ) -> None:
+        """Deliver a native Ctrl+C before the registration, and check the end."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_FIRST_SIGNAL"] = "SIGINT"
+            environment["CMSC127_KEEP_GUARD"] = "1" if keep else "0"
+            environment.update(self.extra_environment())
+            process = subprocess.Popen(
+                [
+                    self.interpreter(),
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-install-before" if self_test else "install-before",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **self.process_options(),
+            )
+            try:
+                returncode = process.wait(timeout=120)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+                leftover = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"install-before keep={keep} exited {returncode} notes {notes}\n{output}"
+        self.assertIn("before installing SIGINT", notes, detail)
+        self.assertNotIn(f"created {name}", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertFalse(leftover, detail)
+        self.assertEqual(128 + signal.SIGINT, returncode, detail)
+
+
+@unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+class ConsoleInstallInterruptTests(InstallInterruptTests):
+    """A native Ctrl+C before the registration ends at 130 on Windows."""
+
+    def process_options(self: ConsoleInstallInterruptTests) -> dict[str, Any]:
+        return private_console_options()
+
+    def interpreter(self: ConsoleInstallInterruptTests) -> str:
+        """The base interpreter, so the console holds one process."""
+        return str(getattr(sys, "_base_executable", sys.executable))
+
+    def extra_environment(self: ConsoleInstallInterruptTests) -> dict[str, str]:
+        paths = [sysconfig.get_paths()["purelib"]]
+        existing = os.environ.get("PYTHONPATH")
+        if existing:
+            paths.append(existing)
+        return {
+            "CMSC127_PRIVATE_CONSOLE": "1",
+            "PYTHONPATH": os.pathsep.join(paths),
+        }
+
+    def test_ctrl_c_before_the_registration_ends_at_130(
+        self: ConsoleInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=False)
+
+    def test_ctrl_c_before_the_registration_ends_at_130_on_the_cli_path(
+        self: ConsoleInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=True)
+
+    def test_self_test_ctrl_c_before_the_registration_ends_at_130(
+        self: ConsoleInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=False, self_test=True)
+
+    def test_self_test_ctrl_c_before_the_registration_ends_at_130_on_the_cli_path(
+        self: ConsoleInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=True, self_test=True)
+
+
+@unittest.skipIf(
+    sys.platform == "win32",
+    "Windows ends a process on SIGTERM without running a Python handler",
+)
+class PosixInstallInterruptTests(InstallInterruptTests):
+    """A native Ctrl+C before the registration ends at 130 on POSIX."""
+
+    def test_ctrl_c_before_the_registration_ends_at_130(
+        self: PosixInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=False)
+
+    def test_ctrl_c_before_the_registration_ends_at_130_on_the_cli_path(
+        self: PosixInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=True)
+
+    def test_self_test_ctrl_c_before_the_registration_ends_at_130(
+        self: PosixInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=False, self_test=True)
+
+    def test_self_test_ctrl_c_before_the_registration_ends_at_130_on_the_cli_path(
+        self: PosixInstallInterruptTests,
+    ) -> None:
+        self.assert_interrupt_before_registration_ends_at_130(keep=True, self_test=True)
+
+
 def private_console_options() -> dict[str, Any]:
     """The options that give a child its own hidden console. Windows only.
 
@@ -5428,6 +5853,422 @@ class StopSignalHandlerTests(unittest.TestCase):
         self.assertEqual(128 + signal.SIGTERM, stopped.exception.code)
 
 
+GUARD_ERROR_DRIVER = '''\
+"""Reach one guard error branch and report the lines it ran."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import signal
+import sys
+import threading
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+MODE = sys.argv[3]
+sys.path.insert(0, str(HARNESS))
+
+import runner
+
+TARGETS = (
+    "install",
+    "record_interrupt",
+    "restore",
+    "_restore_handler",
+    "stop_if_pending",
+    "_end_run",
+)
+SEEN: list[tuple[str, int]] = []
+
+
+def note(text: str) -> None:
+    with MARKER.open("a", encoding="utf-8") as handle:
+        handle.write(text + "\\n")
+
+
+def local(frame, event, arg):
+    if event == "line":
+        SEEN.append((frame.f_code.co_name, frame.f_lineno))
+    return local
+
+
+def tracer(frame, event, arg):
+    if event == "call" and frame.f_code.co_name in TARGETS:
+        return local
+    return None
+
+
+def off_thread() -> None:
+    """Install while the guard sees a worker thread, so it returns early."""
+    guard = runner._StopGuard()
+    real = threading.current_thread
+    threading.current_thread = lambda: object()
+    try:
+        guard.install()
+    finally:
+        threading.current_thread = real
+    note("phase " + guard.phase)
+
+
+def stop_if_pending() -> None:
+    """Raise the recorded stop through the cleanup check."""
+    guard = runner._StopGuard()
+    guard.pending = signal.SIGTERM
+    try:
+        guard.stop_if_pending()
+    except SystemExit as requested:
+        note("exit " + str(requested.code))
+
+
+def install_getsignal_error() -> None:
+    """Make the platform refuse the handler query for one signal."""
+    guard = runner._StopGuard()
+    real = signal.getsignal
+
+    def getsignal(number):
+        if number == signal.SIGTERM:
+            raise OSError("the platform refused the query")
+        return real(number)
+
+    signal.getsignal = getsignal
+    try:
+        guard.install()
+    finally:
+        signal.getsignal = real
+    note("previous " + str(sorted(guard.previous)))
+
+
+def install_signal_error() -> None:
+    """Make the platform refuse the handler change for one signal."""
+    guard = runner._StopGuard()
+    real = signal.signal
+
+    def change(number, handler):
+        if number == signal.SIGTERM:
+            raise ValueError("the platform refused the handler")
+        return real(number, handler)
+
+    signal.signal = change
+    try:
+        guard.install()
+    finally:
+        signal.signal = real
+    note("previous " + str(sorted(guard.previous)))
+
+
+def install_interrupt() -> None:
+    """Raise KeyboardInterrupt before the guard registers SIGINT."""
+    guard = runner._StopGuard()
+    real = signal.signal
+    state = {"done": False}
+
+    def change(number, handler):
+        if not state["done"] and number == signal.SIGINT:
+            state["done"] = True
+            raise KeyboardInterrupt
+        return real(number, handler)
+
+    signal.signal = change
+    try:
+        guard.install()
+    finally:
+        signal.signal = real
+    note("pending " + str(guard.pending))
+    note("phase " + guard.phase)
+
+
+def install_interrupt_custom() -> None:
+    """Raise KeyboardInterrupt while the caller owns SIGINT."""
+    guard = runner._StopGuard()
+
+    def custom(number, frame):
+        pass
+
+    signal.signal(signal.SIGINT, custom)
+    real = signal.signal
+    state = {"done": False}
+
+    def change(number, handler):
+        if not state["done"] and number == signal.SIGTERM:
+            state["done"] = True
+            raise KeyboardInterrupt
+        return real(number, handler)
+
+    signal.signal = change
+    try:
+        guard.install()
+    except KeyboardInterrupt:
+        note("interrupt escaped install")
+    finally:
+        signal.signal = real
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    note("pending " + str(guard.pending))
+
+
+def record_interrupt_error() -> None:
+    """Make the platform refuse the SIGINT query."""
+    guard = runner._StopGuard()
+    real = signal.getsignal
+
+    def getsignal(number):
+        if number == signal.SIGINT:
+            raise ValueError("the platform refused the query")
+        return real(number)
+
+    signal.getsignal = getsignal
+    try:
+        note("recorded " + str(guard.record_interrupt()))
+    finally:
+        signal.getsignal = real
+
+
+def restore_interrupt() -> None:
+    """Raise KeyboardInterrupt inside the first handler replacement."""
+    guard = runner._StopGuard()
+    guard.install()
+    real = signal.signal
+    state = {"done": False}
+
+    def change(number, handler):
+        if not state["done"] and number != signal.SIGINT:
+            state["done"] = True
+            raise KeyboardInterrupt
+        return real(number, handler)
+
+    signal.signal = change
+    try:
+        guard.restore()
+    except SystemExit as requested:
+        note("exit " + str(requested.code))
+    finally:
+        signal.signal = real
+    note("pending " + str(guard.pending))
+    note("previous " + str(sorted(guard.previous)))
+
+
+def restore_signal_error() -> None:
+    """Make the platform refuse the first handler replacement."""
+    guard = runner._StopGuard()
+    guard.install()
+    real = signal.signal
+    state = {"done": False}
+
+    def change(number, handler):
+        if not state["done"] and number != signal.SIGINT:
+            state["done"] = True
+            raise OSError("the platform refused the handler")
+        return real(number, handler)
+
+    signal.signal = change
+    try:
+        guard.restore()
+    finally:
+        signal.signal = real
+    note("previous " + str(sorted(guard.previous)))
+
+
+def restore_failure() -> None:
+    """Raise from a restored caller handler, with no latched stop."""
+    guard = runner._StopGuard()
+    guard.install()
+    real = signal.signal
+    state = {"done": False}
+
+    def change(number, handler):
+        result = real(number, handler)
+        if not state["done"] and number != signal.SIGINT:
+            state["done"] = True
+            raise RuntimeError("caller custom stop")
+        return result
+
+    signal.signal = change
+    try:
+        guard.restore()
+    except RuntimeError as error:
+        note("raised " + str(error))
+    finally:
+        signal.signal = real
+    note("previous " + str(sorted(guard.previous)))
+
+
+def restore_skip() -> None:
+    """Put one handler back twice, so the second call skips the slot."""
+    guard = runner._StopGuard()
+    guard.install()
+    guard._restore_handler(signal.SIGTERM)
+    guard._restore_handler(signal.SIGTERM)
+    note("previous " + str(sorted(guard.previous)))
+
+
+def flush_error() -> None:
+    """Make the output stream refuse the flush on the CLI path."""
+    guard = runner._StopGuard()
+
+    class Refusing:
+        def flush(self):
+            raise OSError("the stream refused the flush")
+
+        def write(self, text):
+            return len(text)
+
+    real_out, real_err = sys.stdout, sys.stderr
+    sys.stdout = Refusing()
+    sys.stderr = Refusing()
+    try:
+        code = runner._end_run(guard, 0, True)
+    finally:
+        sys.stdout, sys.stderr = real_out, real_err
+    note("code " + str(code))
+
+
+MODES = {
+    "off-thread": off_thread,
+    "install-getsignal-error": install_getsignal_error,
+    "install-signal-error": install_signal_error,
+    "install-interrupt": install_interrupt,
+    "install-interrupt-custom": install_interrupt_custom,
+    "record-interrupt-error": record_interrupt_error,
+    "restore-interrupt": restore_interrupt,
+    "restore-signal-error": restore_signal_error,
+    "restore-failure": restore_failure,
+    "restore-skip": restore_skip,
+    "flush-error": flush_error,
+    "stop-if-pending": stop_if_pending,
+}
+
+sys.settrace(tracer)
+try:
+    MODES[MODE]()
+finally:
+    sys.settrace(None)
+for name, line in SEEN:
+    note(f"line {name}:{line}")
+note("done")
+'''
+
+# The guard lines that StopPhaseInjectionTests must reach. Each entry names
+# the function, a source snippet that identifies the line, and the occurrence
+# of that snippet inside the function. The test reads the line number from
+# runner.py, so a shift in the file cannot hide a gap.
+REQUIRED_GUARD_LINES = (
+    ("install", "if threading.current_thread() is not threading.main_thread():", 0),
+    ("install", 'self.phase = "body"', 0),
+    ("install", "return", 0),
+    ("install", "try:", 0),
+    ("install", 'for name in ("SIGTERM", "SIGHUP", "SIGINT", "SIGBREAK"):', 0),
+    ("install", "number = getattr(signal, name, None)", 0),
+    ("install", "if number is None:", 0),
+    ("install", "continue", 0),
+    ("install", "try:", 1),
+    ("install", "previous = signal.getsignal(number)", 0),
+    ("install", "except (OSError, ValueError):", 0),
+    ("install", "continue", 1),
+    ("install", "self.previous[number] = previous", 0),
+    ("install", "try:", 2),
+    ("install", "signal.signal(number, self.handle)", 0),
+    ("install", "except (OSError, ValueError):", 1),
+    ("install", "self.previous.pop(number, None)", 0),
+    ("install", "continue", 2),
+    ("install", "except KeyboardInterrupt:", 0),
+    ("install", "if not self.record_interrupt():", 0),
+    ("install", "                raise", 0),
+    ("install", "self._install_console_handler()", 0),
+    ("install", 'self.phase = "body"', 1),
+    ("record_interrupt", "try:", 0),
+    ("record_interrupt", "current = signal.getsignal(signal.SIGINT)", 0),
+    ("record_interrupt", "except (OSError, ValueError):", 0),
+    ("record_interrupt", "return False", 0),
+    ("record_interrupt", "if current is not signal.default_int_handler:", 0),
+    ("record_interrupt", "return False", 1),
+    ("record_interrupt", "if self.pending is None:", 0),
+    ("record_interrupt", "self.pending = signal.SIGINT", 0),
+    ("record_interrupt", "self.stopped_at = time.monotonic()", 0),
+    ("record_interrupt", "return True", 0),
+    ("restore", "self._remove_console_handler()", 0),
+    ("restore", "failure: BaseException | None = None", 0),
+    ("restore", "while True:", 0),
+    ("restore", "try:", 0),
+    ("restore", "for number in [n for n in self.previous if n != signal.SIGINT]:", 0),
+    ("restore", "self._restore_handler(number)", 0),
+    ("restore", "if signal.SIGINT in self.previous:", 0),
+    ("restore", "self._restore_handler(signal.SIGINT)", 0),
+    ("restore", "break", 0),
+    ("restore", "except BaseException as error:", 0),
+    ("restore", "if failure is None:", 0),
+    ("restore", "failure = error", 0),
+    ("restore", "if self.pending is not None:", 0),
+    ("restore", "raise SystemExit(128 + self.pending)", 0),
+    ("restore", "if failure is not None:", 0),
+    ("restore", "raise failure", 0),
+    ("_restore_handler", "handler = self.previous.get(number)", 0),
+    ("_restore_handler", "if handler is None:", 0),
+    ("_restore_handler", "return", 0),
+    ("_restore_handler", "for _ in range(2):", 0),
+    ("_restore_handler", "try:", 0),
+    ("_restore_handler", "signal.signal(number, handler)", 0),
+    ("_restore_handler", "except KeyboardInterrupt:", 0),
+    ("_restore_handler", "if self.pending is None:", 0),
+    ("_restore_handler", "self.pending = signal.SIGINT", 0),
+    ("_restore_handler", "self.stopped_at = time.monotonic()", 0),
+    ("_restore_handler", "continue", 0),
+    ("_restore_handler", "except (OSError, ValueError):", 0),
+    ("_restore_handler", "                pass", 0),
+    ("_restore_handler", "break", 0),
+    ("_restore_handler", "self.previous.pop(number, None)", 0),
+    ("stop_if_pending", "while self.pending is not None:", 0),
+    ("stop_if_pending", "raise SystemExit(128 + self.pending)", 0),
+    ("_end_run", "if keep_guard:", 0),
+    ("_end_run", "for stream in (sys.stdout, sys.stderr):", 0),
+    ("_end_run", "try:", 0),
+    ("_end_run", "stream.flush()", 0),
+    ("_end_run", "except (OSError, ValueError):", 0),
+    ("_end_run", "pass", 0),
+    ("_end_run", 'guard.phase = "final"', 0),
+    ("_end_run", "guard.stop_if_pending()", 0),
+    ("_end_run", "return code", 0),
+    ("_end_run", 'guard.phase = "cleanup"', 0),
+    ("_end_run", "try:", 1),
+    ("_end_run", "guard.restore()", 0),
+    ("_end_run", "return code", 1),
+    ("_end_run", "guard.stop_if_pending()", 1),
+)
+
+
+def guard_source() -> list[str]:
+    """The lines of the runner module under test."""
+    return Path(runner.__file__).read_text(encoding="utf-8").splitlines()
+
+
+def guard_line(function: str, anchor: str, occurrence: int = 0) -> int:
+    """The line number of an anchor inside one guard function.
+
+    The search starts at the function's def line and stops at the next def at
+    the same indentation, so an anchor that appears in two functions resolves
+    to the right one.
+    """
+    source = guard_source()
+    start = next(
+        index
+        for index, line in enumerate(source, start=1)
+        if line.strip().startswith(f"def {function}(")
+    )
+    indent = len(source[start - 1]) - len(source[start - 1].lstrip())
+    end = len(source)
+    for index in range(start + 1, len(source) + 1):
+        line = source[index - 1]
+        stripped = line.lstrip()
+        if stripped.startswith("def ") and len(line) - len(stripped) <= indent:
+            end = index - 1
+            break
+    seen = 0
+    for index in range(start, end + 1):
+        if anchor in source[index - 1]:
+            if seen == occurrence:
+                return index
+            seen += 1
+    raise AssertionError(f"{function} has no line {occurrence} that reads {anchor}")
+
+
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class StopPhaseInjectionTests(unittest.TestCase):
     """A stop at any line of the guard's own code keeps the first code.
@@ -5562,6 +6403,119 @@ class StopPhaseInjectionTests(unittest.TestCase):
                         )
                     covered += 1
         self.assertGreaterEqual(covered, 150)
+
+    def lines_from(self: StopPhaseInjectionTests, notes: list[str]) -> set[tuple[str, int]]:
+        """The guard lines that a driver run reported."""
+        reached: set[tuple[str, int]] = set()
+        for line in notes:
+            if not line.startswith("line "):
+                continue
+            name, _, number = line[5:].partition(":")
+            reached.add((name, int(number)))
+        return reached
+
+    def run_error_driver(self: StopPhaseInjectionTests, mode: str) -> list[str]:
+        """Run one guard error branch and report the lines it reached."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            driver = base / "driver.py"
+            driver.write_text(GUARD_ERROR_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    mode,
+                ],
+                cwd=base,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            notes = (
+                marker.read_text(encoding="utf-8").splitlines()
+                if marker.exists()
+                else []
+            )
+        detail = f"{mode} notes {notes}\n{process.stdout}{process.stderr}"
+        self.assertNotIn("Traceback", process.stdout + process.stderr, detail)
+        self.assertIn("done", notes, detail)
+        return notes
+
+    def test_every_required_guard_line_runs(
+        self: StopPhaseInjectionTests,
+    ) -> None:
+        """Every guard line this class must reach is reached by some case.
+
+        The clean run covers the lines a normal end takes. The error-path
+        cases cover the branches a clean run never takes. The cleanup entry
+        and the final exit are named markers, because neither is a line event
+        inside a traced function.
+        """
+        reached: set[tuple[str, int]] = set()
+        markers: set[str] = set()
+        for entry in ("normal", "selftest"):
+            for keep in (False, True):
+                _, notes, output, _ = self.run_driver(
+                    entry, keep, "none", "SIGINT", "SIGTERM"
+                )
+                self.assertTrue(notes, output)
+                reached.update(self.lines_from(notes))
+                markers.update(notes)
+        for mode in (
+            "off-thread",
+            "install-getsignal-error",
+            "install-signal-error",
+            "install-interrupt",
+            "install-interrupt-custom",
+            "record-interrupt-error",
+            "restore-interrupt",
+            "restore-signal-error",
+            "restore-failure",
+            "restore-skip",
+            "flush-error",
+            "stop-if-pending",
+        ):
+            reached.update(self.lines_from(self.run_error_driver(mode)))
+        missing = [
+            f"{function}:{guard_line(function, anchor, occurrence)} {anchor}"
+            for function, anchor, occurrence in REQUIRED_GUARD_LINES
+            if (function, guard_line(function, anchor, occurrence)) not in reached
+        ]
+        self.assertEqual(
+            missing, [], "the class test never reached these guard lines"
+        )
+        self.assertIn(
+            ("_finish_run", 0), reached, "the class test never reached the cleanup entry"
+        )
+        # The final exit is a named marker. It runs only when a stop arrives
+        # after the CLI path sets the final phase, so this case injects at the
+        # line that follows that assignment.
+        _, notes, output, _ = self.run_driver(
+            "normal", True, "none", "SIGINT", "SIGTERM"
+        )
+        seen = [
+            (line[5:].partition(":")[0], int(line[5:].partition(":")[2]))
+            for line in notes
+            if line.startswith("line ")
+        ]
+        final = ("_end_run", guard_line("_end_run", "guard.stop_if_pending()", 0))
+        self.assertIn(final, seen, output)
+        _, notes, output, _ = self.run_driver(
+            "normal", True, f"line:{seen.index(final)}", "SIGINT", "SIGTERM"
+        )
+        markers.update(notes)
+        self.assertIn(
+            "os._exit 130",
+            markers,
+            "the class test never reached the final exit",
+        )
 
 
 CLEANUP_WATCH_SECONDS = 6.0
