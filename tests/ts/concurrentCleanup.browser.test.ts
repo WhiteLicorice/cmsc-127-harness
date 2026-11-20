@@ -4,16 +4,15 @@ import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-// Two cleanups can overlap. A reload starts one, and a second reload starts
-// another before the first ends. The first reads the cache list. The second
-// deletes an expired snapshot under its lock. The first then opens the missing
-// name. An open outside the lock plants an empty cache, and the next pass keeps
-// an empty cache because an install opens its snapshot before it writes its
-// record.
+// Two cleanups can overlap. A reload starts one. A second reload starts another
+// before the first ends. The first reads the cache list. A second pass deletes
+// an expired snapshot under its lock. The first then opens the missing cache.
+// An open outside the lock plants an empty cache. A later pass keeps an empty
+// cache because an install opens its snapshot before it writes its record.
 //
-// The test pauses the first cleanup one step after its list. The pause stands
-// in for a slow list. The second cleanup runs to its end in that window, then
-// the first finishes, and a third pass shows what the first left behind.
+// The test pauses the first cleanup one step after its list. That pause stands
+// in for a slow list. A second cleanup runs to its end in the window. The first
+// then finishes. A third pass shows what the first left behind.
 
 const root = resolve(import.meta.dirname, "../..");
 const fixtureRoot = resolve(root, ".vitest/concurrent-cleanup");
@@ -76,9 +75,9 @@ async function snapshotName(build: Build): Promise<string> {
 }
 
 // Pause the cleanup one step after its cache list, and before it acts on the
-// names. Every CacheStorage call still runs in Chromium. The server decides
-// when that step can continue. The request carries a counter, because Chromium
-// holds a second request to the same URL behind the first.
+// list. Every CacheStorage call still runs in Chromium. The test server
+// releases that step. The request carries a counter, because Chromium holds a
+// second request to the same URL behind the first.
 //
 // The last line of the cleanup reports that the pass ended, so the test can
 // wait for the activation pass before it starts its own.
@@ -272,8 +271,8 @@ describe("two cleanups that overlap", () => {
       return answer;
     }, names);
 
-    // State the defect in the failure message: the first cleanup planted the
-    // snapshot that the second cleanup deleted, and the third pass kept it.
+    // State the defect in the failure message. The first cleanup planted the
+    // snapshot that the second cleanup deleted. The third pass kept it.
     expect({ kept: names.includes(orphan), empty }).toEqual({ kept: false, empty: [] });
     expect(names).toContain(active);
     expect(errors).toEqual([]);

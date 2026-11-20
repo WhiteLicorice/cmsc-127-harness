@@ -227,7 +227,7 @@ class ScanningCaches extends FakeCaches {
 
   // The hook runs after the answer is known and before the caller acts on it.
   // A test can delete the snapshot in that window. The stack comes from the
-  // caller, so the hook can tell which step asked.
+  // caller. The hook then knows which step asked.
   override async has(name: string): Promise<boolean> {
     const stack = new Error().stack ?? "";
     const answer = await super.has(name);
@@ -725,11 +725,12 @@ describe("offline worker activation", () => {
   });
 
   it("does not plant a snapshot that another cleanup deletes during the scan", async () => {
-    // Two cleanups overlap. The first reads the cache list. The second deletes
-    // an expired snapshot under its lock. The first then opens the missing
-    // name. An open outside the lock plants an empty cache, and the next pass
-    // keeps an empty cache because an install opens its snapshot before it
-    // writes its record.
+    // A reload starts one cleanup. A second reload starts another before the
+    // first ends. The first reads the cache list. The second deletes an expired
+    // snapshot under its lock. The first then opens the missing cache. An open
+    // outside the lock plants an empty cache. The next pass keeps an empty
+    // cache because an install opens its snapshot before it writes its
+    // record.
     const active = "d".repeat(64);
     const orphan = "e".repeat(64);
     const caches = new ScanningCaches();
@@ -767,7 +768,7 @@ describe("offline worker activation", () => {
     // A navigation drops the record of the document it replaces. The record
     // delete checks that the snapshot exists, then opens it. A cleanup in
     // another worker can delete the snapshot between those two steps. The open
-    // then plants an empty cache, and the next pass keeps it.
+    // then plants an empty cache. The next pass keeps it.
     const build = "f".repeat(64);
     const retired = "1".repeat(64);
     const caches = new ScanningCaches();
