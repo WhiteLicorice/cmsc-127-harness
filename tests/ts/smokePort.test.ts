@@ -4,10 +4,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// The smoke scripts start the harness server on a port of their own. Two gates
-// on one host must each reserve their own port, so each script passes an
-// explicit port through from its own environment and keeps its old value as the
-// default.
+// The smoke scripts start the harness server on a port of their own. A gate
+// that runs beside another gate must reserve its own port, so each script
+// passes an explicit port through from its own environment and keeps its old
+// value as the default.
 //
 // Each case runs the script with a recorder in front of child_process. The
 // recorder answers the fixture SQL, writes the port that the script asked its
