@@ -155,6 +155,48 @@ async function waitForCache(page: Page, name: string): Promise<void> {
   throw new Error(`The snapshot ${name} never appeared.`);
 }
 
+type ControllerState = {
+  installing: string | null;
+  waiting: string | null;
+  active: string | null;
+  controller: string | null;
+  same: boolean;
+};
+
+// The install finishes when no install or wait sits in the registration. That
+// is not enough. Chromium can report both as null while the controller is
+// still activating. The offline navigation then reads the old build. Wait for
+// the controller to be the active worker and to have finished activating. The
+// states seen on the way are kept, so a later failure shows the order.
+async function waitForActivatedController(page: Page): Promise<void> {
+  const seen: string[] = [];
+  for (let step = 0; step < 200; step += 1) {
+    const state = await page.evaluate(async (): Promise<ControllerState> => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const controller = navigator.serviceWorker.controller;
+      return {
+        installing: registration?.installing?.state ?? null,
+        waiting: registration?.waiting?.state ?? null,
+        active: registration?.active?.state ?? null,
+        controller: controller?.state ?? null,
+        same: controller !== null && controller === registration?.active,
+      };
+    });
+    seen.push(JSON.stringify(state));
+    if (
+      state.installing === null
+      && state.waiting === null
+      && state.active === "activated"
+      && state.controller === "activated"
+      && state.same
+    ) {
+      return;
+    }
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`The new controller never finished activating. States: ${seen.join(" ")}`);
+}
+
 describe("a reload while a new build downloads", () => {
   it("keeps the new snapshot and serves it offline", async () => {
     const context = await browser.newContext();
@@ -191,16 +233,10 @@ describe("a reload while a new build downloads", () => {
 
     releaseApp();
     const cacheB = await snapshotName(buildB);
-    // The install finishes. Its activation ends when no install or wait sits
-    // in the registration, whether or not its snapshot survived.
-    await page.waitForFunction(
-      async () => {
-        const registration = await navigator.serviceWorker.getRegistration();
-        return registration?.waiting === null && registration?.installing === null;
-      },
-      undefined,
-      { timeout: 20_000 },
-    );
+    // The install finishes, then its activation ends. The offline navigation
+    // must read the new build. Wait until the new controller has finished
+    // activating. An idle-looking registration can pass before that point.
+    await waitForActivatedController(page);
     const kept = await caches(page);
 
     // Offline. The next navigation must read the snapshot that build B filled.
