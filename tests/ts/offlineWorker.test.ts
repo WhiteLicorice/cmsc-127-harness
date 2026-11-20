@@ -147,6 +147,129 @@ class FakeCaches {
   async keys(): Promise<string[]> {
     return [...this.caches.keys()];
   }
+
+  async has(name: string): Promise<boolean> {
+    return this.caches.has(name);
+  }
+
+  // A named read answers from that cache only, and it never creates one.
+  async match(
+    key: string | { url: string },
+    options?: { cacheName?: string },
+  ): Promise<Response | undefined> {
+    const name = options?.cacheName;
+    if (name !== undefined) return this.caches.get(name)?.match(key);
+    for (const cache of this.caches.values()) {
+      const found = await cache.match(key);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+}
+
+// The lock API of a worker. A test can hold a name before a step asks for it.
+class FakeLocks {
+  private readonly held = new Set<string>();
+
+  hold(name: string): void {
+    this.held.add(name);
+  }
+
+  release(name: string): void {
+    this.held.delete(name);
+  }
+
+  async request(
+    name: string,
+    optionsOrStep: { ifAvailable?: boolean } | ((lock: unknown) => Promise<unknown>),
+    maybeStep?: (lock: unknown) => Promise<unknown>,
+  ): Promise<unknown> {
+    const options = typeof optionsOrStep === "function" ? {} : optionsOrStep;
+    const step = (typeof optionsOrStep === "function" ? optionsOrStep : maybeStep) as
+      (lock: unknown) => Promise<unknown>;
+    if (options.ifAvailable && this.held.has(name)) return step(null);
+    this.held.add(name);
+    try {
+      return await step({ name });
+    } finally {
+      this.held.delete(name);
+    }
+  }
+}
+
+type Gate = { wait: Promise<void>; open: () => void };
+
+function gate(): Gate {
+  let open: () => void = () => undefined;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
+// A cache list that reports the names it held before a hook runs. A hook can
+// delete a snapshot or start an install in that window.
+class ScanningCaches extends FakeCaches {
+  onScan: ((stack: string) => Promise<void>) | undefined;
+  onOpen: ((name: string, stack: string) => Promise<void>) | undefined;
+
+  override async keys(): Promise<string[]> {
+    const names = [...this.caches.keys()];
+    await this.onScan?.(new Error().stack ?? "");
+    return names;
+  }
+
+  override async open(name: string): Promise<FakeCache> {
+    await this.onOpen?.(name, new Error().stack ?? "");
+    return super.open(name);
+  }
+}
+
+// A snapshot that holds its record write until the test releases it. The test
+// then chooses where the cleanup meets that write.
+class GatedCache extends FakeCache {
+  recordWrite: Gate | undefined;
+  recordRelease: Gate | undefined;
+  recordStored: Gate | undefined;
+  onRecordRead: (() => Promise<void>) | undefined;
+
+  override async put(key: string | { url: string }, response: Response): Promise<void> {
+    const release = this.recordRelease;
+    if (release === undefined || !cacheKey(key).endsWith("/__building__")) {
+      await super.put(key, response);
+      return;
+    }
+    this.recordRelease = undefined;
+    this.recordWrite?.open();
+    await release.wait;
+    await super.put(key, response);
+    this.recordStored?.open();
+  }
+
+  override async match(key: string | { url: string }): Promise<Response | undefined> {
+    const answer = await super.match(key);
+    const hook = this.onRecordRead;
+    if (hook !== undefined && cacheKey(key).endsWith("/__building__")) {
+      this.onRecordRead = undefined;
+      await hook();
+    }
+    return answer;
+  }
+}
+
+// Hands every new snapshot to the test, which sets its gates before the first
+// write reaches them.
+class GatedCaches extends ScanningCaches {
+  prepare: ((cache: GatedCache) => void) | undefined;
+
+  override async open(name: string): Promise<GatedCache> {
+    const known = this.caches.get(name);
+    if (known !== undefined) return known as GatedCache;
+    const cache = new GatedCache(name);
+    this.caches.set(name, cache);
+    this.prepare?.(cache);
+    return cache;
+  }
 }
 
 class FakeTimers {
@@ -184,6 +307,7 @@ type WorkerOptions = {
   fetch: (input: never, init?: never) => Promise<Response>;
   caches?: FakeCaches;
   timers?: FakeTimers;
+  locks?: FakeLocks;
   source?: string;
   clientIds?: string[];
 };
@@ -192,12 +316,14 @@ function createWorker(options: WorkerOptions) {
   const caches = options.caches ?? new FakeCaches();
   const timers = options.timers ?? new FakeTimers();
   const listeners = new Map<string, (event: Record<string, unknown>) => void>();
+  const pending: unknown[] = [];
   let claimed = 0;
   let skipped = 0;
   let unregistered = 0;
   let live = [...(options.clientIds ?? [])];
   const self = {
     location: new URL(scope),
+    navigator: options.locks === undefined ? {} : { locks: options.locks },
     registration: {
       scope,
       unregister: async () => {
@@ -258,6 +384,9 @@ function createWorker(options: WorkerOptions) {
       request,
       clientId: "",
       ...extra,
+      waitUntil: (promise: unknown) => {
+        pending.push(promise);
+      },
       respondWith: (response: Promise<Response>) => {
         answered = response;
       },
@@ -270,6 +399,11 @@ function createWorker(options: WorkerOptions) {
     timers,
     dispatch,
     dispatchFetch,
+    // Wait for the work that a fetch event handed to waitUntil.
+    async settle(): Promise<void> {
+      await Promise.all(pending);
+      pending.length = 0;
+    },
     install: () => dispatch("install"),
     activate: () => dispatch("activate"),
     get skipped() {
@@ -447,6 +581,181 @@ describe("offline worker activation", () => {
     await first.activate();
 
     expect(await first.names()).toContain(`cmsc127-harness-${opening}`);
+  });
+
+  it("keeps a snapshot that an install opens after the cache list", async () => {
+    // The cleanup reads the cache list, then an install opens its snapshot. A
+    // cleanup that reads the list again for its deletes meets a name that it
+    // never classified, and removes a live install.
+    const active = "5".repeat(64);
+    const opening = "6".repeat(64);
+    const caches = new ScanningCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+    let started = false;
+    caches.onScan = async (stack) => {
+      if (started || !stack.includes("deleteUnusedSnapshots")) return;
+      started = true;
+      const cache = await caches.open(`cmsc127-harness-${opening}`);
+      await cache.put(`${scope}__building__`, new Response(String(Date.now())));
+    };
+
+    await first.activate();
+
+    expect(await first.names()).toContain(`cmsc127-harness-${opening}`);
+  });
+
+  it("keeps a snapshot whose record arrives after the cleanup reads it", async () => {
+    // The cleanup reads the building record before the install writes it, then
+    // reads the cache as non-empty. The snapshot has no manifest yet, so a
+    // cleanup that trusts that order deletes a live install.
+    const active = "3".repeat(64);
+    const next = "4".repeat(64);
+    const caches = new GatedCaches();
+    const first = createWorker({ buildId: active, fetch: siteFetch(active).fetch as never, caches });
+    await first.install();
+
+    const recordWrite = gate();
+    const recordRelease = gate();
+    const recordStored = gate();
+    caches.prepare = (cache) => {
+      if (!cache.name.endsWith(next)) return;
+      cache.recordWrite = recordWrite;
+      cache.recordRelease = recordRelease;
+      cache.recordStored = recordStored;
+    };
+    const worker = createWorker({ buildId: next, fetch: siteFetch(next).fetch as never, caches });
+    const installing = worker.install();
+    await recordWrite.wait;
+
+    // The record is the first write of the install. The cleanup reads it, then
+    // the write lands before the empty check.
+    const cache = await caches.open(`cmsc127-harness-${next}`);
+    let released = false;
+    cache.onRecordRead = async () => {
+      released = true;
+      recordRelease.open();
+      await recordStored.wait;
+    };
+    await first.activate();
+    if (!released) recordRelease.open();
+    await recordStored.wait;
+    await installing;
+
+    expect(await first.names()).toContain(`cmsc127-harness-${next}`);
+  });
+
+  it("skips a snapshot whose lock an install holds", async () => {
+    // The lock keeps a delete apart from an install that fills the same cache.
+    // A snapshot with files and no manifest looks like a stopped install, so
+    // only the lock tells the two apart.
+    const active = "9".repeat(64);
+    const next = "a".repeat(64);
+    const caches = new FakeCaches();
+    const locks = new FakeLocks();
+    const first = createWorker({
+      buildId: active,
+      fetch: siteFetch(active).fetch as never,
+      caches,
+      locks,
+    });
+    await first.install();
+    await (await caches.open(`cmsc127-harness-${next}`)).put(`${scope}app.js`, new Response("part"));
+    locks.hold(`cmsc127-harness-${next}-lock`);
+
+    await first.activate();
+
+    expect(await first.names()).toContain(`cmsc127-harness-${next}`);
+
+    locks.release(`cmsc127-harness-${next}-lock`);
+    await first.activate();
+
+    expect(await first.names()).toEqual([`cmsc127-harness-${active}`]);
+  });
+
+  it("does not plant a snapshot that another worker deletes during a read", async () => {
+    // A read opens the snapshot to answer a file. A cleanup in another worker
+    // can remove that snapshot first. The read must not create it again.
+    const build = "7".repeat(64);
+    const caches = new ScanningCaches();
+    const worker = createWorker({ buildId: build, fetch: siteFetch(build).fetch as never, caches });
+    await worker.install();
+    let deleted = false;
+    caches.onScan = async (stack) => {
+      if (deleted || !stack.includes("buildFor")) return;
+      deleted = true;
+      await caches.delete(`cmsc127-harness-${build}`);
+    };
+
+    const response = await worker.dispatchFetch(new Request(`${scope}app.js`), { clientId: "tab" });
+
+    expect(await response?.text()).toBe(PAGE["app.js"]);
+    expect(await worker.names()).toEqual([]);
+  });
+
+  it("does not plant a snapshot that another worker deletes during a record delete", async () => {
+    // A navigation drops the record of the document it replaces. A cleanup can
+    // remove that snapshot first. The record delete must not create it again.
+    const build = "8".repeat(64);
+    const caches = new ScanningCaches();
+    const worker = createWorker({ buildId: build, fetch: siteFetch(build).fetch as never, caches });
+    await worker.install();
+    let deleted = false;
+    caches.onScan = async (stack) => {
+      if (deleted || !stack.includes("forgetBuild")) return;
+      deleted = true;
+      await caches.delete(`cmsc127-harness-${build}`);
+    };
+
+    await worker.dispatchFetch(navigate(scope), { clientId: "old", resultingClientId: "new" });
+    await worker.settle();
+
+    expect(await worker.names()).toEqual([]);
+  });
+
+  it("keeps a snapshot that another install completes while this one fails", async () => {
+    // The install reads the cache list before it opens its snapshot. Another
+    // worker can complete that snapshot in that window. A failed install must
+    // not remove a snapshot that carries a manifest.
+    const build = "b".repeat(64);
+    const caches = new ScanningCaches();
+    let seeded = false;
+    caches.onOpen = async (name) => {
+      if (seeded || name !== `cmsc127-harness-${build}`) return;
+      seeded = true;
+      const cache = await caches.open(name);
+      await cache.put(`${scope}offline-manifest.json`, new Response(JSON.stringify(manifestFor(build))));
+    };
+    const broken = manifestFor(build, PAGE, { "app.js": "0".repeat(64) });
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build, {}, broken).fetch as never,
+      caches,
+    });
+
+    await expect(worker.install()).rejects.toThrow(/hash/i);
+
+    expect(await worker.names()).toEqual([`cmsc127-harness-${build}`]);
+  });
+
+  it("keeps a complete snapshot when a later install of the same build fails", async () => {
+    // A snapshot with a manifest answers documents. A failed install must not
+    // remove it, even when this install did not create it.
+    const build = "c".repeat(64);
+    const caches = new FakeCaches();
+    await createWorker({ buildId: build, fetch: siteFetch(build).fetch as never, caches }).install();
+    const cache = await caches.open(`cmsc127-harness-${build}`);
+    await cache.delete(`${scope}app.js`);
+    const broken = manifestFor(build, PAGE, { "app.js": "0".repeat(64) });
+    const worker = createWorker({
+      buildId: build,
+      fetch: siteFetch(build, {}, broken).fetch as never,
+      caches,
+    });
+
+    await expect(worker.install()).rejects.toThrow(/hash/i);
+
+    expect(await worker.names()).toEqual([`cmsc127-harness-${build}`]);
   });
 });
 

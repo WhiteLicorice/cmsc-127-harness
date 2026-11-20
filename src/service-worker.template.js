@@ -40,6 +40,38 @@ function buildOf(name) {
   return /^[0-9a-f]{64}$/.test(buildId) ? buildId : null;
 }
 
+// The lock of one snapshot. An install holds it while it fills the snapshot.
+// A cleanup holds it while it deletes. The two steps then never meet on one
+// cache.
+function snapshotLock(name) {
+  return `${name}-lock`;
+}
+
+// Run a step while this worker holds the lock of one snapshot. A browser
+// without the lock API runs the step without a lock.
+async function holdSnapshot(name, step) {
+  const locks = self.navigator?.locks;
+  if (!locks) return step();
+  return locks.request(snapshotLock(name), step);
+}
+
+// Run a step only when no other worker holds the lock of one snapshot. The
+// answer is false when the lock is busy, so a cleanup never waits.
+async function holdSnapshotIfFree(name, step) {
+  const locks = self.navigator?.locks;
+  if (!locks) {
+    await step();
+    return true;
+  }
+  let ran = false;
+  await locks.request(snapshotLock(name), { ifAvailable: true }, async (lock) => {
+    if (lock === null) return;
+    ran = true;
+    await step();
+  });
+  return ran;
+}
+
 function scoped(path) {
   return new URL(path, self.registration.scope);
 }
@@ -103,7 +135,12 @@ async function snapshotIsComplete(cache, manifest) {
 
 async function installSnapshot() {
   const cacheName = snapshotCacheName();
-  const existed = (await caches.keys()).includes(cacheName);
+  // Hold the lock of this snapshot while it fills. A cleanup in another worker
+  // takes the same lock before it deletes, so it never removes this snapshot.
+  await holdSnapshot(cacheName, () => fillSnapshot(cacheName));
+}
+
+async function fillSnapshot(cacheName) {
   const cache = await caches.open(cacheName);
   try {
     // An active worker can run its cleanup while this install works. The
@@ -147,7 +184,7 @@ async function installSnapshot() {
     // This install holds no snapshot now. Clear its record, then remove a
     // snapshot that no document can read. The active snapshot stays.
     await cache.delete(requestFor(scoped(BUILDING_PATH))).catch(() => undefined);
-    if (!existed || !(await holdsManifest(cache))) {
+    if (!(await holdsManifest(cache))) {
       await caches.delete(cacheName).catch(() => undefined);
     }
     throw error;
@@ -168,8 +205,14 @@ async function holdsManifest(cache) {
 // empty one, which a later failed install would then keep.
 async function existingSnapshot(buildId) {
   const name = snapshotCacheName(buildId);
-  if (!(await caches.keys()).includes(name)) return null;
+  if (!(await caches.has(name))) return null;
   return caches.open(name);
+}
+
+// Read one file from one snapshot without opening the cache. Opening a missing
+// cache would plant an empty one.
+async function snapshotMatch(buildId, request) {
+  return caches.match(request, { cacheName: snapshotCacheName(buildId) });
 }
 
 function clientKey(clientId) {
@@ -200,6 +243,9 @@ async function forgetBuild(clientId) {
   try {
     for (const name of await caches.keys()) {
       if (buildOf(name) === null) continue;
+      // A cleanup can remove the snapshot after the list. A write needs a
+      // handle, so check the name again before the open plants a cache.
+      if (!(await caches.has(name))) continue;
       const cache = await caches.open(name);
       await cache.delete(requestFor(clientKey(clientId)));
     }
@@ -213,8 +259,7 @@ async function buildFor(clientId) {
   try {
     for (const name of await caches.keys()) {
       if (buildOf(name) === null) continue;
-      const cache = await caches.open(name);
-      if (await cache.match(requestFor(clientKey(clientId)))) return buildOf(name);
+      if (await snapshotMatch(buildOf(name), requestFor(clientKey(clientId)))) return buildOf(name);
     }
   } catch {
     return null;
@@ -251,9 +296,14 @@ async function adoptClients() {
 // stays for the grace period, because the navigation that wrote it may still be
 // in flight. A snapshot with a fresh building record is still being filled, and
 // it stays too.
+//
+// One scan decides what to delete. A snapshot that an install opens after that
+// scan is not in the list, so the cleanup never meets it. The delete then runs
+// under the lock of the snapshot, which keeps it apart from an install that
+// fills the same cache.
 async function deleteUnusedSnapshots() {
   const current = snapshotCacheName();
-  const keep = new Set([current]);
+  const unused = [];
   try {
     const live = await liveClientIds();
     const now = Date.now();
@@ -265,31 +315,41 @@ async function deleteUnusedSnapshots() {
         await pruneClientRecords(cache, live, now);
         continue;
       }
-      // An install in another worker fills this snapshot. Its own activation
-      // clears the record, so a fresh record means the build is not retired.
-      if (await buildingNow(cache, now)) {
-        keep.add(name);
-        continue;
-      }
-      // An install opens its snapshot before it writes the record. An empty
-      // snapshot is that moment, or a cheap leftover, so it stays.
-      if (await isEmpty(cache)) {
-        keep.add(name);
-        continue;
-      }
-      // A snapshot with files and no manifest is an install that stopped. No
-      // document can read it.
-      if (!(await holdsManifest(cache))) continue;
-      if (await pruneClientRecords(cache, live, now)) keep.add(name);
+      if (await snapshotIsUnused(cache, live, now)) unused.push(name);
     }
   } catch {
     // A client list can fail. Keep the older snapshots rather than risk a
     // half-loaded page, and try again at the next pass.
     return;
   }
-  await Promise.all((await caches.keys())
-    .filter((name) => buildOf(name) !== null && !keep.has(name))
-    .map((name) => caches.delete(name)));
+  await Promise.all(unused.map((name) => deleteSnapshot(name)));
+}
+
+// True when no document reads this snapshot and no install fills it. The empty
+// check comes first because an install opens its snapshot before it writes the
+// record. A snapshot with files and no manifest is an install that stopped. No
+// document can read it.
+async function snapshotIsUnused(cache, live, now) {
+  if (await isEmpty(cache)) return false;
+  if (await buildingNow(cache, now)) return false;
+  if (!(await holdsManifest(cache))) return true;
+  return !(await pruneClientRecords(cache, live, now));
+}
+
+// Delete one snapshot that the scan found unused. The lock keeps this delete
+// apart from an install that fills the same cache. The test runs again under
+// the lock because an install can start between the scan and this step.
+async function deleteSnapshot(name) {
+  await holdSnapshotIfFree(name, async () => {
+    try {
+      const cache = await existingSnapshot(buildOf(name));
+      if (cache === null) return;
+      if (!(await snapshotIsUnused(cache, await liveClientIds(), Date.now()))) return;
+      await caches.delete(name);
+    } catch {
+      // A failed check keeps the snapshot. The next pass tries again.
+    }
+  });
 }
 
 async function isEmpty(cache) {
@@ -344,8 +404,7 @@ function offlineResponse(status, text) {
 
 async function cachedPage(buildId = OFFLINE_BUILD_ID) {
   try {
-    const cache = await existingSnapshot(buildId);
-    return cache === null ? undefined : await cache.match(requestFor(scoped(PAGE_PATH)));
+    return await snapshotMatch(buildId, requestFor(scoped(PAGE_PATH)));
   } catch {
     return undefined;
   }
@@ -366,9 +425,7 @@ async function pageForActiveBuild(response) {
   // answers with the cached page.
   const networkBody = await response.clone().arrayBuffer();
   try {
-    const cache = await existingSnapshot(OFFLINE_BUILD_ID);
-    if (cache === null) return response;
-    const active = await cache.match(requestFor(scoped(PAGE_PATH)));
+    const active = await snapshotMatch(OFFLINE_BUILD_ID, requestFor(scoped(PAGE_PATH)));
     if (!active) return response;
     const [networkHash, activeHash] = await Promise.all([
       sha256(networkBody),
@@ -438,8 +495,8 @@ function answersRequest(request) {
 async function handleAsset(event) {
   const { request } = event;
   try {
-    const cache = await existingSnapshot((await buildFor(event.clientId)) ?? OFFLINE_BUILD_ID);
-    const cached = cache === null ? undefined : await cache.match(request);
+    const buildId = (await buildFor(event.clientId)) ?? OFFLINE_BUILD_ID;
+    const cached = await snapshotMatch(buildId, request);
     if (cached) return cached;
     return await fetch(request);
   } catch {
