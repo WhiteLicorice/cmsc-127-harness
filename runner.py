@@ -1679,6 +1679,17 @@ class _StopGuard:
         # The time of that first signal also starts the stop budget, so a stop
         # that arrives late in a normal wait still gets its own budget instead
         # of what is left of the normal one.
+        #
+        # Documented tool gap. A second stop that arrives while this handler
+        # is being entered records itself first. CPython runs a pending
+        # handler at the entry check point of the handler that is already
+        # running, before any statement of that handler, so no statement here
+        # can run first. CPython also runs pending handlers in signal-number
+        # order. A nested stop therefore sets the exit code from the lower
+        # signal number.
+        # The run stays safe. It ends with one of the two codes, prints no
+        # traceback, and drops its scratch database. NestedStopTests checks
+        # those three facts on both entry paths.
         if self.pending is None:
             self.pending = signum
             self.stopped_at = time.monotonic()
@@ -1870,34 +1881,59 @@ class _StopGuard:
         self.phase = "body"
 
     def restore(self) -> None:
-        """Put back every handler that install replaced.
+        """Put back every handler that install replaced, then replay the stop.
 
-        The caller replays the stop after this returns. A stop that arrives
-        while the handlers change is recorded and returns, so the loop always
-        finishes and no guard handler stays behind.
+        SIGINT goes back last, after every other handler is back. A Ctrl+C
+        that arrives between the replacements then still reaches the guard's
+        handler, which records it and returns, so the loop finishes and every
+        handler comes back.
+
+        The replay of the first recorded stop is built before the SIGINT
+        handler goes back, so nothing but the replay follows it. A Ctrl+C
+        after that point runs the caller's own handler. That is the settled
+        contract.
 
         A default Ctrl+C handler that comes back mid-loop raises
-        KeyboardInterrupt instead of recording. That signal is recorded here,
-        so the caller's replay still reports it. The second call then puts the
-        handler back. The loop finishes.
-
-        A stop that arrives after the loop does what the caller's own handler
-        says. That is the caller's choice. This method does not change it.
+        KeyboardInterrupt. That signal is recorded here, so the replay still
+        reports it. The second call then puts the handler back. The loop
+        finishes.
         """
         self._remove_console_handler()
-        for number, handler in list(self.previous.items()):
-            for _ in range(2):
-                try:
-                    signal.signal(number, handler)
-                except KeyboardInterrupt:
-                    if self.pending is None:
-                        self.pending = signal.SIGINT
-                        self.stopped_at = time.monotonic()
-                    continue
-                except (OSError, ValueError):
-                    pass
-                break
-            self.previous.pop(number, None)
+        for number in [n for n in self.previous if n != signal.SIGINT]:
+            self._restore_handler(number)
+        # Build the replay before the SIGINT handler goes back, so nothing but
+        # the replay follows it.
+        replay = None if self.pending is None else SystemExit(128 + self.pending)
+        if signal.SIGINT in self.previous:
+            self._restore_handler(signal.SIGINT)
+        # The loop reads the record again at the raise. A stop that arrives
+        # between the check and the raise still sets the exit. A stop that
+        # arrived during the SIGINT restore is replayed here.
+        while self.pending is not None:
+            if replay is None:
+                replay = SystemExit(128 + self.pending)
+            raise replay
+
+    def _restore_handler(self, number: int) -> None:
+        """Put one previous handler back, and retry a Ctrl+C once.
+
+        A default Ctrl+C handler that comes back mid-loop raises
+        KeyboardInterrupt. That signal is recorded here, so the replay still
+        reports it. The second call then puts the handler back.
+        """
+        handler = self.previous[number]
+        for _ in range(2):
+            try:
+                signal.signal(number, handler)
+            except KeyboardInterrupt:
+                if self.pending is None:
+                    self.pending = signal.SIGINT
+                    self.stopped_at = time.monotonic()
+                continue
+            except (OSError, ValueError):
+                pass
+            break
+        self.previous.pop(number, None)
 
     def _install_console_handler(self) -> None:
         """Register the Windows console control handler. Windows only."""
@@ -1944,9 +1980,14 @@ class _StopGuard:
 def _finish_run(guard: _StopGuard, name: str, admin: _DbConnection | None) -> bool:
     """Drop the scratch database on the way out. Report a failed drop.
 
-    The phase moves to cleanup first, so a stop that arrives during the drop
-    is recorded and returns. The drop then finishes. The caller replays the
-    stop after it chooses its exit status.
+    The caller moves the phase to cleanup as the first statement of its
+    finally, before this call. A stop that arrives at this function's entry
+    then finds the cleanup phase, so the handler records it and returns, and
+    the drop still runs. The assignment below repeats that move, so a direct
+    caller gets the same rule.
+
+    A stop that arrives during the drop is recorded and returns. The drop then
+    finishes. The caller replays the stop after it chooses its exit status.
 
     A stop signal that arrived during the run ends it with its own code after
     the cleanup. The drop keeps the short budget on that path, counted from
@@ -2006,7 +2047,9 @@ def _end_run(guard: _StopGuard, code: int, keep_guard: bool) -> int:
     The library path gives every previous handler back before the stop
     replays, so a caller that catches the stop gets a live interpreter with
     its own handlers. The phase moves to cleanup first, so a stop during the
-    restore is recorded and the loop finishes.
+    restore is recorded and the loop finishes. restore replays the first
+    recorded stop as its last act, so this method returns only when no stop
+    is recorded.
     """
     if keep_guard:
         for stream in (sys.stdout, sys.stderr):
@@ -2018,12 +2061,13 @@ def _end_run(guard: _StopGuard, code: int, keep_guard: bool) -> int:
         guard.stop_if_pending()
         return code
     guard.phase = "cleanup"
-    guard.restore()
     try:
+        guard.restore()
         return code
     finally:
-        # The replay is the last act of the library path, so a stop recorded
-        # after the restore still sets the exit.
+        # restore replays the first recorded stop as its last act. This check
+        # covers a stop that arrives after restore returns, before the caller
+        # gets its status back.
         guard.stop_if_pending()
 
 
@@ -2621,7 +2665,7 @@ def _design_rows(
 
 
 def _document_file(root: Path, case: Mapping[str, object]) -> str | None:
-    """The file a document case checks, or None when the case cannot be read."""
+    """The file a document case checks, or None."""
     try:
         body = _as_object(_read_json(_case_file(root, case)), "document case")
     except (OSError, ValueError):
@@ -4293,8 +4337,18 @@ def _run_self_test(base_url: str, guard: _StopGuard) -> int:
         print(f"Self-test setup failed. {detail}.")
         code = 1
     finally:
-        if not _finish_run(guard, name, admin):
-            code = 1
+        # The phase moves here, in this frame, before any call. A stop that
+        # arrives at the entry of _finish_run then finds the cleanup phase.
+        # The handler records it and returns. The drop still runs.
+        guard.phase = "cleanup"
+        try:
+            if not _finish_run(guard, name, admin):
+                code = 1
+        except BaseException:
+            # A stop that arrives before the phase moves unwinds through this
+            # call. The database must still go, so drop it and re-raise.
+            _finish_run(guard, name, admin)
+            raise
     return code
 
 
@@ -4504,8 +4558,18 @@ def _run_stage(
         print(f"Runner setup failed. {detail}.")
         return 1
     finally:
-        if not _finish_run(guard, database_name, admin):
-            cleanup_failed = True
+        # The phase moves here, in this frame, before any call. A stop that
+        # arrives at the entry of _finish_run then finds the cleanup phase.
+        # The handler records it and returns. The drop still runs.
+        guard.phase = "cleanup"
+        try:
+            if not _finish_run(guard, database_name, admin):
+                cleanup_failed = True
+        except BaseException:
+            # A stop that arrives before the phase moves unwinds through this
+            # call. The database must still go, so drop it and re-raise.
+            _finish_run(guard, database_name, admin)
+            raise
     if cleanup_failed:
         return 1
     skipped = manifest.get("skips", [])

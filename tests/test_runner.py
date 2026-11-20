@@ -3505,7 +3505,15 @@ sys.path.insert(0, str(HARNESS))
 import psycopg
 import runner
 
-SENT = {"child-run": 0}
+SENT = {"child-run": 0, "nested": 0}
+# The stop signals this platform has, and the handlers that were in place
+# before the run. The tail reports which of them came back.
+STOP_NUMBERS = [
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
+    if hasattr(signal, name)
+]
+ORIGINAL = {number: signal.getsignal(number) for number in STOP_NUMBERS}
 REPORT_POINTS = ("report", "selftest-report")
 # The points that send the first stop signal at the boundary where the guard
 # puts the old handlers back. The last check for a held signal runs before
@@ -3527,6 +3535,16 @@ MIXED_RESTORE_POINTS = (
     "console-mixed-restore",
     "selftest-console-mixed-restore",
 )
+# The point that sends the stop at the entry of _finish_run, before its first
+# statement. The phase is still body there, so a stop at that boundary used to
+# skip the drop.
+FINISH_POINTS = ("finish", "selftest-finish")
+# The point that latches the first stop, then delivers Ctrl+C between the
+# handler replacements. SIGINT must go back last, so the Ctrl+C still reaches
+# the guard's handler.
+BETWEEN_POINTS = ("restore-between", "selftest-restore-between")
+# The point that nests a second stop at the entry of the first stop's handler.
+NESTED_POINTS = ("nested", "selftest-nested")
 # The console stop that this run delivers, as the name of a Python signal.
 CONSOLE_SIGNAL = os.environ.get("CMSC127_CONSOLE_SIGNAL", "")
 # The pair points deliver two stops at the boundary where the handlers used to
@@ -3652,12 +3670,92 @@ def deliver_signal(signal_name: str) -> None:
     wait_for_arrival(8)
 
 
+def raise_stop(signal_name: str) -> None:
+    """Deliver a stop through CPython's own signal path.
+
+    CPython's console handler for CTRL_C_EVENT and CTRL_BREAK_EVENT calls the
+    same signal_handler that raise_signal calls, so the run meets the same
+    code either way. This needs no console, so it works on both platforms.
+    """
+    note("raising " + signal_name)
+    ARRIVED.clear()
+    signal.raise_signal(getattr(signal, signal_name))
+    if not wait_for_arrival(8):
+        raise RuntimeError("The guard did not receive " + signal_name)
+
+
+def finish_stop() -> None:
+    """Deliver the stop at the entry of _finish_run.
+
+    Windows cannot aim Ctrl+C at a process group, so this process raises
+    SIGINT itself, which is the code path the console handler takes. A
+    Ctrl+Break case waits for the parent's console event. POSIX sends the
+    named signal to this process.
+    """
+    if CONSOLE_SIGNAL == "SIGINT":
+        note("raising SIGINT at the finish entry")
+        signal.raise_signal(signal.SIGINT)
+    elif sys.platform != "win32":
+        note("signal " + CONSOLE_SIGNAL + " at the finish entry")
+        os.kill(os.getpid(), getattr(signal, CONSOLE_SIGNAL))
+    else:
+        note("waiting for SIGBREAK at the finish entry")
+        ARRIVED.wait(8)
+
+
 runner.uuid4 = _Token
 plain_execute = runner._execute
 plain_run_pair = runner._run_pair
 plain_drop_database = runner._drop_database
 plain_report_cleanup_failure = runner._report_cleanup_failure
 plain_restore = runner._StopGuard.restore
+plain_install = runner._StopGuard.install
+plain_finish_run = runner._finish_run
+plain_database_url = runner._database_url
+
+
+def finish_run(guard, name, admin):
+    """Send the stop at the call boundary into _finish_run.
+
+    The wrapper's own entry is the check point that _finish_run's entry would
+    be, so a stop here is the stop that used to skip the drop.
+    """
+    if POINT in FINISH_POINTS:
+        finish_stop()
+    return plain_finish_run(guard, name, admin)
+
+
+runner._finish_run = finish_run
+
+
+def nested_install(guard):
+    """Install the guard, then wrap its handler to nest a second stop.
+
+    The wrapper sends the second stop before it calls the guard's handler, so
+    the second stop is pending at that handler's entry. CPython runs it first,
+    at the entry check point, before any statement of the first handler. That
+    is the documented tool gap.
+    """
+    plain_install(guard)
+    if POINT not in NESTED_POINTS:
+        return
+    sent = {"done": False}
+
+    def wrap():
+        def handler(signum, frame):
+            if not sent["done"]:
+                sent["done"] = True
+                note("nested " + SECOND_SIGNAL + " at the entry of " + FIRST_SIGNAL)
+                signal.raise_signal(getattr(signal, SECOND_SIGNAL))
+            return guard.handle(signum, frame)
+
+        return handler
+
+    for number in list(guard.previous):
+        signal.signal(number, wrap())
+
+
+runner._StopGuard.install = nested_install
 
 
 def execute(cursor, statement, parameters=None):
@@ -3683,6 +3781,19 @@ def run_pair(*args, **kwargs):
     return plain_run_pair(*args, **kwargs)
 
 
+def database_url(base_url, name):
+    """Send the first stop once the run owns its database and is in body.
+
+    Both entry paths call this after they move the phase to body, so the stop
+    arrives during the run and not during the create.
+    """
+    if POINT in NESTED_POINTS and SENT["nested"] == 0:
+        SENT["nested"] = 1
+        note("raising " + FIRST_SIGNAL + " during the run")
+        signal.raise_signal(getattr(signal, FIRST_SIGNAL))
+    return plain_database_url(base_url, name)
+
+
 def drop_database(name, admin):
     """Fail the drop, so the run reports the database it could not remove."""
     if POINT in FAILED_DROP_POINTS:
@@ -3699,6 +3810,48 @@ def report_cleanup_failure(name):
     return plain_report_cleanup_failure(name)
 
 
+def restore_between(guard):
+    """Latch the first stop, then deliver Ctrl+C between the replacements.
+
+    The Ctrl+C arrives once the last non-SIGINT handler is back and before the
+    SIGINT handler goes back. The guard must still own SIGINT there, so the
+    Ctrl+C is recorded and the loop finishes. The caller then sees the latched
+    stop.
+
+    The line trace fires at the first line of restore that runs after that
+    handler is back. That line sits outside the retry that catches a Ctrl+C
+    raised inside signal.signal, so a default Ctrl+C handler there ends the
+    run instead of being recorded.
+    """
+    note("before restore")
+    raise_stop(FIRST_SIGNAL)
+    remaining = [number for number in guard.previous if number != signal.SIGINT]
+    last = remaining[-1] if remaining else None
+    expected = guard.previous[last] if last is not None else None
+    changed = {"done": False}
+    restore_code = plain_restore.__code__
+
+    def on_line(frame, event, argument):
+        if event == "line" and not changed["done"] and last is not None:
+            if signal.getsignal(last) is expected:
+                changed["done"] = True
+                sys.settrace(None)
+                note("restored " + signal.Signals(last).name + " before the Ctrl+C")
+                raise_stop("SIGINT")
+        return on_line
+
+    def on_call(frame, event, argument):
+        if event == "call" and frame.f_code is restore_code:
+            return on_line
+        return None
+
+    sys.settrace(on_call)
+    try:
+        return plain_restore(guard)
+    finally:
+        sys.settrace(None)
+
+
 def restore(guard):
     """Send the first stop signal at the boundary where the handlers change.
 
@@ -3710,6 +3863,8 @@ def restore(guard):
     That is the interval where the default Ctrl+C handler can replace the
     first stop's code, so the run must still end with the first code.
     """
+    if POINT in BETWEEN_POINTS:
+        return restore_between(guard)
     if POINT in RESTORE_POINTS or POINT in RESTORE_FAIL_POINTS:
         note("before restore")
         deliver()
@@ -3736,6 +3891,7 @@ def restore(guard):
 
 runner._execute = execute
 runner._run_pair = run_pair
+runner._database_url = database_url
 runner._drop_database = drop_database
 runner._report_cleanup_failure = report_cleanup_failure
 runner._StopGuard.restore = restore
@@ -3791,6 +3947,10 @@ except SystemExit as requested:
     code = requested.code if isinstance(requested.code, int) else 1
 noted = signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 note("handler " + ("default" if noted else "custom"))
+note("non-SIGINT handlers restored " + str(all(
+    signal.getsignal(number) is handler
+    for number, handler in ORIGINAL.items()
+    if number != signal.SIGINT)))
 raise SystemExit(code)
 '''
 
@@ -3819,9 +3979,13 @@ sys.path.insert(0, str(HARNESS))
 import runner
 
 # The functions whose line events are injection points. install, restore,
-# _end_run and stop_if_pending hold every handler change and every exit
-# decision, so a stop at any of their lines must keep the first code.
-TARGETS = ("install", "restore", "_end_run", "stop_if_pending")
+# _restore_handler, _end_run and stop_if_pending hold every handler change and
+# every exit decision, so a stop at any of their lines must keep the first
+# code.
+TARGETS = ("install", "restore", "_restore_handler", "_end_run", "stop_if_pending")
+# The call boundary into _finish_run is the point where a stop used to skip
+# the drop. The tracer injects there before the first line of the function.
+FINISH = "_finish_run"
 STOPS = [
     getattr(signal, name)
     for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
@@ -3898,6 +4062,11 @@ def local(frame, event, arg):
 def tracer(frame, event, arg):
     if event == "call" and frame.f_code.co_name in TARGETS:
         return local
+    if event == "call" and frame.f_code.co_name == FINISH:
+        SEEN.append((FINISH, 0))
+        if POINT == "line:" + str(len(SEEN) - 1):
+            inject()
+        return None
     return None
 
 
@@ -4433,6 +4602,385 @@ class ConsoleStopSignalTests(unittest.TestCase):
         self.assert_console_stop_leaves_no_database(
             "selftest-console-mixed-restore", "SIGBREAK", self_test=True, mixed=True
         )
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class FinishEntryStopTests(unittest.TestCase):
+    """A stop at the entry of _finish_run still drops the scratch database.
+
+    The phase moves to cleanup in the caller's finally, before the call. A
+    stop at that call boundary then finds the cleanup phase, so the handler
+    records it and returns, and the drop runs. The exit code is the first
+    stop's code.
+    """
+
+    def exists(self: FinishEntryStopTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: FinishEntryStopTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def assert_finish_entry_drops_the_database(
+        self: FinishEntryStopTests,
+        signal_name: str,
+        self_test: bool = False,
+    ) -> None:
+        """Run the runner, stop it at the finish entry, and check the drop."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_CONSOLE_SIGNAL"] = signal_name
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-finish" if self_test else "finish",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                # A console event reaches only this process's own group, so the
+                # test runner never meets the stop it sends.
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    if sys.platform == "win32"
+                    else 0
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if marker.exists():
+                        notes = marker.read_text(encoding="utf-8").splitlines()
+                    if f"created {name}" in notes:
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertIn(f"created {name}", notes, "the run made no race database")
+                if signal_name == "SIGBREAK":
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        if marker.exists():
+                            notes = marker.read_text(encoding="utf-8").splitlines()
+                        if "waiting for SIGBREAK at the finish entry" in notes:
+                            break
+                        if process.poll() is not None:
+                            break
+                        time.sleep(0.05)
+                    if process.poll() is None:
+                        os.kill(process.pid, console_break_event())
+                returncode = process.wait(timeout=90)
+                if marker.exists():
+                    notes = marker.read_text(encoding="utf-8").splitlines()
+                leftover = self.exists(url, name)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    output = process.stdout.read()
+                    process.stdout.close()
+                self.drop(url, name)
+
+        detail = f"finish {signal_name} exited {returncode} notes {notes}\n{output}"
+        self.assertFalse(leftover, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(128 + getattr(signal, signal_name), returncode, detail)
+        self.assertIn("handler default", notes, detail)
+
+    def test_sigint_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGINT")
+
+    def test_self_test_sigint_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGINT", self_test=True)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
+    def test_sigterm_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGTERM")
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no SIGHUP")
+    def test_self_test_sigterm_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGTERM", self_test=True)
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_sigbreak_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGBREAK")
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_self_test_sigbreak_at_the_finish_entry_drops_the_race_database(
+        self: FinishEntryStopTests,
+    ) -> None:
+        self.assert_finish_entry_drops_the_database("SIGBREAK", self_test=True)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class RestoreBetweenStopTests(unittest.TestCase):
+    """A Ctrl+C between the handler replacements keeps the latched stop.
+
+    SIGINT goes back last, so a Ctrl+C that arrives after another handler is
+    back still reaches the guard's handler. The guard records it and returns,
+    the loop finishes, and the caller sees the latched stop.
+    """
+
+    def exists(self: RestoreBetweenStopTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: RestoreBetweenStopTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def assert_between_keeps_the_latched_stop(
+        self: RestoreBetweenStopTests,
+        first: str,
+        self_test: bool = False,
+    ) -> None:
+        """Latch the first stop, deliver Ctrl+C between, and check the code."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_FIRST_SIGNAL"] = first
+            environment["CMSC127_SECOND_SIGNAL"] = "SIGINT"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-restore-between" if self_test else "restore-between",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            returncode = process.returncode
+            output = process.stdout + process.stderr
+            if marker.exists():
+                notes = marker.read_text(encoding="utf-8").splitlines()
+            leftover = self.exists(url, name)
+            self.drop(url, name)
+
+        detail = f"{first} then SIGINT exited {returncode} notes {notes}\n{output}"
+        self.assertIn(f"created {name}", notes, detail)
+        self.assertIn("before restore", notes, detail)
+        self.assertIn("before the Ctrl+C", " ".join(notes), detail)
+        self.assertIn("raising SIGINT", notes, detail)
+        self.assertIn("non-SIGINT handlers restored True", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertFalse(leftover, detail)
+        self.assertEqual(128 + getattr(signal, first), returncode, detail)
+
+    def test_sigterm_then_sigint_between_the_replacements_keeps_the_latched_stop(
+        self: RestoreBetweenStopTests,
+    ) -> None:
+        self.assert_between_keeps_the_latched_stop("SIGTERM")
+
+    def test_self_test_sigterm_then_sigint_between_the_replacements(
+        self: RestoreBetweenStopTests,
+    ) -> None:
+        self.assert_between_keeps_the_latched_stop("SIGTERM", self_test=True)
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_sigbreak_then_sigint_between_the_replacements_keeps_the_latched_stop(
+        self: RestoreBetweenStopTests,
+    ) -> None:
+        self.assert_between_keeps_the_latched_stop("SIGBREAK")
+
+    @unittest.skipUnless(sys.platform == "win32", "SIGBREAK is a Windows signal")
+    def test_self_test_sigbreak_then_sigint_between_the_replacements(
+        self: RestoreBetweenStopTests,
+    ) -> None:
+        self.assert_between_keeps_the_latched_stop("SIGBREAK", self_test=True)
+
+
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class NestedStopTests(unittest.TestCase):
+    """A nested stop at the handler entry keeps the run safe.
+
+    CPython runs a pending handler at the entry check point of the handler
+    that is already running, before any statement of that handler. A second
+    stop that arrives in that window therefore records itself first. No
+    Python-level handler can record arrival order across the window. The run
+    must still end with one of the two stop codes. It prints no traceback. It
+    drops its scratch database.
+    """
+
+    def exists(self: NestedStopTests, url: str, name: str) -> bool:
+        return race_database_exists(url, name)
+
+    def drop(self: NestedStopTests, url: str, name: str) -> None:
+        drop_race_database(url, name)
+
+    def assert_nested_stop_stays_safe(
+        self: NestedStopTests,
+        first: str,
+        second: str,
+        keep: bool,
+        self_test: bool = False,
+    ) -> None:
+        """Nest the second stop at the first handler's entry, and check it."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        leftover = False
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(SIGNAL_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            arguments = (
+                ["--self-test"]
+                if self_test
+                else ["1", "--root", str(root), "--runner-dir", str(runner_dir)]
+            )
+            environment = os.environ.copy()
+            environment["CMSC127_FIRST_SIGNAL"] = first
+            environment["CMSC127_SECOND_SIGNAL"] = second
+            environment["CMSC127_KEEP_GUARD"] = "1" if keep else "0"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    "selftest-nested" if self_test else "nested",
+                    token,
+                    *arguments,
+                ],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            returncode = process.returncode
+            output = process.stdout + process.stderr
+            if marker.exists():
+                notes = marker.read_text(encoding="utf-8").splitlines()
+            leftover = self.exists(url, name)
+            self.drop(url, name)
+
+        detail = (
+            f"{first} then {second} keep={keep} exited {returncode} "
+            f"notes {notes}\n{output}"
+        )
+        self.assertIn(f"created {name}", notes, detail)
+        self.assertIn(f"nested {second} at the entry of {first}", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertFalse(leftover, detail)
+        self.assertIn(
+            returncode,
+            (128 + getattr(signal, first), 128 + getattr(signal, second)),
+            detail,
+        )
+
+    def test_a_nested_stop_on_the_library_path_stays_safe(
+        self: NestedStopTests,
+    ) -> None:
+        second = "SIGTERM" if sys.platform != "win32" else "SIGBREAK"
+        self.assert_nested_stop_stays_safe("SIGINT", second, keep=False)
+
+    def test_a_nested_stop_on_the_cli_path_stays_safe(
+        self: NestedStopTests,
+    ) -> None:
+        second = "SIGTERM" if sys.platform != "win32" else "SIGBREAK"
+        self.assert_nested_stop_stays_safe("SIGINT", second, keep=True)
+
+    def test_the_self_test_nested_stop_on_the_library_path_stays_safe(
+        self: NestedStopTests,
+    ) -> None:
+        second = "SIGTERM" if sys.platform != "win32" else "SIGBREAK"
+        self.assert_nested_stop_stays_safe("SIGINT", second, keep=False, self_test=True)
+
+    def test_the_self_test_nested_stop_on_the_cli_path_stays_safe(
+        self: NestedStopTests,
+    ) -> None:
+        second = "SIGTERM" if sys.platform != "win32" else "SIGBREAK"
+        self.assert_nested_stop_stays_safe("SIGINT", second, keep=True, self_test=True)
 
 
 # The two stops a student reaches on Windows, as Python signal names.
