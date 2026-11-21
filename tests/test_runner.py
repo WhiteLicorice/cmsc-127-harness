@@ -4545,11 +4545,15 @@ def install_mixed() -> None:
                 note("signal SIGINT")
                 os.kill(os.getpid(), signal.SIGINT)
         previous = real_signal(number, handler)
-        if PRIVATE_CONSOLE and not sent["second"] and number == signal.SIGINT:
+        if not sent["second"] and number == signal.SIGINT:
             sent["second"] = True
             note("after installing SIGINT")
-            send("CTRL_BREAK_EVENT")
-            time.sleep(0.2)
+            if PRIVATE_CONSOLE:
+                send("CTRL_BREAK_EVENT")
+                time.sleep(0.2)
+            else:
+                note("signal SIGTERM")
+                os.kill(os.getpid(), signal.SIGTERM)
         return previous
 
     def record(self):
@@ -4601,11 +4605,135 @@ def install_break() -> None:
     note("phase " + guard.phase)
 
 
+def install_pair(first: str, second: str) -> None:
+    """Send two stops inside the install section, in the given order.
+
+    Both stops arrive while the section holds them. On POSIX the mask keeps
+    them as one pending set, which carries no order. On Windows the native
+    handler records the first event at arrival. Either way the run must end
+    with one stop's code, print no traceback, and put every handler back.
+    """
+    guard = runner._StopGuard()
+    real_signal = signal.signal
+    sent = {"done": False}
+
+    def change(number, handler):
+        if not sent["done"] and number == signal.SIGINT:
+            sent["done"] = True
+            note("before installing SIGINT")
+            for index, name in enumerate((first, second)):
+                note("signal " + name)
+                if PRIVATE_CONSOLE:
+                    send("CTRL_C_EVENT" if name == "SIGINT" else "CTRL_BREAK_EVENT")
+                    if index == 0:
+                        if not wait_for_record(guard):
+                            raise RuntimeError("The section did not record the event")
+                    else:
+                        time.sleep(0.2)
+                else:
+                    os.kill(os.getpid(), getattr(signal, name))
+        return real_signal(number, handler)
+
+    signal.signal = change
+    try:
+        guard.install()
+        note("pending " + str(guard.pending))
+        note("phase " + guard.phase)
+        guard.phase = "cleanup"
+        guard.restore()
+    finally:
+        signal.signal = real_signal
+        note(
+            "restored "
+            + str(all(signal.getsignal(n) is h for n, h in ORIGINAL.items()))
+        )
+
+
+def restore_default() -> None:
+    """Leave SIGTERM at its default action and send it inside the restore.
+
+    The caller owns no handler for SIGTERM, so restore puts the default action
+    back. A stop that is pending at that moment must not reach the default
+    action, or the process ends instead of returning to the caller.
+    """
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    ORIGINAL.clear()
+    ORIGINAL.update({number: signal.getsignal(number) for number in STOPS})
+    guard = runner._StopGuard()
+    guard.install()
+    guard.phase = "cleanup"
+    real_signal = signal.signal
+    sent = {"done": False}
+
+    def change(number, handler):
+        if not sent["done"] and number == signal.SIGTERM:
+            sent["done"] = True
+            note("before restoring SIGTERM")
+            note("signal SIGTERM")
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_signal(number, handler)
+
+    signal.signal = change
+    try:
+        guard.restore()
+    except BaseException as error:
+        note("raised " + type(error).__name__ + ": " + str(error))
+    finally:
+        signal.signal = real_signal
+    note("pending " + str(guard.pending))
+    note("restored " + str(all(signal.getsignal(n) is h for n, h in ORIGINAL.items())))
+
+
+def restore_default_console() -> None:
+    """Leave SIGBREAK at its default action and send it inside the restore.
+
+    Windows has no signal mask, so the native console handler holds the event
+    for the length of the section. The guard must record it rather than let it
+    reach the default action once the handler is gone.
+    """
+    break_number = getattr(signal, "SIGBREAK", None)
+    if break_number is None:
+        raise RuntimeError("This platform has no SIGBREAK")
+    signal.signal(break_number, signal.SIG_DFL)
+    ORIGINAL.clear()
+    ORIGINAL.update({number: signal.getsignal(number) for number in STOPS})
+    guard = runner._StopGuard()
+    guard.install()
+    guard.phase = "cleanup"
+    real_signal = signal.signal
+    sent = {"done": False}
+
+    def change(number, handler):
+        if not sent["done"] and number == break_number:
+            sent["done"] = True
+            note("before restoring SIGBREAK")
+            send("CTRL_BREAK_EVENT")
+            if not wait_for_record(guard):
+                raise RuntimeError("The section did not record the event")
+        return real_signal(number, handler)
+
+    signal.signal = change
+    try:
+        guard.restore()
+    except BaseException as error:
+        note("raised " + type(error).__name__ + ": " + str(error))
+    finally:
+        signal.signal = real_signal
+    note("pending " + str(guard.pending))
+    note("restored " + str(all(signal.getsignal(n) is h for n, h in ORIGINAL.items())))
+
+
 MODES = {
     "caller-value": caller_raises,
     "caller-keyboard": lambda: caller_raises(caller_keyboard),
     "install-mixed": install_mixed,
     "install-break": install_break,
+    "install-pair-term-hup": lambda: install_pair("SIGTERM", "SIGHUP"),
+    "install-pair-hup-term": lambda: install_pair("SIGHUP", "SIGTERM"),
+    "install-pair-int-break": lambda: install_pair("SIGINT", "SIGBREAK"),
+    "install-pair-break-int": lambda: install_pair("SIGBREAK", "SIGINT"),
+    "restore-default": restore_default,
+    "restore-default-console": restore_default_console,
 }
 
 code = 0
@@ -7345,6 +7473,58 @@ class SectionStopTests(unittest.TestCase):
         self.assertIn("phase body", notes, detail)
         self.assertNotIn("Traceback", output, detail)
 
+    def test_a_pair_of_stops_in_install_keeps_one_code(
+        self: SectionStopTests,
+    ) -> None:
+        """Two stops inside the install section end the run with one code.
+
+        The mask holds both stops as one pending set, and the set carries no
+        order. The run must still end with one of the two codes, print no
+        traceback, and put every handler back. Both arrival orders run, so a
+        change to the order rule shows up here.
+        """
+        codes: list[int] = []
+        for first, second in (("SIGTERM", "SIGHUP"), ("SIGHUP", "SIGTERM")):
+            with self.subTest(first=first, second=second):
+                mode = f"install-pair-{first[3:].lower()}-{second[3:].lower()}"
+                returncode, notes, output = self.run_driver(mode)
+                detail = f"{mode} exited {returncode} notes {notes}\n{output}"
+                self.assertIn("before installing SIGINT", notes, detail)
+                self.assertIn(f"signal {first}", notes, detail)
+                self.assertIn(f"signal {second}", notes, detail)
+                self.assertIn("phase body", notes, detail)
+                self.assertNotIn("Traceback", output, detail)
+                self.assertIn("restored True", notes, detail)
+                pending = [line for line in notes if line.startswith("pending ")]
+                self.assertTrue(pending, detail)
+                self.assertIn(pending[0], ("pending 1", "pending 15"), detail)
+                self.assertEqual(
+                    128 + int(pending[0].split()[1]), returncode, detail
+                )
+                codes.append(returncode)
+        # The pending set carries no order, so both arrival orders report the
+        # same code. The class comment records why no primitive can do better.
+        self.assertEqual(codes[0], codes[1], codes)
+
+    def test_a_stop_pending_at_a_default_restore_reaches_the_caller(
+        self: SectionStopTests,
+    ) -> None:
+        """A stop pending at a default restore does not end the process.
+
+        The caller owns no handler for SIGTERM, so restore puts the default
+        action back. A stop that is pending at that moment must be taken by
+        the guard, or the process ends instead of returning to the caller.
+        """
+        returncode, notes, output = self.run_driver("restore-default")
+        detail = f"restore-default exited {returncode} notes {notes}\n{output}"
+        self.assertIn("before restoring SIGTERM", notes, detail)
+        self.assertIn("signal SIGTERM", notes, detail)
+        self.assertIn("raised SystemExit: 143", notes, detail)
+        self.assertIn("pending 15", notes, detail)
+        self.assertIn("restored True", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(0, returncode, detail)
+
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
 class ConsoleSectionStopTests(SectionStopTests):
@@ -7380,6 +7560,50 @@ class ConsoleSectionStopTests(SectionStopTests):
         self.assertIn("pending 21", notes, detail)
         self.assertIn("phase body", notes, detail)
         self.assertNotIn("Traceback", output, detail)
+
+    def test_a_pair_of_stops_in_install_keeps_one_code(
+        self: ConsoleSectionStopTests,
+    ) -> None:
+        """Two console stops inside the install section keep the first one.
+
+        The native handler runs at arrival, so the first event is the one the
+        guard records. Each order must report its own first event.
+        """
+        for first, second, code in (
+            ("SIGINT", "SIGBREAK", 130),
+            ("SIGBREAK", "SIGINT", 149),
+        ):
+            with self.subTest(first=first, second=second):
+                mode = f"install-pair-{first[3:].lower()}-{second[3:].lower()}"
+                returncode, notes, output = self.run_driver(mode)
+                detail = f"{mode} exited {returncode} notes {notes}\n{output}"
+                self.assertIn("before installing SIGINT", notes, detail)
+                self.assertIn(f"signal {first}", notes, detail)
+                self.assertIn(f"signal {second}", notes, detail)
+                self.assertIn("phase body", notes, detail)
+                self.assertNotIn("Traceback", output, detail)
+                self.assertIn("restored True", notes, detail)
+                self.assertIn(f"pending {code - 128}", notes, detail)
+                self.assertEqual(code, returncode, detail)
+
+    def test_a_stop_pending_at_a_default_restore_reaches_the_caller(
+        self: ConsoleSectionStopTests,
+    ) -> None:
+        """A console stop pending at a default restore ends at 149.
+
+        The caller owns no handler for SIGBREAK, so the guard must record the
+        held event rather than let it reach the default action.
+        """
+        returncode, notes, output = self.run_driver("restore-default-console")
+        detail = (
+            f"restore-default-console exited {returncode} notes {notes}\n{output}"
+        )
+        self.assertIn("before restoring SIGBREAK", notes, detail)
+        self.assertIn("raised SystemExit: 149", notes, detail)
+        self.assertIn("pending 21", notes, detail)
+        self.assertIn("restored True", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(0, returncode, detail)
 
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
