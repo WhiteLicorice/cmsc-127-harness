@@ -1727,6 +1727,36 @@ class _StopGuard:
     A stop that arrives after the section ends runs the caller's own handler.
     Its exception reaches the caller unchanged. That is the settled library
     contract.
+
+    A stop that is still pending when the mask lifts goes to whatever handler
+    owns its slot at that moment. On the library path that slot can hold the
+    caller's default action, and the default action ends the process. So the
+    guard takes every pending guarded stop whose slot would end or drop it,
+    while the mask still holds it, and records the first one as a stop.
+
+    Documented tool gap. A stop that arrives inside a section is held by the
+    kernel as a member of a pending set, and the set carries no order. CPython
+    runs the pending handlers in signal-number order when the mask lifts, so
+    the first stop a run reports from inside a section is the lowest signal
+    number, not the first one to arrive. Two stops that arrive in the other
+    order report the same code.
+
+    No primitive that Python can install records the arrival order while the
+    mask holds the stops. signal.set_wakeup_fd is the only C-level recorder
+    available, and CPython writes to that fd from trip_signal, which runs only
+    when the kernel delivers the signal. A blocked signal is never delivered,
+    so the fd stays empty for the length of the section. Measured on Linux
+    with Python 3.15.2: the fd held no byte while the mask was up, and it held
+    the same two bytes for both arrival orders after the unblock. Without the
+    mask the fd does carry the arrival order, but without the mask a stop that
+    arrives before its slot holds the guard's handler runs the caller's
+    action, and the section rules forbid that.
+
+    A shorter mask window does not close the gap. The mask has to cover every
+    slot that does not yet hold the guard's handler, and it has to stay up
+    until record_interrupt has run, or a stop that arrives after Ctrl+C
+    replaces the Ctrl+C code. Both ends of that window are inside the section,
+    so a stop that arrives in it is still held as a set member.
     """
 
     def __init__(self) -> None:
@@ -1779,6 +1809,12 @@ class _StopGuard:
         when the mask lifts is outside the section. A console stop that the
         native handler recorded then goes to whichever handler owns that
         signal now, by the same rule as a delivered signal.
+
+        A stop that is still pending when the mask lifts goes to whatever
+        handler owns its slot then. On the library path that slot can hold the
+        caller's default action, and the default action ends the process. So
+        every pending guarded stop whose slot would end or drop it is taken
+        here, while the mask still holds it.
         """
         mask = self.mask
         self.mask = None
@@ -1786,12 +1822,53 @@ class _StopGuard:
             self.section = False
             number = self.console_stop
             self.console_stop = None
+        if mask is not None:
+            self._take_pending_stops()
         operations = _signal_mask()
         if mask is not None and operations is not None:
             block, _, how = operations
             block(how, mask)
         if number is not None:
             self._deliver_console_stop(number)
+
+    def _take_pending_stops(self) -> None:
+        """Take every pending guarded stop whose slot would end the process.
+
+        A stop that is pending when the mask lifts goes to the handler that
+        owns its slot at that moment. The guard's own handler records it, and
+        a caller's handler runs as the caller wrote it. The caller's default
+        action ends the process, and the caller's ignore action drops the
+        stop. Neither is a stop the caller can see, so the guard takes those
+        stops itself, while the mask still holds them, and records the first
+        one by the normal rule.
+
+        sigwait is the portable way to take a pending signal. sigtimedwait
+        would do the same with a zero timeout, but macOS does not declare it,
+        and the CI lane runs this code on macOS. sigwait returns at once
+        because the caller has just seen the signal in the pending set.
+        """
+        pending = getattr(signal, "sigpending", None)
+        take = getattr(signal, "sigwait", None)
+        if pending is None or take is None:
+            return
+        wanted: set[int] = set()
+        for number in self._guarded_signals():
+            try:
+                handler = signal.getsignal(number)
+            except (OSError, ValueError):
+                continue
+            if handler in (signal.SIG_DFL, signal.SIG_IGN):
+                wanted.add(number)
+        if not wanted:
+            return
+        while True:
+            held = pending() & wanted
+            if not held:
+                return
+            number = take(held)
+            if self.pending is None:
+                self.pending = number
+                self.stopped_at = time.monotonic()
 
     def _deliver_console_stop(self, number: int) -> None:
         """Give a held console stop to the handler that owns it now.
@@ -2095,6 +2172,13 @@ class _StopGuard:
         The section closes after the last slot. A signal that arrived during
         the section then runs the caller's own handler, and its exception
         reaches the caller unchanged. That is the settled library contract.
+
+        A stop that is still pending when the section closes would reach the
+        caller's default action instead, and that action ends the process. So
+        the section takes every pending guarded stop whose slot now holds the
+        caller's default or ignore action, and records the first one as a
+        stop. The caller then sees that stop's replay, and every handler is
+        back.
 
         The native console handler goes last, so a Ctrl+Break during the
         section is held. The replay of the first recorded stop is the last
