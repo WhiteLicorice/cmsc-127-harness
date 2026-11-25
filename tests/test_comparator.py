@@ -384,14 +384,6 @@ class ComparatorTests(unittest.TestCase):
 
         self.assertEqual([], differences)
 
-    def test_uppercase_identifier_is_rejected(self: ComparatorTests) -> None:
-        with self.assertRaisesRegex(ERDParseError, "lowercase snake_case"):
-            parse_erd("""erDiagram
-                Student {
-                    int student_id PK
-                }
-            """)
-
     def test_empty_schema_returns_one_actionable_message(self: ComparatorTests) -> None:
         differences = self.compare("""erDiagram
             missing_entity {
@@ -538,6 +530,14 @@ class ParserEdgeCaseTests(unittest.TestCase):
             parse_erd("""erDiagram
                 parent {
                     int id pk
+                }
+            """)
+
+    def test_uppercase_identifier_is_rejected(self: ParserEdgeCaseTests) -> None:
+        with self.assertRaisesRegex(ERDParseError, "lowercase snake_case"):
+            parse_erd("""erDiagram
+                Student {
+                    int student_id PK
                 }
             """)
 

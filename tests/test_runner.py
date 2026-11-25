@@ -7450,7 +7450,6 @@ class SectionMaskTests(unittest.TestCase):
     sys.platform == "win32",
     "Windows delivers a stop as a console event, which needs its own console",
 )
-@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class SectionStopTests(unittest.TestCase):
     """A native stop inside a critical section is held, then taken.
 
@@ -7601,10 +7600,8 @@ class SectionStopTests(unittest.TestCase):
 class ConsoleSectionStopTests(SectionStopTests):
     """The same three cases, with a native console event on Windows."""
 
-    # The base class skips on Windows. This class is the Windows case, and it
-    # keeps the database guard that the base class sets.
-    __unittest_skip__ = not os.environ.get("CMSC127_DATABASE_URL")
-    __unittest_skip_why__ = "requires PostgreSQL"
+    # The base class skips on Windows. This class is the Windows case.
+    __unittest_skip__ = False
 
     def process_options(self: ConsoleSectionStopTests) -> dict[str, Any]:
         return private_console_options()
