@@ -8372,8 +8372,12 @@ class ApplicationUrlTests(unittest.TestCase):
     ) -> None:
         """A query appended to a keyword list would land in its last value."""
         url = make_conninfo(
-            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe"
+            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe",
+            dbname="c127_t20ga_probe",
         )
+        # The case exists for the keyword shape. A URI would pass on either
+        # body, because make_conninfo returns it unchanged.
+        self.assertNotIn("://", url)
         built = application_url(url, "probe-name")
 
         self.assert_keeps_settings(built)
