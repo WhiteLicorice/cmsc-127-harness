@@ -4749,6 +4749,75 @@ raise SystemExit(code)
 '''
 
 
+PREBLOCKED_STOP_DRIVER = '''\
+"""Block a stop in the caller, run the runner, and report what is left."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import signal
+import sys
+
+HARNESS = Path(sys.argv[1])
+MARKER = Path(sys.argv[2])
+ROOT = Path(sys.argv[3])
+RESOURCES = Path(sys.argv[4])
+sys.path.insert(0, str(HARNESS))
+
+import runner
+
+STOPS = [
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK")
+    if hasattr(signal, name)
+]
+
+
+def note(text: str) -> None:
+    with MARKER.open("a", encoding="utf-8") as handle:
+        handle.write(text + "\\n")
+
+
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+ORIGINAL = {number: signal.getsignal(number) for number in STOPS}
+initial = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+# The caller blocks the stop and asks for it before the run starts. The
+# kernel then holds it for the caller, outside the guard's control.
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+os.kill(os.getpid(), signal.SIGTERM)
+note("caller pending " + str(signal.SIGTERM in signal.sigpending()))
+
+code = 0
+try:
+    code = runner.main(["1", "--root", str(ROOT), "--runner-dir", str(RESOURCES)])
+except SystemExit as requested:
+    code = requested.code if isinstance(requested.code, int) else 1
+note("exit " + str(code))
+note("still pending " + str(signal.SIGTERM in signal.sigpending()))
+note(
+    "handlers restored "
+    + str(
+        all(
+            signal.getsignal(number) is handler
+            for number, handler in ORIGINAL.items()
+        )
+    )
+)
+note(
+    "mask restored "
+    + str(
+        signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        == initial | {signal.SIGTERM}
+    )
+)
+if signal.SIGTERM in signal.sigpending():
+    note("taken " + signal.Signals(signal.sigwait({signal.SIGTERM})).name)
+signal.pthread_sigmask(signal.SIG_SETMASK, initial)
+raise SystemExit(0)
+'''
+
+
 def console_break_event() -> int:
     """Return the Ctrl+Break console event number. Windows only.
 
@@ -7602,6 +7671,95 @@ class ConsoleSectionStopTests(SectionStopTests):
         self.assertIn("raised SystemExit: 149", notes, detail)
         self.assertIn("pending 21", notes, detail)
         self.assertIn("restored True", notes, detail)
+        self.assertNotIn("Traceback", output, detail)
+        self.assertEqual(0, returncode, detail)
+
+
+@unittest.skipIf(sys.platform == "win32", "a caller signal mask is a POSIX feature")
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
+class CallerMaskRestoreTests(unittest.TestCase):
+    """A restore leaves a stop pending that the caller's mask already holds.
+
+    An embedding caller can block a stop before it calls the runner and read
+    the pending set afterwards. The signal belongs to the caller, so the guard
+    must not take it. The run reports its own result, every handler comes back,
+    and the caller still holds the stop.
+    """
+
+    def scratch_databases(self: CallerMaskRestoreTests) -> list[str]:
+        """The scratch databases that a run of this suite would leave."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        with psycopg.connect(url) as connection:
+            rows = connection.execute(
+                "SELECT datname FROM pg_database"
+                " WHERE starts_with(datname, 'cmsc127_race_')"
+            )
+            return sorted(row[0] for row in rows)
+
+    def run_driver(self: CallerMaskRestoreTests) -> tuple[int, list[str], str]:
+        """Run one preblocked case and report what it left."""
+        notes: list[str] = []
+        output = ""
+        returncode = -1
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "starter"
+            runner_dir = base / "runner"
+            make_starter_root(root, runner_dir)
+            (root / "run").write_text(
+                "#!/usr/bin/env bash\nset -eu\nexit 0\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            driver = base / "driver.py"
+            driver.write_text(PREBLOCKED_STOP_DRIVER, encoding="utf-8")
+            marker = base / "marker.txt"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(driver),
+                    str(Path(runner.__file__).resolve().parent),
+                    str(marker),
+                    str(root),
+                    str(runner_dir),
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            returncode = process.returncode
+            output = process.stdout + process.stderr
+            if marker.exists():
+                notes = marker.read_text(encoding="utf-8").splitlines()
+        return returncode, notes, output
+
+    def test_a_restore_leaves_a_caller_blocked_stop_pending(
+        self: CallerMaskRestoreTests,
+    ) -> None:
+        """The restore does not take a stop that the caller's mask holds.
+
+        The caller blocks SIGTERM and asks for it before the run starts, so the
+        kernel holds one pending stop. The restore puts the default action back
+        for SIGTERM. A drain that ignores the caller's mask takes that stop and
+        reports 143, so the run ends the caller's process.
+        """
+        before = self.scratch_databases()
+        returncode, notes, output = self.run_driver()
+        after = self.scratch_databases()
+        detail = f"preblocked exited {returncode} notes {notes}\\n{output}"
+        self.assertIn("caller pending True", notes, detail)
+        self.assertIn("1/1 checks passed", output, detail)
+        self.assertIn("exit 0", notes, detail)
+        self.assertIn("still pending True", notes, detail)
+        self.assertIn("handlers restored True", notes, detail)
+        self.assertIn("mask restored True", notes, detail)
+        self.assertIn("taken SIGTERM", notes, detail)
+        self.assertEqual(before, after, detail)
         self.assertNotIn("Traceback", output, detail)
         self.assertEqual(0, returncode, detail)
 

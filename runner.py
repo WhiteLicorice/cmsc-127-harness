@@ -1731,8 +1731,18 @@ class _StopGuard:
     A stop that is still pending when the mask lifts goes to whatever handler
     owns its slot at that moment. On the library path that slot can hold the
     caller's default action, and the default action ends the process. So the
-    guard takes every pending guarded stop whose slot would end or drop it,
-    while the mask still holds it, and records the first one as a stop.
+    guard takes every pending stop whose slot holds that action, while the
+    mask still holds it, and records the first one as a stop.
+
+    The guard leaves alone a stop that the caller had already blocked. That
+    signal belongs to the caller, so the caller finds it still pending after
+    the run returns. Only a stop that the guard held can become the run's exit
+    code.
+
+    The take cannot see an ignore action. POSIX discards a pending signal at
+    the moment its action becomes SIG_IGN, and that change happens inside the
+    section, before the take runs. Such a stop is gone before the take, so no
+    drain can record it.
 
     Documented tool gap. A stop that arrives inside a section is held by the
     kernel as a member of a pending set, and the set carries no order. CPython
@@ -1813,8 +1823,9 @@ class _StopGuard:
         A stop that is still pending when the mask lifts goes to whatever
         handler owns its slot then. On the library path that slot can hold the
         caller's default action, and the default action ends the process. So
-        every pending guarded stop whose slot would end or drop it is taken
-        here, while the mask still holds it.
+        every pending guarded stop whose slot holds that action is taken here,
+        while the mask still holds it. A stop that the caller's saved mask
+        holds stays where it is, because that signal is the caller's.
         """
         mask = self.mask
         self.mask = None
@@ -1823,7 +1834,7 @@ class _StopGuard:
             number = self.console_stop
             self.console_stop = None
         if mask is not None:
-            self._take_pending_stops()
+            self._take_pending_stops(mask)
         operations = _signal_mask()
         if mask is not None and operations is not None:
             block, _, how = operations
@@ -1831,16 +1842,24 @@ class _StopGuard:
         if number is not None:
             self._deliver_console_stop(number)
 
-    def _take_pending_stops(self) -> None:
+    def _take_pending_stops(self, mask: set[Any]) -> None:
         """Take every pending guarded stop whose slot would end the process.
 
         A stop that is pending when the mask lifts goes to the handler that
         owns its slot at that moment. The guard's own handler records it, and
         a caller's handler runs as the caller wrote it. The caller's default
-        action ends the process, and the caller's ignore action drops the
-        stop. Neither is a stop the caller can see, so the guard takes those
-        stops itself, while the mask still holds them, and records the first
-        one by the normal rule.
+        action ends the process, and the caller cannot see that stop at all.
+        So the guard takes those stops itself, while the mask still holds
+        them, and records the first one by the normal rule.
+
+        mask is the mask that was in place before the section. The caller
+        blocked those signals for its own reasons, so the guard skips them and
+        the caller still holds them after the run. Without that skip the drain
+        would take a signal that the caller had asked the kernel to hold.
+
+        A slot that holds SIG_IGN needs no work here. POSIX discards a pending
+        signal at the moment its action becomes SIG_IGN, which happens inside
+        the section before this call. The drain never sees such a stop.
 
         sigwait is the portable way to take a pending signal. sigtimedwait
         would do the same with a zero timeout, but macOS does not declare it,
@@ -1862,7 +1881,7 @@ class _StopGuard:
         if not wanted:
             return
         while True:
-            held = pending() & wanted
+            held = (pending() & wanted) - mask
             if not held:
                 return
             number = take(held)
@@ -2176,9 +2195,9 @@ class _StopGuard:
         A stop that is still pending when the section closes would reach the
         caller's default action instead, and that action ends the process. So
         the section takes every pending guarded stop whose slot now holds the
-        caller's default or ignore action, and records the first one as a
-        stop. The caller then sees that stop's replay, and every handler is
-        back.
+        caller's default action, and records the first one as a stop. The
+        caller then sees that stop's replay, and every handler is back. A stop
+        that the caller had already blocked stays pending for the caller.
 
         The native console handler goes last, so a Ctrl+Break during the
         section is held. The replay of the first recorded stop is the last
