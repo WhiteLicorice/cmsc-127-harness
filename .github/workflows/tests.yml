@@ -170,3 +170,132 @@ jobs:
           if [ -f "$RUNNER_TEMP/t04-pg/postmaster.pid" ]; then
             pg_ctl -D "$RUNNER_TEMP/t04-pg" -m fast -w stop
           fi
+
+  # The student entry path. A student runs check.sh, which starts the runner
+  # with --self-test, so the suite runs as a child of a guarded runner with a
+  # scratch database in its environment. The starter CI also uses a trusted
+  # server with no password and installs no Node.js packages. This job copies
+  # that shape, so a test that depends on the harness CI environment fails
+  # here before a release reaches a student. The starter repository already
+  # appears in this workflow, and this workflow runs the Python suite on all
+  # three platforms, so the job belongs here rather than in the page workflow.
+  student-path:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55465:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CMSC127_DATABASE_URL: postgresql://postgres@127.0.0.1:55465/postgres
+      PGHOST: 127.0.0.1
+      PGPORT: 55465
+      PGUSER: postgres
+      PGDATABASE: postgres
+      CMSC127_RUNNER_DIR: ${{ github.workspace }}/runner
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: runner
+      - name: Check out the starter
+        uses: actions/checkout@v7
+        with:
+          repository: WhiteLicorice/cmsc-127-lab-starter
+          path: starter
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.15.2
+      - name: Install the Python packages
+        run: python -m pip install -r starter/requirements.txt
+      - name: Run the harness self-tests by the student entry path
+        shell: bash
+        working-directory: starter
+        run: bash ./check.sh --self-test
+
+  student-path-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CMSC127_DATABASE_URL: postgresql://postgres@127.0.0.1:55465/postgres
+      PGHOST: 127.0.0.1
+      PGPORT: 55465
+      PGUSER: postgres
+      PGDATABASE: postgres
+      CMSC127_RUNNER_DIR: ${{ github.workspace }}/runner
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: runner
+      - name: Check out the starter
+        uses: actions/checkout@v7
+        with:
+          repository: WhiteLicorice/cmsc-127-lab-starter
+          path: starter
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.15.2
+      - name: Install PostgreSQL 18 on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = '18.6'
+          $archive = Join-Path $env:RUNNER_TEMP 'postgresql-18.zip'
+          $pgRoot = Join-Path $env:RUNNER_TEMP 'postgresql-18'
+          New-Item -ItemType Directory -Force $pgRoot | Out-Null
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-$version-1-windows-x64-binaries.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          & tar.exe -xf $archive -C $pgRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not unpack $archive."
+          }
+          $pgBin = Join-Path $pgRoot 'pgsql\bin'
+          "PG_BIN=$pgBin" >> $env:GITHUB_ENV
+          $pgBin >> $env:GITHUB_PATH
+      - name: Install PostgreSQL on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@18
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
+      - name: Start a trusted server on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'student-pg'
+          & "$env:PG_BIN\initdb.exe" -D $data -U postgres -A trust
+          & "$env:PG_BIN\pg_ctl.exe" -D $data -l (Join-Path $env:RUNNER_TEMP 'student-pg.log') -o '-h 127.0.0.1 -p 55465' -w start
+      - name: Start a trusted server on macOS
+        if: runner.os == 'macOS'
+        run: |
+          initdb -D "$RUNNER_TEMP/student-pg" -U postgres -A trust
+          pg_ctl -D "$RUNNER_TEMP/student-pg" -l "$RUNNER_TEMP/student-pg.log" -o '-h 127.0.0.1 -p 55465' -w start
+      - name: Install the Python packages
+        run: python -m pip install -r starter/requirements.txt
+      - name: Run the harness self-tests by the student entry path
+        shell: bash
+        working-directory: starter
+        run: bash ./check.sh --self-test
+      - name: Stop PostgreSQL on Windows
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'student-pg'
+          if (Test-Path (Join-Path $data 'postmaster.pid')) {
+            & "$env:PG_BIN\pg_ctl.exe" -D $data -m fast -w stop
+          }
+      - name: Stop PostgreSQL on macOS
+        if: always() && runner.os == 'macOS'
+        run: |
+          if [ -f "$RUNNER_TEMP/student-pg/postmaster.pid" ]; then
+            pg_ctl -D "$RUNNER_TEMP/student-pg" -m fast -w stop
+          fi
