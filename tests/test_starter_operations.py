@@ -8,12 +8,14 @@ from ``CMSC127_STARTER_DIR``, or from ``../starter`` beside this repository.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
 from uuid import uuid4
 
@@ -149,6 +151,18 @@ def operations_workdir(starter: Path, statement_timeout: str) -> Path:
     return root
 
 
+def operations_module(starter: Path) -> ModuleType:
+    """Load the starter's operation layer without running its main."""
+    spec = importlib.util.spec_from_file_location(
+        "cmsc127_starter_operations", starter / "answers" / "operations.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("the starter has no answers/operations.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class StarterLockTimeoutTests(unittest.TestCase):
     base_url: str
@@ -189,6 +203,37 @@ class StarterLockTimeoutTests(unittest.TestCase):
             encoding="utf-8",
             check=False,
         )
+
+    def run_operation(
+        self: StarterLockTimeoutTests, work: Path, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
+        environment = dict(os.environ)
+        environment["CMSC127_REGISTRAR_DATABASE_URL"] = self.url
+        environment["CMSC127_CASHIER_DATABASE_URL"] = self.url
+        return subprocess.run(
+            [sys.executable, "answers/operations.py", *arguments],
+            cwd=work,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def assert_input_message(
+        self: StarterLockTimeoutTests, arguments: tuple[str, ...], message: str
+    ) -> None:
+        starter = starter_root()
+        if starter is None:
+            self.skipTest("set CMSC127_STARTER_DIR to the starter repository")
+        work = operations_workdir(starter, STATEMENT_TIMEOUT)
+        self.addCleanup(shutil.rmtree, work, True)
+
+        completed = self.run_operation(work, *arguments)
+
+        self.assertEqual("", completed.stdout, completed.stderr)
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(message, completed.stderr)
 
     def test_a_held_section_lock_reports_the_lock_message(
         self: StarterLockTimeoutTests,
@@ -247,6 +292,99 @@ class StarterLockTimeoutTests(unittest.TestCase):
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(FAILURE_MESSAGE, completed.stderr)
         self.assertNotIn("lock timed out", completed.stderr)
+
+    def test_a_bad_student_number_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("enroll", "8x4", "3", "2024-08-01"),
+            "Enter the student number as digits.\n",
+        )
+
+    def test_a_bad_section_number_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("enroll", "834", "x3", "2024-08-01"),
+            "Enter the section number as digits.\n",
+        )
+
+    def test_a_bad_enrollment_date_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("enroll", "834", "3", "August 1"),
+            "Enter the date as YYYY-MM-DD.\n",
+        )
+
+    def test_a_bad_payment_student_number_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("payment", "8x4", "2024-1S", "1", "1.00", "2024-11-01", "CODE-1"),
+            "Enter the student number as digits.\n",
+        )
+
+    def test_a_bad_payment_number_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("payment", "279", "2024-1S", "x", "1.00", "2024-11-01", "CODE-1"),
+            "Enter the payment number as digits.\n",
+        )
+
+    def test_a_bad_payment_amount_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("payment", "279", "2024-1S", "1", "one", "2024-11-01", "CODE-1"),
+            "Enter the amount as a number.\n",
+        )
+
+    def test_a_bad_payment_date_names_the_input(
+        self: StarterLockTimeoutTests,
+    ) -> None:
+        self.assert_input_message(
+            ("payment", "279", "2024-1S", "1", "1.00", "11/01/2024", "CODE-1"),
+            "Enter the date as YYYY-MM-DD.\n",
+        )
+
+
+class StarterForeignKeyMessageTests(unittest.TestCase):
+    """A failed key on the enrollment insert names the row it needs."""
+
+    def message(self: StarterForeignKeyMessageTests, constraint: str, operation: str) -> str:
+        starter = starter_root()
+        if starter is None:
+            self.skipTest("set CMSC127_STARTER_DIR to the starter repository")
+        module = operations_module(starter)
+        choose = getattr(module, "_foreign_key_message")
+        error = SimpleNamespace(diag=SimpleNamespace(constraint_name=constraint))
+        return choose(error, operation)
+
+    def test_a_student_key_failure_names_the_student(
+        self: StarterForeignKeyMessageTests,
+    ) -> None:
+        self.assertEqual(
+            "Student not found.",
+            self.message("enrollment_student_id_fkey", "enroll"),
+        )
+
+    def test_a_section_key_failure_names_the_section(
+        self: StarterForeignKeyMessageTests,
+    ) -> None:
+        self.assertEqual(
+            "Section not found.",
+            self.message("enrollment_term_instructor_id_fkey", "enroll"),
+        )
+
+    def test_a_payment_key_failure_names_the_charge(
+        self: StarterForeignKeyMessageTests,
+    ) -> None:
+        self.assertEqual(
+            "The charge does not exist.",
+            self.message("payment_student_id_fkey", "payment"),
+        )
 
 
 if __name__ == "__main__":
