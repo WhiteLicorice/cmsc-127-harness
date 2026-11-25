@@ -8961,6 +8961,7 @@ import sysconfig
 
 HARNESS = Path(sys.argv[1])
 MARKER = Path(sys.argv[2])
+TOKEN = sys.argv[3]
 sys.path.insert(0, str(HARNESS))
 
 KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -8969,7 +8970,15 @@ MARKER.write_text(str(int(KERNEL32.GetConsoleWindow() or 0)), encoding="utf-8")
 
 import runner
 
-raise SystemExit(runner.main(sys.argv[3:]))
+
+class _Token:
+    """Stand in for the UUID, so the parent knows the database name."""
+
+    hex = TOKEN
+
+
+runner.uuid4 = _Token
+raise SystemExit(runner.main(sys.argv[4:]))
 '''
 
 
@@ -8978,15 +8987,21 @@ raise SystemExit(runner.main(sys.argv[3:]))
 )
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ConsoleCloseCleanupTests(unittest.TestCase):
-    """A closed console window leaves no race database behind."""
+    """A closed console window leaves no race database behind.
 
-    def race_databases(self: ConsoleCloseCleanupTests, url: str) -> set[str]:
+    The driver runs with a token the test chose, so the test knows the one
+    database name the run creates. It drops that name and nothing else. A
+    database another run created while this test ran must survive, because a
+    shared cluster can hold other runs' scratch databases.
+    """
+
+    def race_database_exists(
+        self: ConsoleCloseCleanupTests, url: str, name: str
+    ) -> bool:
         with psycopg.connect(url, autocommit=True) as admin:
             with admin.cursor() as cursor:
-                cursor.execute(
-                    "SELECT datname FROM pg_database WHERE datname LIKE 'cmsc127_race_%'"
-                )
-                return {str(row[0]) for row in cursor.fetchall()}
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+                return cursor.fetchone() is not None
 
     def drop(
         self: ConsoleCloseCleanupTests, url: str, name: str
@@ -8999,15 +9014,14 @@ class ConsoleCloseCleanupTests(unittest.TestCase):
                     )
                 )
 
-    def test_a_closed_console_window_drops_the_race_database(
-        self: ConsoleCloseCleanupTests,
-    ) -> None:
+    def run_console_close(self: ConsoleCloseCleanupTests) -> tuple[str, str, bool]:
+        """Close the console of a run and report the output and the drop."""
         url = os.environ["CMSC127_DATABASE_URL"]
-        before = self.race_databases(url)
+        token = uuid4().hex
+        name = f"cmsc127_race_{token}"
         output = ""
         window = 0
-        created: set[str] = set()
-        leftover: set[str] = set()
+        exists = False
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             base = Path(directory)
             root = base / "starter"
@@ -9034,6 +9048,7 @@ class ConsoleCloseCleanupTests(unittest.TestCase):
                     str(driver),
                     str(Path(runner.__file__).resolve().parent),
                     str(marker),
+                    token,
                     "1",
                     "--root",
                     str(root),
@@ -9055,13 +9070,13 @@ class ConsoleCloseCleanupTests(unittest.TestCase):
                 while time.monotonic() < deadline:
                     if marker.exists():
                         window = int(marker.read_text(encoding="utf-8").strip() or "0")
-                    created = self.race_databases(url) - before
-                    if created and window:
+                    exists = self.race_database_exists(url, name)
+                    if exists and window:
                         break
                     if process.poll() is not None:
                         break
                     time.sleep(0.1)
-                self.assertTrue(created, "the run made no race database")
+                self.assertTrue(exists, "the run made no race database")
                 self.assertTrue(window, "the run reported no console window")
                 post = cast(Any, ctypes).WinDLL("user32", use_last_error=True).PostMessageW
                 post.argtypes = [
@@ -9075,10 +9090,10 @@ class ConsoleCloseCleanupTests(unittest.TestCase):
                 self.assertTrue(posted, "WM_CLOSE did not reach the console window")
                 process.wait(timeout=90)
                 deadline = time.monotonic() + 15
-                leftover = self.race_databases(url) & created
-                while leftover and time.monotonic() < deadline:
+                exists = self.race_database_exists(url, name)
+                while exists and time.monotonic() < deadline:
                     time.sleep(0.2)
-                    leftover = self.race_databases(url) & created
+                    exists = self.race_database_exists(url, name)
             finally:
                 if process.poll() is None:
                     subprocess.run(
@@ -9090,12 +9105,81 @@ class ConsoleCloseCleanupTests(unittest.TestCase):
                 if process.stdout is not None:
                     output = process.stdout.read()
                     process.stdout.close()
-                for leftover_name in created:
-                    self.drop(url, leftover_name)
+                self.drop(url, name)
+        return name, output, exists
+
+    def test_a_closed_console_window_drops_the_race_database(
+        self: ConsoleCloseCleanupTests,
+    ) -> None:
+        name, output, leftover = self.run_console_close()
 
         self.assertFalse(
-            leftover, f"the race database outlived the closed console\n{output}"
+            leftover, f"the race database {name} outlived the closed console\n{output}"
         )
+
+    def test_a_database_the_run_did_not_create_survives(
+        self: ConsoleCloseCleanupTests,
+    ) -> None:
+        """A shared cluster can hold another run's scratch database."""
+        url = os.environ["CMSC127_DATABASE_URL"]
+        bystander = f"cmsc127_race_bystander_{uuid4().hex}"
+        with psycopg.connect(url, autocommit=True) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    psycopg_sql.SQL("CREATE DATABASE {}").format(
+                        psycopg_sql.Identifier(bystander)
+                    )
+                )
+        self.addCleanup(self.drop, url, bystander)
+
+        name, output, leftover = self.run_console_close()
+
+        self.assertFalse(
+            leftover, f"the race database {name} outlived the closed console\n{output}"
+        )
+        self.assertTrue(
+            self.race_database_exists(url, bystander),
+            "the test dropped a database that it did not create",
+        )
+
+
+
+class FirstDifferingTableTests(unittest.TestCase):
+    """The restore message names the first table whose rows changed."""
+
+    def name(
+        self: FirstDifferingTableTests,
+        before: dict[str, list[tuple[object, ...]]],
+        after: dict[str, list[tuple[object, ...]]],
+    ) -> str:
+        return runner._first_differing_table(  # pyright: ignore[reportPrivateUsage]
+            before, after
+        )
+
+    def test_a_changed_table_is_named(self: FirstDifferingTableTests) -> None:
+        before: dict[str, list[tuple[object, ...]]] = {
+            "alpha": [(1,)],
+            "beta": [(2,)],
+        }
+        after: dict[str, list[tuple[object, ...]]] = {
+            "alpha": [(1,)],
+            "beta": [(3,)],
+        }
+        self.assertEqual("beta", self.name(before, after))
+
+    def test_an_added_table_is_named(self: FirstDifferingTableTests) -> None:
+        before: dict[str, list[tuple[object, ...]]] = {"alpha": [(1,)]}
+        after: dict[str, list[tuple[object, ...]]] = {"alpha": [(1,)], "beta": []}
+        self.assertEqual("beta", self.name(before, after))
+
+    def test_a_lost_table_is_named(self: FirstDifferingTableTests) -> None:
+        before: dict[str, list[tuple[object, ...]]] = {"alpha": [(1,)], "beta": []}
+        after: dict[str, list[tuple[object, ...]]] = {"alpha": [(1,)]}
+        self.assertEqual("beta", self.name(before, after))
+
+    def test_equal_snapshots_name_no_table(self: FirstDifferingTableTests) -> None:
+        snapshot: dict[str, list[tuple[object, ...]]] = {"alpha": [(1,)]}
+        self.assertEqual("", self.name(snapshot, dict(snapshot)))
 
 
 if __name__ == "__main__":
