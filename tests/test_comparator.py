@@ -44,7 +44,15 @@ class _TestConnection(Protocol):
     def close(self: _TestConnection) -> None: ...
 
 
+class _PsycopgInfoAPI(Protocol):
+    def conninfo_to_dict(
+        self: _PsycopgInfoAPI, conninfo: str
+    ) -> dict[str, object]: ...
+
+
 class _PsycopgAPI(Protocol):
+    conninfo: _PsycopgInfoAPI
+
     def connect(self: _PsycopgAPI, url: str) -> object: ...
 
 
@@ -429,6 +437,13 @@ class ComparatorTests(unittest.TestCase):
 
     def test_pg8000_connection_reads_the_same_catalog(self: ComparatorTests) -> None:
         dbapi = cast(_Pg8000API, import_module("pg8000.dbapi"))
+        psycopg = cast(_PsycopgAPI, import_module("psycopg"))
+        # Both drivers read the same server. The class connects with the
+        # configured URL, so this case must use it too. The ambient PG*
+        # variables can name another server, or none.
+        settings = psycopg.conninfo.conninfo_to_dict(
+            os.environ["CMSC127_DATABASE_URL"]
+        )
 
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE t04_compare.parent (id integer PRIMARY KEY)")
@@ -436,11 +451,13 @@ class ComparatorTests(unittest.TestCase):
         connection = cast(
             _TestConnection,
             dbapi.connect(
-                host=os.environ.get("PGHOST", "127.0.0.1"),
-                port=int(os.environ.get("PGPORT", "5432")),
-                user=os.environ.get("PGUSER", "postgres"),
-                password=os.environ.get("PGPASSWORD") or None,
-                database=os.environ.get("PGDATABASE", "postgres"),
+                host=str(settings.get("host") or "127.0.0.1"),
+                port=int(str(settings.get("port") or "5432")),
+                user=str(settings.get("user") or "postgres"),
+                password=(
+                    str(settings["password"]) if settings.get("password") else None
+                ),
+                database=str(settings.get("dbname") or "postgres"),
             ),
         )
         connection.autocommit = True
