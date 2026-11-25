@@ -25,7 +25,7 @@ from uuid import uuid4
 
 import psycopg
 from psycopg import sql as psycopg_sql
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import runner
 
 from runner import compare_dataset, load_manifest, main, select_cases
@@ -8324,6 +8324,73 @@ raise SystemExit(runner.main(sys.argv[5:]))
 '''
 
 
+def application_url(url: str, application: str) -> str:
+    """The run's URL with an application name, in either connection shape.
+
+    The suite gets a URI from the test runner and a keyword list from a
+    self-test, which hands its child the string that make_conninfo returns. A
+    query appended to a keyword list lands in the last setting's value, so the
+    name goes in through the connection string parser.
+    """
+    return make_conninfo(url, application_name=application)
+
+
+def nested_output(path: Path) -> str:
+    """The nested runner's own output, for a failure message.
+
+    A driver writes to a file, not to a pipe. A pipe that fills stops the
+    child, and a child that ends early leaves its reason unread. Read the file
+    after the child has ended or reached its marker.
+    """
+    if not path.exists():
+        return "the nested runner wrote no output"
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    return text or "the nested runner wrote no output"
+
+
+class ApplicationUrlTests(unittest.TestCase):
+    """The driver's URL keeps every setting in either connection shape."""
+
+    def assert_keeps_settings(self: ApplicationUrlTests, built: str) -> None:
+        """The name is added and the rest of the string is unchanged."""
+        settings = conninfo_to_dict(built)
+
+        self.assertEqual("probe-name", settings["application_name"])
+        self.assertEqual("127.0.0.1", settings["host"])
+        self.assertEqual("55890", settings["port"])
+        self.assertEqual("c127_t20ga_probe", settings["dbname"])
+        self.assertEqual("postgres", settings["user"])
+
+    def test_a_uri_gains_the_application_name(self: ApplicationUrlTests) -> None:
+        """A self-test hands its child a keyword list, a test runner a URI."""
+        built = application_url(
+            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe", "probe-name"
+        )
+
+        self.assert_keeps_settings(built)
+
+    def test_a_keyword_list_gains_the_application_name(
+        self: ApplicationUrlTests,
+    ) -> None:
+        """A query appended to a keyword list would land in its last value."""
+        url = make_conninfo(
+            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe"
+        )
+        built = application_url(url, "probe-name")
+
+        self.assert_keeps_settings(built)
+
+    def test_a_supplied_name_is_replaced(self: ApplicationUrlTests) -> None:
+        """Two runs that share a base URL still report distinct names."""
+        built = application_url(
+            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe"
+            "?application_name=earlier",
+            "probe-name",
+        )
+
+        self.assert_keeps_settings(built)
+
+
 @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class NormalDropCompletionTests(unittest.TestCase):
     """A normal end drops its database before it reports success."""
@@ -8370,28 +8437,30 @@ class NormalDropCompletionTests(unittest.TestCase):
             driver = base / "driver.py"
             driver.write_text(NORMAL_DROP_DRIVER, encoding="utf-8")
             marker = base / "marker.txt"
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(driver),
-                    str(Path(runner.__file__).resolve().parent),
-                    str(marker),
-                    token,
-                    budget,
-                    "1",
-                    "--root",
-                    str(root),
-                    "--runner-dir",
-                    str(runner_dir),
-                ],
-                cwd=root,
-                env=os.environ.copy(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            log = base / "driver.log"
+            sink = log.open("wb")
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(driver),
+                        str(Path(runner.__file__).resolve().parent),
+                        str(marker),
+                        token,
+                        budget,
+                        "1",
+                        "--root",
+                        str(root),
+                        "--runner-dir",
+                        str(runner_dir),
+                    ],
+                    cwd=root,
+                    env=os.environ.copy(),
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                )
+            finally:
+                sink.close()
             try:
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
@@ -8402,7 +8471,7 @@ class NormalDropCompletionTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(
                     marker.exists() and marker.read_text(encoding="utf-8") == "ready",
-                    "the runner did not reach its real DROP",
+                    "the runner did not reach its real DROP\n" + nested_output(log),
                 )
                 with psycopg.connect(url) as blocker:
                     with blocker.cursor() as cursor:
@@ -8428,9 +8497,7 @@ class NormalDropCompletionTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
-                if process.stderr is not None:
-                    failure = process.stderr.read()
-                    process.stderr.close()
+                failure = nested_output(log)
                 self.drop(url, name)
         return returncode if returncode is not None else -1, failure, early, present
 
@@ -8492,7 +8559,7 @@ class StoppedDropReportTests(unittest.TestCase):
         token = uuid4().hex
         name = f"cmsc127_race_{token}"
         application = f"c127_t20fl_stop_{token[:8]}"
-        base = url + ("&" if "?" in url else "?") + "application_name=" + application
+        base = application_url(url, application)
         output = ""
         returncode = -1
         waited = 0.0
@@ -8507,29 +8574,31 @@ class StoppedDropReportTests(unittest.TestCase):
             driver = Path(directory) / "driver.py"
             driver.write_text(NORMAL_DROP_DRIVER, encoding="utf-8")
             marker = Path(directory) / "marker.txt"
+            log = Path(directory) / "driver.log"
             environment = dict(os.environ, CMSC127_DATABASE_URL=base)
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(driver),
-                    str(Path(runner.__file__).resolve().parent),
-                    str(marker),
-                    token,
-                    budget,
-                    "1",
-                    "--root",
-                    str(root),
-                    "--runner-dir",
-                    str(runner_dir),
-                ],
-                cwd=root,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            sink = log.open("wb")
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(driver),
+                        str(Path(runner.__file__).resolve().parent),
+                        str(marker),
+                        token,
+                        budget,
+                        "1",
+                        "--root",
+                        str(root),
+                        "--runner-dir",
+                        str(runner_dir),
+                    ],
+                    cwd=root,
+                    env=environment,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                )
+            finally:
+                sink.close()
             try:
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
@@ -8540,7 +8609,7 @@ class StoppedDropReportTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertTrue(
                     marker.exists() and marker.read_text(encoding="utf-8") == "ready",
-                    "the runner did not reach its real DROP",
+                    "the runner did not reach its real DROP\n" + nested_output(log),
                 )
                 with psycopg.connect(url) as blocker:
                     with blocker.cursor() as cursor:
@@ -8577,9 +8646,7 @@ class StoppedDropReportTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
-                if process.stdout is not None:
-                    output = process.stdout.read()
-                    process.stdout.close()
+                output = nested_output(log)
                 self.drop(url, name)
         return returncode, output, waited, present
 
@@ -8719,7 +8786,7 @@ class StoppedCreateReportTests(unittest.TestCase):
         token = uuid4().hex
         name = f"cmsc127_race_{token}"
         application = f"c127_t20fo_create_{token[:8]}"
-        base = url + ("&" if "?" in url else "?") + "application_name=" + application
+        base = application_url(url, application)
         output = ""
         returncode = -1
         waited = 0.0
@@ -8740,23 +8807,25 @@ class StoppedCreateReportTests(unittest.TestCase):
                 if self_test
                 else ["run", "1", "--root", str(root), "--runner-dir", str(runner_dir)]
             )
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(driver),
-                    str(Path(runner.__file__).resolve().parent),
-                    str(marker),
-                    token,
-                    *arguments,
-                ],
-                cwd=root,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            log = Path(directory) / "driver.log"
+            sink = log.open("wb")
+            try:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(driver),
+                        str(Path(runner.__file__).resolve().parent),
+                        str(marker),
+                        token,
+                        *arguments,
+                    ],
+                    cwd=root,
+                    env=environment,
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                )
+            finally:
+                sink.close()
             try:
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
@@ -8767,7 +8836,7 @@ class StoppedCreateReportTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertTrue(
                     marker.exists() and marker.read_text(encoding="utf-8") == "create",
-                    "the runner did not reach its latched CREATE",
+                    "the runner did not reach its latched CREATE\n" + nested_output(log),
                 )
                 signal_at = time.monotonic()
                 process.send_signal(signal.SIGTERM)
@@ -8780,7 +8849,7 @@ class StoppedCreateReportTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertTrue(
                     marker.exists() and marker.read_text(encoding="utf-8") == "ready",
-                    "the runner did not reach its real DROP",
+                    "the runner did not reach its real DROP\n" + nested_output(log),
                 )
                 with psycopg.connect(url) as blocker:
                     with blocker.cursor() as cursor:
@@ -8815,9 +8884,7 @@ class StoppedCreateReportTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
-                if process.stdout is not None:
-                    output = process.stdout.read()
-                    process.stdout.close()
+                output = nested_output(log)
                 self.drop(url, name)
         return returncode, output, waited, present
 
