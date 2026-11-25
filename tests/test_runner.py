@@ -8250,12 +8250,19 @@ class CleanupDeadlineTests(unittest.TestCase):
     ) -> None:
         """The self-test shares the drop of the signal cleanup path."""
         notes = StringIO()
+        # The self-test reads a base URL before it creates a database. Every
+        # database call here is mocked, so a parseable placeholder is enough.
+        # The case must run without a database, not skip like the classes that
+        # connect to one.
         with patch.object(
             runner,
             "_create_database",
             return_value=(f"cmsc127_race_{uuid4().hex}", cast(Any, Mock())),
         ), patch.object(runner, "subprocess") as child, patch.object(
             runner, "_drop_database", side_effect=stall_drop
+        ), patch.dict(
+            os.environ,
+            {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1:55890/postgres"},
         ):
             child.run.return_value.returncode = 0
             with redirect_stderr(notes):
