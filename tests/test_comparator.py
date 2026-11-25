@@ -60,6 +60,7 @@ class _Pg8000API(Protocol):
     ) -> object: ...
 
 
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ComparatorTests(unittest.TestCase):
     connection: _TestConnection
 
