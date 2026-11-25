@@ -6239,6 +6239,7 @@ class ConsoleStopPairTests(StopPairTests):
     sys.platform == "win32",
     "Windows ends a process on SIGTERM without running a Python handler",
 )
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class StopSignalPairTests(StopPairTests):
     """Two POSIX stops at the handler change keep the first stop's code.
 
@@ -7600,8 +7601,10 @@ class SectionStopTests(unittest.TestCase):
 class ConsoleSectionStopTests(SectionStopTests):
     """The same three cases, with a native console event on Windows."""
 
-    # The base class skips on Windows. This class is the Windows case.
-    __unittest_skip__ = False
+    # The base class skips on Windows. This class is the Windows case, and it
+    # keeps the database guard that the base class sets.
+    __unittest_skip__ = not os.environ.get("CMSC127_DATABASE_URL")
+    __unittest_skip_why__ = "requires PostgreSQL"
 
     def process_options(self: ConsoleSectionStopTests) -> dict[str, Any]:
         return private_console_options()
@@ -7766,12 +7769,13 @@ class CallerMaskRestoreTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
-@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ConsoleSectionMaskTests(SectionMaskTests):
     """The class test, with a native console event on Windows."""
 
-    # The base class skips on Windows. This class is the Windows case.
-    __unittest_skip__ = False
+    # The base class skips on Windows. This class is the Windows case, and it
+    # keeps the database guard that the base class sets.
+    __unittest_skip__ = not os.environ.get("CMSC127_DATABASE_URL")
+    __unittest_skip_why__ = "requires PostgreSQL"
 
     def process_options(self: ConsoleSectionMaskTests) -> dict[str, Any]:
         return private_console_options()
