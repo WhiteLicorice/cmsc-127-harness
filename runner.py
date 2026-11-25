@@ -836,7 +836,8 @@ def _validate_case(
             ) from error
     if not case_path.is_file():
         raise fault(
-            f"case {case_id}: case file is missing: {relative_file}.",
+            f"case {case_id}: case file is missing: {relative_file}. Create it, "
+            "or restore it from the starter you received.",
             (*location, "file"),
         )
     allowed_suffixes = {
@@ -894,7 +895,8 @@ def _validate_case(
     listed.add(expected_path)
     if not expected_path.is_file():
         raise fault(
-            f"case {case_id}: the .expected file is missing.",
+            f"case {case_id}: the .expected file is missing. Create it, or "
+            "restore it from the starter you received.",
             (*location, "file"),
         )
     expected = _as_object(_read_json(expected_path), f"case {case_id} .expected")
@@ -2873,7 +2875,10 @@ def _design_rows(
         return ["the design case needs file, headings, and placeholders."]
     path = root / file_name
     if not path.is_file():
-        return [f"{file_name} is missing, so the design record cannot be checked."]
+        return [
+            f"{file_name} is missing, so the design record cannot be checked. "
+            "Create it, or restore it from the starter you received."
+        ]
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -3365,7 +3370,10 @@ def _run_case(
         report_path = _report_path(root, report_name, case_id)
         if report_path is None:
             actual = {"columns": [], "rows": []}
-            problems = [f"report SQL file is missing: {report_name}"]
+            problems = [
+                f"report SQL file is missing: {report_name}. Create it, or "
+                "restore it from the starter you received."
+            ]
         else:
             statement_count = _sql_statement_count(
                 report_path.read_text(encoding="utf-8")
@@ -3392,7 +3400,11 @@ def _run_case(
         if report_path is None:
             view_rows = cast(
                 list[list[object]],
-                [[view_name, f"the report SQL file is missing: {report_name}"]],
+                [[
+                    view_name,
+                    f"the report SQL file is missing: {report_name}. Create "
+                    "it, or restore it from the starter you received.",
+                ]],
             )
         else:
             view_rows = _view_bypass_rows(connection, report_path, view_name)
@@ -3603,7 +3615,10 @@ def _check_feature(
         except ValueError:
             return [f"feature file must stay inside the repository: {file_name}"]
         if not path.is_file():
-            return [f"feature file is missing: {file_name}"]
+            return [
+                f"feature file is missing: {file_name}. Create it, or restore "
+                "it from the starter you received."
+            ]
         feature_text = _strip_sql_comments_and_strings(
             path.read_text(encoding="utf-8")
         )
@@ -3639,7 +3654,10 @@ def _check_feature(
         )
         row = cursor.fetchone()
     if row is None or not isinstance(row[0], str):
-        return [f"required view {view} does not exist."]
+        return [
+            f"required view {view} does not exist. Create the view in a "
+            "migration."
+        ]
     if migration_views is not None and (schema, view) not in migration_views:
         return [f"view {view} was not created by a migration."]
     return []
@@ -3800,9 +3818,15 @@ def _check_index(
         return [f"index query must be a SQL file: {file_name}"]
     identity = _resolve_index(connection, index_name)
     if identity is None:
-        return [f"index {index_name} does not exist in the catalog."]
+        return [
+            f"index {index_name} does not exist in the catalog. Create the "
+            "index in a migration."
+        ]
     if identity not in migration_indexes:
-        return [f"index {index_name} was not created by a migration."]
+        return [
+            f"index {index_name} was not created by a migration. Move the "
+            "index into a migration."
+        ]
     if isinstance(key_column, str):
         key_columns = _index_key_columns(connection, identity)
         if not key_columns:
@@ -3879,7 +3903,10 @@ def _check_written(root: Path, item: Mapping[str, object]) -> list[str]:
         return ["written invariant needs file and sections."]
     path = root / file_name
     if not path.is_file():
-        return [f"written answer file is missing: {file_name}"]
+        return [
+            f"written answer file is missing: {file_name}. Create it and "
+            "write both sections."
+        ]
     content = path.read_text(encoding="utf-8")
     for heading in cast(list[object], sections):
         if not isinstance(heading, str):
@@ -4046,23 +4073,31 @@ def _required_file_faults(
     faults: list[str] = []
     for relative in REQUIRED_STARTER_FILES:
         if not (root / relative).is_file():
-            faults.append(f"{relative}: the file is missing.")
+            faults.append(
+                f"{relative}: the file is missing. Create it, or restore it "
+                "from the starter you received."
+            )
     for relative in REQUIRED_STARTER_DIRS:
         if not (root / relative).is_dir():
-            faults.append(f"{relative}/: the folder is missing.")
+            faults.append(
+                f"{relative}/: the folder is missing. Create it, or restore it "
+                "from the starter you received."
+            )
     for case in select_cases(manifest, stage):
         case_id = str(case.get("id"))
         path = _case_file(root, case)
         if not path.is_file():
             faults.append(
                 f"{path.relative_to(root).as_posix()}: the case file for "
-                f"{case_id} is missing."
+                f"{case_id} is missing. Create it, or restore it from the "
+                "starter you received."
             )
         expected = _case_expected_file(root, case)
         if not expected.is_file():
             faults.append(
                 f"{expected.relative_to(root).as_posix()}: the expected result "
-                f"for {case_id} is missing."
+                f"for {case_id} is missing. Create it, or restore it from the "
+                "starter you received."
             )
     return faults
 
@@ -4162,6 +4197,17 @@ def _schema_snapshot(connection: _DbConnection) -> dict[str, list[tuple[object, 
     return snapshot
 
 
+def _first_differing_table(
+    before: dict[str, list[tuple[object, ...]]],
+    after: dict[str, list[tuple[object, ...]]],
+) -> str:
+    """The first table whose rows changed, or the first table added or lost."""
+    for table in sorted(set(before) | set(after)):
+        if before.get(table) != after.get(table):
+            return table
+    return ""
+
+
 def _backup_restore(
     root: Path,
     connection: _DbConnection,
@@ -4207,7 +4253,13 @@ def _backup_restore(
                     with connection.cursor() as cursor:
                         _execute(cursor, "TRUNCATE " + quoted_tables + " CASCADE")
         after = _schema_snapshot(connection)
-    return [] if before == after else ["restored rows differ from the pre-backup rows."]
+    if before == after:
+        return []
+    table = _first_differing_table(before, after)
+    return [
+        f"restored rows differ from the pre-backup rows in {table}. "
+        "Read RESTORE.md and repeat the backup and the restore."
+    ]
 
 
 def _contribution_table(root: Path) -> str:

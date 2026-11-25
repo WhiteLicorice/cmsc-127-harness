@@ -480,7 +480,7 @@ def _schema_endpoint(
                 "subject": "README.md",
                 "erdValue": "erDiagram block",
                 "schemaValue": "none",
-                "message": "No Mermaid erDiagram block appears in README.md.",
+                "message": "No Mermaid erDiagram block appears in README.md. Add one to README.md.",
             }
         ]
 
@@ -681,7 +681,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.headers.get_all("Host", []) not in (
             [f"127.0.0.1:{port}"], [f"localhost:{port}"],
         ):
-            self._send_json(403, {"message": "The harness could not complete this request."})
+            self._send_json(
+                403,
+                {
+                    "message": (
+                        "The harness could not complete this request. Open the "
+                        "address the server printed, on 127.0.0.1 with its port."
+                    )
+                },
+            )
             return
         parts = urlsplit(self.path)
         endpoint = API_ENDPOINTS.get(parts.path)
@@ -697,7 +705,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 status = 500
                 payload = {
-                    "message": "The harness could not complete this request.",
+                    "message": (
+                        "The harness could not complete this request. Open the "
+                        "address the server printed. If the page still fails, "
+                        "restart the page server with bash start.sh."
+                    ),
                     "api_version": API_VERSION,
                 }
             self._send_json(status, payload)
