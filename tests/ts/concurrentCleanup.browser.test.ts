@@ -19,26 +19,35 @@ const fixtureRoot = resolve(root, ".vitest/concurrent-cleanup");
 
 // This file owns port 55632. The item gate keeps every browser file inside
 // 55630 to 55639.
+//
+// A port is free only when this process binds it. Any bind error counts as
+// taken. A blocked port (EACCES) would otherwise read as free, and the test
+// would fail later with a message about a refused connection.
 const LANE_PORTS = [55632];
 
 async function listenOnLanePort(target: Server): Promise<number> {
+  const failures: string[] = [];
   for (const port of LANE_PORTS) {
-    const taken = await new Promise<boolean>((ready) => {
+    const failure = await new Promise<NodeJS.ErrnoException | null>((ready) => {
       const failed = (error: NodeJS.ErrnoException) => {
         target.off("listening", listened);
-        ready(error.code === "EADDRINUSE");
+        ready(error);
       };
       const listened = () => {
         target.off("error", failed);
-        ready(false);
+        ready(null);
       };
       target.once("error", failed);
       target.once("listening", listened);
       target.listen(port, "127.0.0.1");
     });
-    if (!taken) return port;
+    if (failure === null) return port;
+    failures.push(`${port}: ${failure.code ?? failure.message}`);
   }
-  throw new Error(`The concurrent-cleanup test server found no free port in ${LANE_PORTS.join(", ")}.`);
+  throw new Error(
+    `The concurrent-cleanup test server found no free port in ${LANE_PORTS.join(", ")}. ` +
+      `Bind errors: ${failures.join(", ")}.`,
+  );
 }
 
 const TYPES: Record<string, string> = {
