@@ -597,6 +597,7 @@ class FormFaultTests(unittest.TestCase):
 
 
 class PairManifestTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
     def test_pair_manifest_adds_a_case_through_the_full_runner(self: PairManifestTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "pair"
@@ -816,6 +817,7 @@ class PyrightTests(unittest.TestCase):
             )
             self.assertEqual("fail", summary["status"])
 
+    @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
     def test_pyright_result_reaches_the_count_line_and_json(self: PyrightTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -855,6 +857,7 @@ class PyrightTests(unittest.TestCase):
             )
             self.assertEqual({"errors": 0, "status": "pass"}, document["pyright"])
 
+    @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
     def test_ignore_directive_fails_the_full_run(self: PyrightTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -935,6 +938,7 @@ class ContributionTests(unittest.TestCase):
             self.assertIn("Ada", table)
             self.assertIn("Grace", table)
 
+    @unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
     def test_contribution_adds_no_score(self: ContributionTests) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
