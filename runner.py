@@ -1739,10 +1739,11 @@ class _StopGuard:
     the run returns. Only a stop that the guard held can become the run's exit
     code.
 
-    The take cannot see an ignore action. POSIX discards a pending signal at
-    the moment its action becomes SIG_IGN, and that change happens inside the
-    section, before the take runs. Such a stop is gone before the take, so no
-    drain can record it.
+    The take cannot see a stop that was pending when its action became
+    SIG_IGN. POSIX discards a pending signal at that change, and the change
+    happens inside the section, before the take runs. Linux can still queue a
+    new stop that arrives after the change, while the mask holds it, and the
+    take records that stop.
 
     Documented tool gap. A stop that arrives inside a section is held by the
     kernel as a member of a pending set, and the set carries no order. CPython
@@ -1857,9 +1858,10 @@ class _StopGuard:
         the caller still holds them after the run. Without that skip the drain
         would take a signal that the caller had asked the kernel to hold.
 
-        A slot that holds SIG_IGN needs no work here. POSIX discards a pending
-        signal at the moment its action becomes SIG_IGN, which happens inside
-        the section before this call. The drain never sees such a stop.
+        POSIX discards a signal that is pending at the moment its action
+        becomes SIG_IGN, which happens inside the section before this call.
+        The drain never sees that stop. Linux can queue a new stop after the
+        change, while the mask holds it, and the drain takes that one.
 
         sigwait is the portable way to take a pending signal. sigtimedwait
         would do the same with a zero timeout, but macOS does not declare it,
@@ -2197,7 +2199,9 @@ class _StopGuard:
         the section takes every pending guarded stop whose slot now holds the
         caller's default action, and records the first one as a stop. The
         caller then sees that stop's replay, and every handler is back. A stop
-        that the caller had already blocked stays pending for the caller.
+        that the caller had already blocked stays pending for the caller,
+        unless the caller's own action is SIG_IGN. Putting that action back
+        discards a pending stop.
 
         The native console handler goes last, so a Ctrl+Break during the
         section is held. The replay of the first recorded stop is the last
