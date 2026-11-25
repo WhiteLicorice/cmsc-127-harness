@@ -7791,13 +7791,11 @@ class ConsoleSectionMaskTests(SectionMaskTests):
 
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
-# A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster and the browser tests stay free. A gate that runs
-# beside another gate reserves its own ports through CMSC127_TEST_PORTS, the
-# same variable the launcher tests read, so no gate's ports are fixed here.
-# Without that variable the lane is the one CI uses.
-STALL_DEFAULT_LANE = range(55721, 55727)
-STALL_LANE = tuple(reserved_ports(len(STALL_DEFAULT_LANE), STALL_DEFAULT_LANE))
+# A stall fixture takes one loopback port that the operating system chooses
+# when it starts. It skips a busy port, so the database cluster and the browser
+# tests stay free. A gate that runs beside another gate reserves its own ports
+# through CMSC127_TEST_PORTS, the same variable the launcher tests read.
+STALL_LANE = tuple(reserved_ports(6))
 
 
 def stall_drop(*arguments: object) -> None:
