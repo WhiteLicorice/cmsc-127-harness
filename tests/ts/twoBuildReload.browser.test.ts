@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listenOnFreePort } from "./listen";
+import { closeServer, listenOnFreePort } from "./listen";
 
 // A rejected update keeps the first snapshot. The next navigation then meets
 // HTML from the second build. The worker must answer with the page that
@@ -105,7 +105,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function caches(page: Page): Promise<string[]> {

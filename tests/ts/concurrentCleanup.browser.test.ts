@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listenOnFreePort } from "./listen";
+import { closeServer, listenOnFreePort } from "./listen";
 
 // Two cleanups can overlap. A reload starts one. A second reload starts another
 // before the first ends. The first reads the cache list. A second pass deletes
@@ -155,7 +155,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function caches(page: Page): Promise<string[]> {

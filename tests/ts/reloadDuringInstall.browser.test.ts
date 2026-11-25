@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listenOnFreePort } from "./listen";
+import { closeServer, listenOnFreePort } from "./listen";
 
 // A student reloads while a second build downloads. The active worker runs its
 // cleanup during that download. That cleanup must keep the snapshot which the
@@ -152,7 +152,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function caches(page: Page): Promise<string[]> {

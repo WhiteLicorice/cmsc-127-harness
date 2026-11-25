@@ -31,3 +31,12 @@ export async function listenOnFreePort(target: Server, name: string): Promise<nu
   }
   return address.port;
 }
+
+// Close a test server after its browser. A request that is still in flight
+// keeps server.close() waiting, and the afterAll hook then times out.
+// closeAllConnections ends those sockets first, so the close always settles.
+export async function closeServer(target: Server | undefined): Promise<void> {
+  if (target === undefined) return;
+  target.closeAllConnections();
+  await new Promise<void>((closed) => target.close(() => closed()));
+}

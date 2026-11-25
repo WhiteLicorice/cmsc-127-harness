@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listenOnFreePort } from "./listen";
+import { closeServer, listenOnFreePort } from "./listen";
 
 // A build can take over the tab while the previous document still boots. The
 // document's later module request must then read its own build, not the new
@@ -157,7 +157,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function caches(page: Page): Promise<string[]> {
