@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeServer } from "./listen";
 
 const root = resolve(import.meta.dirname, "../..");
 const publicRoot = resolve(root, "public");
@@ -106,7 +107,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function hostedPage(status: unknown): Promise<{ page: Page; requested: string[] }> {
