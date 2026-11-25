@@ -6164,6 +6164,7 @@ class StopPairTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ConsoleStopPairTests(StopPairTests):
     """Two console stops at the handler change keep the first stop's code.
 
@@ -6238,6 +6239,7 @@ class ConsoleStopPairTests(StopPairTests):
     sys.platform == "win32",
     "Windows ends a process on SIGTERM without running a Python handler",
 )
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class StopSignalPairTests(StopPairTests):
     """Two POSIX stops at the handler change keep the first stop's code.
 
@@ -7448,7 +7450,6 @@ class SectionMaskTests(unittest.TestCase):
     sys.platform == "win32",
     "Windows delivers a stop as a console event, which needs its own console",
 )
-@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class SectionStopTests(unittest.TestCase):
     """A native stop inside a critical section is held, then taken.
 
@@ -7768,8 +7769,10 @@ class CallerMaskRestoreTests(unittest.TestCase):
 class ConsoleSectionMaskTests(SectionMaskTests):
     """The class test, with a native console event on Windows."""
 
-    # The base class skips on Windows. This class is the Windows case.
-    __unittest_skip__ = False
+    # The base class skips on Windows. This class is the Windows case, and it
+    # keeps the database guard that the base class sets.
+    __unittest_skip__ = not os.environ.get("CMSC127_DATABASE_URL")
+    __unittest_skip_why__ = "requires PostgreSQL"
 
     def process_options(self: ConsoleSectionMaskTests) -> dict[str, Any]:
         return private_console_options()
@@ -7791,13 +7794,11 @@ class ConsoleSectionMaskTests(SectionMaskTests):
 
 CLEANUP_WATCH_SECONDS = 6.0
 NORMAL_WATCH_SECONDS = 15.0
-# A stall fixture takes one loopback port from this lane. It skips a busy port,
-# so the database cluster and the browser tests stay free. A gate that runs
-# beside another gate reserves its own ports through CMSC127_TEST_PORTS, the
-# same variable the launcher tests read, so no gate's ports are fixed here.
-# Without that variable the lane is the one CI uses.
-STALL_DEFAULT_LANE = range(55721, 55727)
-STALL_LANE = tuple(reserved_ports(len(STALL_DEFAULT_LANE), STALL_DEFAULT_LANE))
+# A stall fixture takes one loopback port that the operating system chooses
+# when it starts. It skips a busy port, so the database cluster and the browser
+# tests stay free. A gate that runs beside another gate reserves its own ports
+# through CMSC127_TEST_PORTS, the same variable the launcher tests read.
+STALL_LANE = tuple(reserved_ports(6))
 
 
 def stall_drop(*arguments: object) -> None:
@@ -8252,12 +8253,19 @@ class CleanupDeadlineTests(unittest.TestCase):
     ) -> None:
         """The self-test shares the drop of the signal cleanup path."""
         notes = StringIO()
+        # The self-test reads a base URL before it creates a database. Every
+        # database call here is mocked, so a parseable placeholder is enough.
+        # The case must run without a database, not skip like the classes that
+        # connect to one.
         with patch.object(
             runner,
             "_create_database",
             return_value=(f"cmsc127_race_{uuid4().hex}", cast(Any, Mock())),
         ), patch.object(runner, "subprocess") as child, patch.object(
             runner, "_drop_database", side_effect=stall_drop
+        ), patch.dict(
+            os.environ,
+            {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1:55890/postgres"},
         ):
             child.run.return_value.returncode = 0
             with redirect_stderr(notes):
@@ -8374,8 +8382,12 @@ class ApplicationUrlTests(unittest.TestCase):
     ) -> None:
         """A query appended to a keyword list would land in its last value."""
         url = make_conninfo(
-            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe"
+            "postgresql://postgres@127.0.0.1:55890/c127_t20ga_probe",
+            dbname="c127_t20ga_probe",
         )
+        # The case exists for the keyword shape. A URI would pass on either
+        # body, because make_conninfo returns it unchanged.
+        self.assertNotIn("://", url)
         built = application_url(url, "probe-name")
 
         self.assert_keeps_settings(built)

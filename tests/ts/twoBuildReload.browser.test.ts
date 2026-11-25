@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeServer, listenOnFreePort } from "./listen";
 
 // A rejected update keeps the first snapshot. The next navigation then meets
 // HTML from the second build. The worker must answer with the page that
@@ -11,39 +12,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../..");
 const fixtureRoot = resolve(root, ".vitest/two-build");
-
-// The lane owns ports 55503 to 55505. The test tries them in order. It fails
-// if all three are busy, so it never leaves the lane.
-//
-// A port is free only when this process binds it. Any bind error counts as
-// taken. A blocked port (EACCES) would otherwise read as free, and the test
-// would fail later with a message about a refused connection.
-const LANE_PORTS = [55503, 55504, 55505];
-
-async function listenOnLanePort(target: Server): Promise<number> {
-  const failures: string[] = [];
-  for (const port of LANE_PORTS) {
-    const failure = await new Promise<NodeJS.ErrnoException | null>((ready) => {
-      const failed = (error: NodeJS.ErrnoException) => {
-        target.off("listening", listened);
-        ready(error);
-      };
-      const listened = () => {
-        target.off("error", failed);
-        ready(null);
-      };
-      target.once("error", failed);
-      target.once("listening", listened);
-      target.listen(port, "127.0.0.1");
-    });
-    if (failure === null) return port;
-    failures.push(`${port}: ${failure.code ?? failure.message}`);
-  }
-  throw new Error(
-    `The two-build test server found no free port in ${LANE_PORTS.join(", ")}. ` +
-      `Bind errors: ${failures.join(", ")}.`,
-  );
-}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
@@ -130,14 +98,14 @@ beforeAll(async () => {
       },
     );
   });
-  const port = await listenOnLanePort(server);
+  const port = await listenOnFreePort(server, "two-build");
   origin = `http://127.0.0.1:${port}`;
   browser = await chromium.launch({ headless: true });
 }, 60_000);
 
 afterAll(async () => {
   await browser?.close();
-  await new Promise<void>((closed) => server?.close(() => closed()));
+  await closeServer(server);
 });
 
 async function caches(page: Page): Promise<string[]> {
