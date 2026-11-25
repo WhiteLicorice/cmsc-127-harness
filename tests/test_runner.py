@@ -6164,6 +6164,7 @@ class StopPairTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ConsoleStopPairTests(StopPairTests):
     """Two console stops at the handler change keep the first stop's code.
 
@@ -7765,6 +7766,7 @@ class CallerMaskRestoreTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "win32", "a console event is a Windows event")
+@unittest.skipUnless(os.environ.get("CMSC127_DATABASE_URL"), "requires PostgreSQL")
 class ConsoleSectionMaskTests(SectionMaskTests):
     """The class test, with a native console event on Windows."""
 
