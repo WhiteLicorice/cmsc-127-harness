@@ -101,9 +101,9 @@ started the server. The Checks panel reads the last result from
 
 #### Open the Page
 
-The page loads from <https://whitelicorice.github.io/cmsc-127-harness/>. That
-page is the one to use. Each visit serves the newest page, so a page fix needs
-no new bundle. The server still runs on your computer and reads your own
+The hosted page loads from <https://whitelicorice.github.io/cmsc-127-harness/>.
+That page is the one to use. Each visit serves the newest page, so a page fix
+needs no new bundle. The server still runs on your computer and reads your own
 database.
 
 Start the server first, as the previous section describes. Then open the link
