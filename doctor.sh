@@ -171,7 +171,7 @@ if [ "$python_ok" = true ]; then
         ok 'The pinned PostgreSQL driver is installed.'
     else
         bad 'No pinned PostgreSQL driver passed.' \
-            'Run python -m pip install -r requirements.txt from the harness folder.'
+            'Run python -m pip install -r requirements.txt from this folder.'
     fi
 else
     printf '%s\n' 'Skipped the driver and connection checks because Python did not run.'

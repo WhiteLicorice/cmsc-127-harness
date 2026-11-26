@@ -118,7 +118,7 @@ if ($pythonOk) {
     $driverOutput | ForEach-Object { Write-Host $_ }
     Report-Result $driversOk 'The pinned PostgreSQL driver is installed.' `
         'No pinned PostgreSQL driver passed.' `
-        'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from the harness folder.'
+        'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from this folder.'
 } else {
     Write-Host 'Skipped the driver and connection checks because Python did not run.'
 }

@@ -13,7 +13,7 @@ DRIVERS = (("psycopg", "3.3.9"), ("pg8000", "1.31.6"))
 REQUIRED_DRIVER = ("psycopg", "3.3.9")
 PSYCOPG_REQUIREMENT = (
     "FAIL  psycopg 3.3.9 is not installed. "
-    "Run python -m pip install -r requirements.txt from the harness folder."
+    "Run python -m pip install -r requirements.txt from this folder."
 )
 
 
