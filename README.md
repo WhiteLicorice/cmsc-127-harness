@@ -4,8 +4,9 @@ The harness is a local toolchain for PostgreSQL work.
 
 ## Quick Start
 
-The page is a local web page that reads your PostgreSQL database. The steps use
-Git Bash, the shell that comes with Git for Windows.
+The page shows your PostgreSQL database. It reads a server on your computer.
+That server reads the database. The steps use Git Bash, the shell that comes
+with Git for Windows.
 
 ### Get the Folder
 
@@ -24,7 +25,7 @@ line.
   every second. Check it with `pg_isready`. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`.
-- Python 3.15 or newer, which runs the page. Check it with `python --version`.
+- Python 3.15 or newer, which runs the server. Check it with `python --version`.
   The reply starts with `Python 3.15` or a later version. If the reply is
   lower, install Python 3.15 from <https://www.python.org/downloads/>. On
   Windows, `py -3.15 --version` selects an installed 3.15, and step 1 uses
@@ -56,9 +57,11 @@ PowerShell may find a different `bash`.
    you set for the role when you installed PostgreSQL.
    If the password contains URL punctuation, percent-encode it before putting
    it in the URL. For example, write `@` as `%40`.
-5. Start the page. Run `bash start.sh`. The script prints the address and opens
-   your browser. The page is ready when the Status panel lists the server and
-   the database.
+5. Start the server. Run `bash start.sh`. The script prints the address and
+   opens the local page in your browser. Then open
+   <https://whitelicorice.github.io/cmsc-127-harness/> and click `Connect` in
+   the Status panel. The page is ready when the Status panel lists the server
+   and the database.
 
 ## The Details
 
@@ -72,9 +75,9 @@ together.
 The page shows a PostgreSQL database while you work. Keep it open beside your
 terminal.
 
-#### Start the Page
+#### Start the Server
 
-The Quick Start sets up and starts the page. This section covers what the
+The Quick Start sets up and starts the server. This section covers what the
 script does.
 
 The folder holds the built page, so `start.sh` doesn't build it. If
@@ -83,28 +86,28 @@ line, runs `npm ci` and `npm run build`, and then starts the server. When npm
 is missing, it prints the Node.js 26.13.1 install route and stops with a
 nonzero status.
 
-The script starts the server and opens the default browser. It prints the
-address, usually `http://127.0.0.1:55440/`. If the browser doesn't open, open
-the address that the script prints. Press Ctrl+C in the terminal to stop the
-server. A file from a zip archive may have no executable bit. Run the script
-through `bash` in that case.
+The script starts the server and opens the local page in the default browser.
+It prints the address, usually `http://127.0.0.1:55440/`. If the browser doesn't
+open, open the address that the script prints. Press Ctrl+C in the terminal to
+stop the server. A file from a zip archive may have no executable bit. Run the
+script through `bash` in that case.
 
 The server binds to `127.0.0.1`, the loopback address. It accepts connections
 from this computer only.
 
 The Schema panel reads the ERD from the `README.md` in the folder where you
-started the page. The Checks panel reads the last result from
+started the server. The Checks panel reads the last result from
 `.cmsc127/last-run.json` in that folder.
 
-#### The Hosted Page
+#### Open the Page
 
-The page also loads from <https://whitelicorice.github.io/cmsc-127-harness/>.
-The server still runs on your computer and reads your own database. The local
-page stays the default.
+The page loads from <https://whitelicorice.github.io/cmsc-127-harness/>. That
+page is the one to use. Each visit serves the newest page, so a page fix needs
+no new bundle. The server still runs on your computer and reads your own
+database.
 
 Start the server first, as the previous section describes. Then open the link
-in Chrome or Edge, or in Firefox 151 or later. Safari doesn't support the
-hosted page. Use the local page in Safari.
+in Chrome or Edge, or in Firefox 151 or later.
 
 Click `Connect` in the Status panel. If the browser asks for permission to
 connect to your computer, allow it.
@@ -116,14 +119,20 @@ another port, add it to the link as `?port=`, for example
 The page works offline after the Status panel shows "Saved for offline use."
 Check for it before you go offline.
 
-The hosted page requires harness server v1.33 or later. For an earlier release,
-open the local address that the server prints.
+#### The Local Page
 
-A server the page can read, but that has no supported version, shows `This
-harness server is too old for the hosted page. Use the local page that the
-server prints.` A server the page cannot read shows the connection message,
-which gives the v1.33 rule and the local address. v1.32 and earlier, and a
-stopped server, take that path.
+The local page is the fallback. Open the address that the server prints in three
+cases:
+
+- The browser is Safari, which does not support the hosted page.
+- The server is older than v1.33.
+- The machine is offline before the hosted page saves its copy.
+
+The hosted page requires harness server v1.33 or later. A server the page can
+read, but that has no supported version, shows `This harness server is too old
+for the hosted page. Use the local page that the server prints.` A server the
+page cannot read shows the connection message, which gives the v1.33 rule and
+the local address. v1.32 and earlier, and a stopped server, take that path.
 
 #### The Seven Panels
 
@@ -135,7 +144,7 @@ schema for the Tables, Schema, and Roles panels.
 |---|---|
 | Tables | Every table and view in the selected schema, with its rows. A view is a saved query that acts like a table. Each row that is new, changed, or gone since the last poll carries a mark. Rows compare by primary key, the column or columns that identify a row, or by the whole row when the table has no primary key. The panel shows at most 100 rows per table and states the cap. |
 | Changes | Each change that the polls observed, in time order: the time, the table, the kind of change, and the key. The feed keeps the last 100 observations. It needs no hook in your code. |
-| Schema | The live schema as a diagram, beside the ERD from the `README.md` in the folder where you started the page. The panel lists each difference, each relationship in words, each `NOT NULL` column, and each table constraint. The diagram shows each column type. |
+| Schema | The live schema as a diagram, beside the ERD from the `README.md` in the folder where you started the server. The panel lists each difference, each relationship in words, each `NOT NULL` column, and each table constraint. The diagram shows each column type. |
 | Sessions | Each other open connection to the database (a session), whether it holds an open transaction (a group of statements that either all take effect or none do), and the session it waits for. |
 | Checks | The last result from `check.sh`: each case, pass or fail, and the expected rows beside the actual rows for a failed case. The panel reads `.cmsc127/last-run.json`. It does not start a run. |
 | Roles | Each database role, which is a user or a group of users, and its privileges on each table, such as `SELECT` or `INSERT`. |
@@ -186,7 +195,7 @@ own Python or `psql`.
 The page reads committed data. A transaction that another session has open
 stays invisible until that session runs `COMMIT`.
 
-The page polls the database every second. It shows at most 100 rows per table
+The page polls the server every second. It shows at most 100 rows per table
 and keeps the last 100 change events. A change outside the row cap may not
 appear in the feed.
 
@@ -195,8 +204,10 @@ appear in the feed.
 No test has checked the Windows firewall. The server binds to `127.0.0.1`,
 so it accepts connections from this computer only.
 
-The page loads its assets from its own folder and needs no network. No test has
-started it on Windows with the network disconnected.
+The local page loads its assets from its own folder and needs no network. No
+test has started it on Windows with the network disconnected. The hosted page
+needs the network on its first load. It runs offline after the Status panel
+saves a copy.
 
 The page ran in Edge on Windows. The GitHub workflow loads it in Chromium
 without a visible window on Ubuntu, macOS, and Windows. The default browser on
