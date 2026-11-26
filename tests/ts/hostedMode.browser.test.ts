@@ -229,7 +229,7 @@ describe("hosted page", () => {
     const { page, requested } = await hostedPage(STATUS_OK);
     const status = page.locator("#panel-content");
     expect(await status.textContent()).toContain(
-      "Start the harness page server on your computer, then click Connect.",
+      "Start the harness server on your computer, then click Connect.",
     );
     expect(await page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(1);
     expect(requested).toEqual([]);
@@ -245,7 +245,7 @@ describe("hosted page", () => {
       await page.getByRole("button", { name, exact: true }).click();
       const panel = page.locator("#panel-content");
       expect(await panel.textContent()).toContain(
-        "Start the harness page server on your computer, then open the Status panel and click Connect.",
+        "Start the harness server on your computer, then open the Status panel and click Connect.",
       );
       expect(await page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(0);
     }
@@ -351,7 +351,7 @@ describe("hosted page", () => {
       expect(message).toBe(connectionMessage(`http://127.0.0.1:${address.port}`));
       const panel = await page.locator("#panel-content").textContent();
       expect(panel).toContain(
-        "Start the harness page server on your computer, then click Connect.",
+        "Start the harness server on your computer, then click Connect.",
       );
     } finally {
       await context.close();

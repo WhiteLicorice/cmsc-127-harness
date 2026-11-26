@@ -2,10 +2,10 @@
 // The local page sends every request to its own origin.
 export const HOSTED_ORIGIN = "https://whitelicorice.github.io";
 export const DEFAULT_SERVER_ADDRESS = "http://127.0.0.1:55440";
-export const CONNECT_PROMPT = "Start the harness page server on your computer, then click Connect.";
+export const CONNECT_PROMPT = "Start the harness server on your computer, then click Connect.";
 // Every panel except Status has no Connect button, so its prompt names the
 // panel that has one.
-export const CONNECT_IN_STATUS_PROMPT = "Start the harness page server on your computer, then open the Status panel and click Connect.";
+export const CONNECT_IN_STATUS_PROMPT = "Start the harness server on your computer, then open the Status panel and click Connect.";
 export const TOO_OLD_MESSAGE = "This harness server is too old for the hosted page. Use the local page that the server prints.";
 // A browser withholds the status body of a server that sends no CORS header,
 // which is every release up to v1.32. The page then cannot tell that server

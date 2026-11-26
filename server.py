@@ -656,7 +656,7 @@ API_ENDPOINTS: dict[str, Endpoint] = {
 def _database_message(error: Exception) -> str:
     detail = str(error).lower()
     if "password" in detail or "authentication" in detail:
-        return "Check the database password, then start the page again."
+        return "Check the database password, then start the server again."
     if "cmsc127_database_url" in detail:
         return "Set CMSC127_DATABASE_URL to the local PostgreSQL connection URL."
     if "permission denied" in detail:
@@ -708,7 +708,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "message": (
                         "The harness could not complete this request. Open the "
                         "address the server printed. If the page still fails, "
-                        "restart the page server with bash start.sh."
+                        "restart the server with bash start.sh."
                     ),
                     "api_version": API_VERSION,
                 }

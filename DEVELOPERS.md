@@ -31,8 +31,9 @@ The compiled files land beside `index.html`. The repository tracks them, so a
 student needs no Node.js. Commit the built files with each source change.
 
 The page loads `/app.js`, `/style.css`, and `/vendor/mermaid.min.js`. The server
-serves `public/` as the asset root. The page needs no network because the
-Mermaid script sits in `public/vendor/` with its license.
+serves `public/` as the asset root. The page loads no third-party asset, so it
+needs no network beyond the site that serves it. The local page needs no network
+at all. The hosted page needs it on the first load.
 
 The page project uses these tool versions:
 
@@ -46,7 +47,7 @@ The page project uses these tool versions:
 | Pyright | 1.1.414 | Runs the strict Python check. |
 | Playwright | 1.64.1 | Runs the headless browser smoke. |
 | Python | 3.15 or newer | Runs the server and the tests. |
-| Mermaid | 12.3.0 | Stored with its MIT license, so the page needs no network. |
+| Mermaid | 12.3.0 | Stored with its MIT license, so the page loads no third-party asset. |
 
 ## Install and Test
 
@@ -103,8 +104,9 @@ it. The check skips the two worker files that `npm run build:offline` writes
 into `public/`. Any other extra JavaScript fails it. Run `npm run build` and
 commit `public/` when it fails.
 
-`start.sh` skips the build when `public/app.js` is present. A student runs no
-build step. A clean clone carries the built page.
+`start.sh` runs the built page and never builds it. A student runs no build
+step. A clean clone carries the built page. When `public/app.js` is missing,
+the script stops and asks the reader to download the bundle again.
 
 The browser checks need a disposable database. `npm run smoke:browser` creates
 a `public.smoke_student` table, loads the page in Chromium without a window,
