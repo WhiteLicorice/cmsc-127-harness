@@ -4,9 +4,9 @@ The harness is a local toolchain for PostgreSQL work.
 
 ## Quick Start
 
-The page shows your PostgreSQL database. It reads a server on your computer.
-That server reads the database. The steps use Git Bash, the shell that comes
-with Git for Windows.
+The page shows your PostgreSQL database. It talks to the harness server on your
+computer. That server reads the database. The steps use Git Bash, the shell that
+comes with Git for Windows.
 
 ### Get the Folder
 
@@ -21,8 +21,8 @@ line.
 
 - Git, which clones the folder. Check it with `git --version`. If the command
   is missing, install Git from <https://git-scm.com/downloads>.
-- PostgreSQL 18, the database server that holds your tables. The page reads it
-  every second. Check it with `pg_isready`. The reply is
+- PostgreSQL 18, the database server that holds your tables. The harness server
+  reads it every second. Check it with `pg_isready`. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`.
 - Python 3.15 or newer, which runs the server. Check it with `python --version`.
@@ -57,11 +57,12 @@ PowerShell may find a different `bash`.
    you set for the role when you installed PostgreSQL.
    If the password contains URL punctuation, percent-encode it before putting
    it in the URL. For example, write `@` as `%40`.
-5. Start the server. Run `bash start.sh`. The script prints the address and
-   opens the local page in your browser. Then open
-   <https://whitelicorice.github.io/cmsc-127-harness/> and click `Connect` in
-   the Status panel. The page is ready when the Status panel lists the server
-   and the database.
+5. Start the harness server. Run `bash start.sh`. The script prints the address
+   and opens the local page in your browser. Then open
+   <https://whitelicorice.github.io/cmsc-127-harness/> in Chrome or Edge, or in
+   Firefox 151 or later. If the harness server printed another port, add `?port=`
+   and that number to the link. Click `Connect` in the Status panel. The page is
+   ready when the Status panel lists the harness server and the database.
 
 ## The Details
 
@@ -75,64 +76,64 @@ together.
 The page shows a PostgreSQL database while you work. Keep it open beside your
 terminal.
 
-#### Start the Server
+#### Start the Harness Server
 
-The Quick Start sets up and starts the server. This section covers what the
-script does.
+The Quick Start sets up and starts the harness server. This section covers what
+the script does.
 
 The folder holds the built page, so `start.sh` doesn't build it. If
-`public/app.js` is missing, the script builds the page first. It prints one
-line, runs `npm ci` and `npm run build`, and then starts the server. When npm
-is missing, it prints the Node.js 26.13.1 install route and stops with a
-nonzero status.
+`public/app.js` is missing, the script prints `The page files are missing from
+this bundle. Download the bundle again and unzip the whole folder.` and stops
+with a nonzero status.
 
-The script starts the server and opens the local page in the default browser.
-It prints the address, usually `http://127.0.0.1:55440/`. If the browser doesn't
-open, open the address that the script prints. Press Ctrl+C in the terminal to
-stop the server. A file from a zip archive may have no executable bit. Run the
-script through `bash` in that case.
+The script starts the harness server and opens the local page in the default
+browser. It prints the address, usually `http://127.0.0.1:55440/`. If the browser
+doesn't open, open the address that the script prints. Press Ctrl+C in the
+terminal to stop the harness server. A file from a zip archive may have no
+executable bit. Run the script through `bash` in that case.
 
-The server binds to `127.0.0.1`, the loopback address. It accepts connections
-from this computer only.
+The harness server binds to `127.0.0.1`, the loopback address. It accepts
+connections from this computer only.
 
-The Schema panel reads the ERD from the `README.md` in the folder where you
-started the server. The Checks panel reads the last result from
+The Schema panel shows the ERD from the `README.md` in the folder where you
+started the harness server. The Checks panel shows the last result from
 `.cmsc127/last-run.json` in that folder.
 
 #### Open the Page
 
 The hosted page loads from <https://whitelicorice.github.io/cmsc-127-harness/>.
-That page is the one to use. Each visit serves the newest page, so a page fix
-needs no new bundle. The server still runs on your computer and reads your own
-database.
+That page is the one to use. A page fix reaches you with no new bundle. The new
+page loads the next time you open it. The harness server still runs on your
+computer and reads your own database.
 
-Start the server first, as the previous section describes. Then open the link
-in Chrome or Edge, or in Firefox 151 or later.
+Start the harness server first, as the previous section describes. Then open
+the link in Chrome or Edge, or in Firefox 151 or later.
+
+The page talks to the server at `http://127.0.0.1:55440`. When the harness server
+prints another port, add it to the link as `?port=` and load the link again, for
+example <https://whitelicorice.github.io/cmsc-127-harness/?port=55441>.
 
 Click `Connect` in the Status panel. If the browser asks for permission to
 connect to your computer, allow it.
-
-The page reads the server at `http://127.0.0.1:55440`. When the server prints
-another port, add it to the link as `?port=`, for example
-<https://whitelicorice.github.io/cmsc-127-harness/?port=55441>.
 
 The page works offline after the Status panel shows "Saved for offline use."
 Check for it before you go offline.
 
 #### The Local Page
 
-The local page is the fallback. Open the address that the server prints in three
-cases:
+The local page is the fallback. Open the address that the harness server prints
+in three cases:
 
 - The browser is Safari, which does not support the hosted page.
-- The server is older than v1.33.
+- The harness server is older than v1.33.
 - The machine is offline before the hosted page saves its copy.
 
-The hosted page requires harness server v1.33 or later. A server the page can
-read, but that has no supported version, shows `This harness server is too old
-for the hosted page. Use the local page that the server prints.` A server the
-page cannot read shows the connection message, which gives the v1.33 rule and
-the local address. v1.32 and earlier, and a stopped server, take that path.
+The hosted page requires harness server v1.33 or later. A harness server the
+page can read, but that has no supported version, shows `This harness server is
+too old for the hosted page. Use the local page that the server prints.` A
+harness server the page cannot read shows the connection message, which gives
+the v1.33 rule and the local address. v1.32 and earlier, and a stopped harness
+server, take that path.
 
 #### The Seven Panels
 
@@ -144,11 +145,11 @@ schema for the Tables, Schema, and Roles panels.
 |---|---|
 | Tables | Every table and view in the selected schema, with its rows. A view is a saved query that acts like a table. Each row that is new, changed, or gone since the last poll carries a mark. Rows compare by primary key, the column or columns that identify a row, or by the whole row when the table has no primary key. The panel shows at most 100 rows per table and states the cap. |
 | Changes | Each change that the polls observed, in time order: the time, the table, the kind of change, and the key. The feed keeps the last 100 observations. It needs no hook in your code. |
-| Schema | The live schema as a diagram, beside the ERD from the `README.md` in the folder where you started the server. The panel lists each difference, each relationship in words, each `NOT NULL` column, and each table constraint. The diagram shows each column type. |
+| Schema | The live schema as a diagram, beside the ERD from the `README.md` in the folder where you started the harness server. The panel lists each difference, each relationship in words, each `NOT NULL` column, and each table constraint. The diagram shows each column type. |
 | Sessions | Each other open connection to the database (a session), whether it holds an open transaction (a group of statements that either all take effect or none do), and the session it waits for. |
-| Checks | The last result from `check.sh`: each case, pass or fail, and the expected rows beside the actual rows for a failed case. The panel reads `.cmsc127/last-run.json`. It does not start a run. |
+| Checks | The last result from `check.sh`: each case, pass or fail, and the expected rows beside the actual rows for a failed case. The panel shows `.cmsc127/last-run.json`. It does not start a run. |
 | Roles | Each database role, which is a user or a group of users, and its privileges on each table, such as `SELECT` or `INSERT`. |
-| Status | The server, the database, the connected role, and the time of the last poll. A plain message appears when the server is down or the password is wrong. |
+| Status | The harness server, the database, the connected role, and the time of the last poll. A plain message appears when the harness server is down or the password is wrong. |
 
 #### What the Page Looks Like
 
@@ -181,27 +182,27 @@ rows for the failed case.
 
 The Roles panel lists the role and its privileges on each table.
 
-![The Status panel reporting the server and the last poll](docs/screenshots/status.png)
+![The Status panel reporting the harness server and the last poll](docs/screenshots/status.png)
 
-The Status panel reports the server, the database, the connected role, and the
-time of the last poll.
+The Status panel reports the harness server, the database, the connected role,
+and the time of the last poll.
 
-#### What the Page Reads
+#### What the Page Shows
 
-The page is read-only. It sends `SELECT` statements and reads PostgreSQL's
-catalog. It has no query box and no edit control. Every write comes from your
-own Python or `psql`.
+The page is read-only. The harness server sends `SELECT` statements and reads
+PostgreSQL's catalog. No query box or edit control sits on the page. Every write
+comes from your own Python or `psql`.
 
-The page reads committed data. A transaction that another session has open
+The page shows committed data. A transaction that another session has open
 stays invisible until that session runs `COMMIT`.
 
-The page polls the server every second. It shows at most 100 rows per table
-and keeps the last 100 change events. A change outside the row cap may not
+The page polls the harness server every second. It shows at most 100 rows per
+table and keeps the last 100 change events. A change outside the row cap may not
 appear in the feed.
 
 #### Limits
 
-No test has checked the Windows firewall. The server binds to `127.0.0.1`,
+No test has checked the Windows firewall. The harness server binds to `127.0.0.1`,
 so it accepts connections from this computer only.
 
 The local page loads its assets from its own folder and needs no network. No

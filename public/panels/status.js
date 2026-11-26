@@ -5,7 +5,7 @@ const LOCAL_VIEW = { hosted: false, connected: true };
 export function statusMessage(status) {
     const error = `${status.message ?? ""} ${status.error ?? ""}`.toLowerCase();
     if (error.includes("password") || error.includes("authentication")) {
-        return "Check the database password, then start the page again.";
+        return "Check the database password, then start the server again.";
     }
     if (status.databaseStatus !== "connected") {
         return status.message ?? "PostgreSQL is unavailable. Check that the server is running and that CMSC127_DATABASE_URL is right.";

@@ -58,7 +58,7 @@ describe("hosted page placement", () => {
     const { CONNECT_PROMPT, TOO_OLD_MESSAGE, unreachableMessage } =
       await import("../../src/hosted.js");
     expect(CONNECT_PROMPT).toBe(
-      "Start the harness page server on your computer, then click Connect.",
+      "Start the harness server on your computer, then click Connect.",
     );
     expect(TOO_OLD_MESSAGE).toBe(
       "This harness server is too old for the hosted page. Use the local page that the server prints.",
@@ -71,9 +71,9 @@ describe("hosted page placement", () => {
   it("states the prompt that points another panel to Status", async () => {
     const { CONNECT_IN_STATUS_PROMPT } = await import("../../src/hosted.js");
     expect(CONNECT_IN_STATUS_PROMPT).toBe(
-      "Start the harness page server on your computer, then open the Status panel and click Connect.",
+      "Start the harness server on your computer, then open the Status panel and click Connect.",
     );
-    expect(CONNECT_IN_STATUS_PROMPT).not.toBe("Start the harness page server on your computer, then click Connect.");
+    expect(CONNECT_IN_STATUS_PROMPT).not.toBe("Start the harness server on your computer, then click Connect.");
   });
 
   it("names no cause when the browser withholds the status body", async () => {
@@ -99,7 +99,7 @@ describe("status panel connect control", () => {
       { server: "running", databaseStatus: "connected" },
       { hosted: true, connected: false },
     );
-    expect(markup).toContain("Start the harness page server on your computer, then click Connect.");
+    expect(markup).toContain("Start the harness server on your computer, then click Connect.");
     expect(markup).toContain(">Connect</button>");
   });
 
