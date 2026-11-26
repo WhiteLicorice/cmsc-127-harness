@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, firefox, webkit, type Browser, type BrowserType, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeServer } from "./listen";
 
@@ -11,6 +11,24 @@ const publicRoot = resolve(root, "public");
 const HOSTED_ORIGIN = "https://whitelicorice.github.io";
 const HOSTED_PAGE = `${HOSTED_ORIGIN}/cmsc-127-harness/`;
 const SERVER = "http://127.0.0.1:55440";
+
+// CMSC127_BROWSER chooses the engine. Chromium is the default, so a run
+// without the variable checks the browser the workflow already used.
+const ENGINES: Record<string, BrowserType> = { chromium, firefox, webkit };
+const engineName = process.env["CMSC127_BROWSER"] ?? "chromium";
+const engine = ENGINES[engineName];
+if (engine === undefined) {
+  throw new Error(`CMSC127_BROWSER holds ${JSON.stringify(engineName)}. Use chromium, firefox, or webkit.`);
+}
+
+// Chromium asks for loopback access before an HTTPS page may reach a local
+// port, and Playwright grants that permission only in Chromium. This test
+// answers every request itself, so the other engines need no grant.
+async function grantLoopback(context: import("playwright").BrowserContext): Promise<void> {
+  if (engineName === "chromium") {
+    await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+  }
+}
 
 const TYPES: Record<string, string> = {
   ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".txt": "text/plain",
@@ -102,7 +120,7 @@ beforeAll(async () => {
     throw new Error("The hosted-mode test server did not bind to a port.");
   }
   baseUrl = `http://127.0.0.1:${address.port}/`;
-  browser = await chromium.launch({ headless: true });
+  browser = await engine.launch({ headless: true });
 }, 60_000);
 
 afterAll(async () => {
@@ -150,7 +168,7 @@ async function htmlServer(): Promise<{ page: Page; port: number; close: () => Pr
   // Chrome asks for loopback access before an HTTPS page may reach a local
   // port. Grant it, so the request reaches the stand-in and the JSON read is
   // the thing under test.
-  await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+  await grantLoopback(context);
   const page = await context.newPage();
   await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
   await page.goto(`${HOSTED_PAGE}?port=${address.port}`, { waitUntil: "domcontentloaded" });
@@ -327,7 +345,7 @@ describe("hosted page", () => {
       throw new Error("The v1.32 stand-in did not bind to a port.");
     }
     const context = await browser.newContext();
-    await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+    await grantLoopback(context);
     const page = await context.newPage();
     try {
       await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
@@ -399,7 +417,7 @@ describe("hosted page", () => {
       throw new Error("The stand-in server did not bind to a port.");
     }
     const context = await browser.newContext();
-    await context.grantPermissions(["local-network-access"], { origin: HOSTED_ORIGIN });
+    await grantLoopback(context);
     const page = await context.newPage();
     try {
       await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));

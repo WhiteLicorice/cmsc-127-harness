@@ -4,6 +4,7 @@ node_modules/
 .vitest/
 smoke-artifacts/
 smoke-project/
+hosted-smoke-project/
 smoke-project-pair/
 smoke-project-pair/
 audit-artifacts/

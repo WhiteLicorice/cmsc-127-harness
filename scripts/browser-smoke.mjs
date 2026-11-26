@@ -2,12 +2,22 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
 
 const expectedPanels = ["Tables", "Changes", "Schema", "Sessions", "Checks", "Roles", "Status"];
+const engines = { chromium, firefox, webkit };
+// CMSC127_BROWSER chooses the engine. Chromium is the default, so a run
+// without the variable checks the browser the workflow already used.
+const engineName = process.env["CMSC127_BROWSER"] ?? "chromium";
+const engine = engines[engineName];
+if (engine === undefined) {
+  console.error(`CMSC127_BROWSER holds ${JSON.stringify(engineName)}. Use chromium, firefox, or webkit.`);
+  process.exit(1);
+}
 const python = resolve(process.platform === "win32" ? ".venv\\Scripts\\python.exe" : ".venv/bin/python");
 const projectRoot = resolve("smoke-project");
-const artifactRoot = resolve("smoke-artifacts");
+// Each engine writes its own evidence, so three runs keep three logs.
+const artifactRoot = resolve("smoke-artifacts", engineName);
 const serverScript = resolve("server.py");
 // A gate that runs beside another gate reserves its own port. CMSC127_PORT
 // sets that port. The value below is the one this script used before the port
@@ -89,7 +99,7 @@ try {
   }
   record(`address: ${address}`);
 
-  browser = await chromium.launch({ headless: true });
+  browser = await engine.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const browserErrors = [];
   page.on("console", (message) => {
@@ -268,7 +278,7 @@ try {
   record(`os: ${process.platform} ${process.arch}`);
   record(`node: ${process.version}`);
   if (browser) {
-    record(`chromium: ${browser.version()}`);
+    record(`${engineName}: ${browser.version()}`);
   }
   record(`run: ${process.env.GITHUB_RUN_ID ?? "local"} attempt ${process.env.GITHUB_RUN_ATTEMPT ?? "local"}`);
   record(`commit: ${process.env.GITHUB_SHA ?? "local"}`);

@@ -51,7 +51,7 @@ childProcess.spawn = (command, args, options) => {
 syncBuiltinESMExports();
 `;
 
-const SCRIPTS = ["browser-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audit.mjs"];
+const SCRIPTS = ["browser-smoke.mjs", "hosted-smoke.mjs", "schema-startup-smoke.mjs", "contrast-audit.mjs"];
 
 // The port rule. tests/test_server.py holds the same rule and the same cases,
 // so one rule covers both languages.

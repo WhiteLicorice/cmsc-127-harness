@@ -15,6 +15,8 @@ TypeScript.
   and its license.
 - `app.js`, `panelRegistry.js`, `panelRequest.js`, and `panels/*.js`, the
   compiled TypeScript modules.
+- `version.json`, the build stamp that the Pages workflow writes from
+  `GITHUB_SHA`. The repository does not track it.
 
 The Python server uses the packages in `requirements.txt`. Install Node.js
 26.13.1 and npm 11.20.0 before the build. Then run two commands from the
@@ -110,9 +112,20 @@ the script stops and asks the reader to download the bundle again.
 
 The browser checks need a disposable database. `npm run smoke:browser` creates
 a `public.smoke_student` table, loads the page in Chromium without a window,
-and drops the table when it finishes. `npm run smoke:schema` needs
+and drops the table when it finishes. Set `CMSC127_BROWSER` to `firefox` or
+`webkit` to load the page in another engine. Each engine writes its evidence to
+its own folder under `smoke-artifacts/`. `npm run smoke:schema` needs
 `CMSC127_PAIR_DATABASE_URL`, a database whose only schema is `pair` with a
 `student` table. The workflow creates that database before the check.
+
+`npm run smoke:hosted` opens the published page and proves that it reaches a
+harness server on the same machine. It creates a `public.hosted_smoke` table.
+Then it starts `server.py` on a local port, clicks Connect, and checks the
+Status panel and the row. Without `CMSC127_EXPECT_BUILD`, it tests the site
+that is live now. It records the build it finds. With the variable set, the
+script polls the page's `version.json` until the page reports that commit, then
+runs. The Pages workflow writes `version.json` with the commit that built the
+page, so a pass cannot come from an older deploy.
 
 The WSL route uses Ubuntu 24.04.5, Python 3.15.2, and PostgreSQL 18.7. The
 harness requires Python 3.15 or newer and PostgreSQL 18 on every platform. On

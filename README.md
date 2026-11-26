@@ -211,9 +211,12 @@ needs the network on its first load. It runs offline after the Status panel
 saves a copy.
 
 The page ran in Edge on Windows. The GitHub workflow loads it in Chromium
-without a visible window on Ubuntu, macOS, and Windows. The default browser on
-macOS and Linux remains unchecked. The workflow doesn't prove that the default
-browser opens and draws the page.
+without a visible window on Ubuntu, macOS, and Windows. It loads the local page
+in Firefox and in the WebKit engine that Safari uses. It also opens the
+published page in Chromium after a deploy from `main`. That run uses a harness
+server on the same machine. The default browser on macOS and Linux remains
+unchecked. The workflow doesn't prove that the default browser opens and draws
+the page.
 
 ### Compare an ERD
 

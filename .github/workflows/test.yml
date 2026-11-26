@@ -5,6 +5,11 @@ on:
     branches: [main, t*]
   pull_request:
   workflow_dispatch:
+    inputs:
+      expect_build:
+        description: Commit the live page must report before the check runs. Leave empty to test the live site.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -58,6 +63,8 @@ jobs:
         run: npm run check:built
       - name: Install Chromium for the browser tests and smoke
         run: npx playwright install chromium --with-deps --only-shell
+      - name: Install Firefox and WebKit for the other engine checks
+        run: npx playwright install firefox webkit --with-deps
       - name: Test and build
         run: |
           npm run typecheck
@@ -72,6 +79,18 @@ jobs:
             -c "INSERT INTO public.smoke_student VALUES (1, 'Ana'), (2, 'Ben');"
       - name: Run headless browser smoke
         run: npm run smoke:browser
+      - name: Run headless browser smoke in Firefox
+        env:
+          CMSC127_BROWSER: firefox
+        run: npm run smoke:browser
+      - name: Run headless browser smoke in WebKit
+        env:
+          CMSC127_BROWSER: webkit
+        run: npm run smoke:browser
+      - name: Run the hosted-mode browser test in Firefox
+        env:
+          CMSC127_BROWSER: firefox
+        run: npx vitest run tests/ts/hostedMode.browser.test.ts
       - name: Run the rendered-page contrast audit
         run: npm run audit:contrast
       - name: Create the pair-only database
@@ -198,9 +217,9 @@ jobs:
         run: pyright
       - name: Check the built page
         run: npm run check:built
-      - name: Install Chromium for the browser tests and smoke on macOS and Windows
+      - name: Install Chromium and WebKit for the browser tests and smoke on macOS and Windows
         if: runner.os != 'Linux'
-        run: npx playwright install chromium --only-shell
+        run: npx playwright install chromium webkit --only-shell
       - name: Test and build
         run: |
           npm run typecheck
@@ -258,3 +277,52 @@ jobs:
           if [ -f "$RUNNER_TEMP/t12-pg/postmaster.pid" ]; then
             pg_ctl -D "$RUNNER_TEMP/t12-pg" -m fast -w stop
           fi
+
+  # The page a student opens lives on GitHub Pages. This job opens the real
+  # address, reaches a real server.py on 127.0.0.1, and shows a row. A push to
+  # main waits for the page that reports this commit, so a pass cannot come
+  # from the deploy before it. A dispatch tests the site that is live now.
+  hosted:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55445:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CMSC127_DATABASE_URL: postgresql://postgres@127.0.0.1:55445/postgres
+      CMSC127_EXPECT_BUILD: ${{ github.event_name == 'push' && github.sha || github.event.inputs.expect_build }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.15.2
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+          npm ci
+      - name: Install Chromium for the hosted smoke
+        run: npx playwright install chromium --with-deps --only-shell
+      - name: Run the hosted-page smoke
+        run: npm run smoke:hosted
+      - name: Upload hosted smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-page-hosted-${{ github.run_id }}
+          path: smoke-artifacts/
+          if-no-files-found: warn
