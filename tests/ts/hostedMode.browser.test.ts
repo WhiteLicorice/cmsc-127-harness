@@ -236,6 +236,23 @@ describe("hosted page", () => {
     await page.context().close();
   }, 60_000);
 
+  it("points every panel except Status to the Status panel", async () => {
+    // The Connect button is only in the Status panel. A prompt on another
+    // panel that tells the reader to click it names a control that is not on
+    // screen.
+    const { page, requested } = await hostedPage(STATUS_OK);
+    for (const name of ["Tables", "Changes", "Schema", "Sessions", "Checks", "Roles"]) {
+      await page.getByRole("button", { name, exact: true }).click();
+      const panel = page.locator("#panel-content");
+      expect(await panel.textContent()).toContain(
+        "Start the harness page server on your computer, then open the Status panel and click Connect.",
+      );
+      expect(await page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(0);
+    }
+    expect(requested).toEqual([]);
+    await page.context().close();
+  }, 60_000);
+
   it("polls the loopback server after the click", async () => {
     const { page, requested } = await hostedPage(STATUS_OK);
     await page.getByRole("button", { name: "Connect", exact: true }).click();

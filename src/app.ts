@@ -2,7 +2,7 @@ import { buildFeed, type ChangeFeedEvent } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
 import { escapeHtml } from "./panels/html.js";
 import {
-  CONNECT_PROMPT,
+  CONNECT_IN_STATUS_PROMPT,
   DEFAULT_SERVER_ADDRESS,
   isHostedPage,
   loopbackInit,
@@ -196,7 +196,7 @@ function renderCurrentPanel(): void {
   } else if (HOSTED && !connected) {
     markup = activePanel === "status"
       ? renderStatus({ server: "unknown", databaseStatus: "unknown" }, statusView())
-      : `<p>${escapeHtml(CONNECT_PROMPT)}</p>`;
+      : `<p>${escapeHtml(CONNECT_IN_STATUS_PROMPT)}</p>`;
   } else if (activePanel === "tables" && currentTables) {
     markup = panel.render(currentTables, previousTables);
   } else if (activePanel === "changes") {

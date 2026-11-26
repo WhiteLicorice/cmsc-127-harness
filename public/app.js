@@ -1,7 +1,7 @@
 import { buildFeed } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
 import { escapeHtml } from "./panels/html.js";
-import { CONNECT_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
+import { CONNECT_IN_STATUS_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
 import { panelRegistry } from "./panelRegistry.js";
 import { selectionMatches } from "./panelRequest.js";
 import { renderStatus } from "./panels/status.js";
@@ -163,7 +163,7 @@ function renderCurrentPanel() {
     else if (HOSTED && !connected) {
         markup = activePanel === "status"
             ? renderStatus({ server: "unknown", databaseStatus: "unknown" }, statusView())
-            : `<p>${escapeHtml(CONNECT_PROMPT)}</p>`;
+            : `<p>${escapeHtml(CONNECT_IN_STATUS_PROMPT)}</p>`;
     }
     else if (activePanel === "tables" && currentTables) {
         markup = panel.render(currentTables, previousTables);

@@ -68,6 +68,14 @@ describe("hosted page placement", () => {
     );
   });
 
+  it("states the prompt that points another panel to Status", async () => {
+    const { CONNECT_IN_STATUS_PROMPT } = await import("../../src/hosted.js");
+    expect(CONNECT_IN_STATUS_PROMPT).toBe(
+      "Start the harness page server on your computer, then open the Status panel and click Connect.",
+    );
+    expect(CONNECT_IN_STATUS_PROMPT).not.toBe("Start the harness page server on your computer, then click Connect.");
+  });
+
   it("names no cause when the browser withholds the status body", async () => {
     // Chrome and Firefox withhold the body of a server that sends no CORS
     // header, which is v1.32 and earlier. The page cannot tell that server

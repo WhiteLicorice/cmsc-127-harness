@@ -6,6 +6,10 @@ export const DEFAULT_SERVER_ADDRESS = "http://127.0.0.1:55440";
 
 export const CONNECT_PROMPT =
   "Start the harness page server on your computer, then click Connect.";
+// Every panel except Status has no Connect button, so its prompt names the
+// panel that has one.
+export const CONNECT_IN_STATUS_PROMPT =
+  "Start the harness page server on your computer, then open the Status panel and click Connect.";
 export const TOO_OLD_MESSAGE =
   "This harness server is too old for the hosted page. Use the local page that the server prints.";
 
