@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -207,6 +208,32 @@ class DoctorShellVersionTest(unittest.TestCase):
         )
         return self.bin.name in completed.stdout
 
+    def venv_create_repair(self, recreate: bool) -> str:
+        """Return the repair that the doctor prints for this shell.
+
+        The doctor reads the platform from ``uname -s``. The repair names the
+        launcher and the activation script of that platform.
+        """
+        completed = subprocess.run(
+            [self.bash, "-c", "uname -s"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self.environment(),
+            timeout=300,
+        )
+        name = completed.stdout.strip()
+        if name.startswith(("MINGW", "MSYS", "CYGWIN")):
+            command, activate = "py -3.15 -m venv", ".venv/Scripts/activate"
+        else:
+            command, activate = "python3.15 -m venv", ".venv/bin/activate"
+        clear = " --clear" if recreate else ""
+        return (
+            f"Run {command}{clear} .venv, then source {activate}, then run "
+            "bash doctor.sh in the same terminal."
+        )
+
     def test_crlf_version_is_accepted(self) -> None:
         output, code = self.run_doctor()
         self.assertIn("ok    Python 3.15.2 runs on", output)
@@ -265,11 +292,7 @@ class DoctorShellVersionTest(unittest.TestCase):
         output, code = self.run_doctor(environment)
 
         self.assertIn("FAIL  Python reports Python 3.12.10 on", output)
-        self.assertIn(
-            "Run py -3.15 -m venv --clear .venv, then source "
-            ".venv/Scripts/activate, then run bash doctor.sh in the same terminal.",
-            output,
-        )
+        self.assertIn(self.venv_create_repair(recreate=True), output)
         self.assertNotIn("pymanager", output)
         self.assertEqual(code, 1)
 
@@ -282,11 +305,7 @@ class DoctorShellVersionTest(unittest.TestCase):
         output, code = self.run_doctor(environment)
 
         self.assertIn("FAIL  The environment has no Python.", output)
-        self.assertIn(
-            "Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, "
-            "then run bash doctor.sh in the same terminal.",
-            output,
-        )
+        self.assertIn(self.venv_create_repair(recreate=False), output)
         self.assertIn("5 of 6 steps complete", output)
         self.assertEqual(code, 1)
 
@@ -465,11 +484,36 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         (self.bin / "python.bat").write_text(
             "@echo Python 3.12.0\r\n", encoding="utf-8", newline=""
         )
+        for name, line in (
+            ("psql", "psql (PostgreSQL) 18.6"),
+            ("pg_dump", "pg_dump (PostgreSQL) 18.6"),
+            ("pg_ctl", "pg_ctl (PostgreSQL) 18.6"),
+            ("git", "git version 2.51.0"),
+        ):
+            (self.bin / f"{name}.bat").write_text(
+                f"@echo {line}\r\n", encoding="utf-8", newline=""
+            )
+
+    def listen(self) -> int:
+        """Hold a loopback port open so the listener step always has one.
+
+        The doctor reads the port from the database URL and asks
+        ``Get-NetTCPConnection`` for a listener. A clean environment has none,
+        so the test supplies the port and the listener that answers for it.
+        """
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        return listener.getsockname()[1]
 
     def run_doctor(self, environment_dir: Path | None = None) -> str:
         environment = dict(os.environ)
         environment["VIRTUAL_ENV"] = str(environment_dir or self.environment_dir)
-        environment.pop("CMSC127_DATABASE_URL", None)
+        port = self.listen()
+        environment["CMSC127_DATABASE_URL"] = (
+            f"postgresql://postgres@127.0.0.1:{port}/postgres"
+        )
         environment["PATH"] = str(self.bin) + os.pathsep + environment.get("PATH", "")
         completed = subprocess.run(
             [
