@@ -260,13 +260,17 @@ try {
       await browser.close();
     }
   } finally {
-    if (server.exitCode === null) {
-      const stopped = new Promise((resolveExit) => server.once("exit", resolveExit));
-      server.kill();
-      await stopped;
+    try {
+      if (server.exitCode === null) {
+        const stopped = new Promise((resolveExit) => server.once("exit", resolveExit));
+        server.kill();
+        await stopped;
+      }
+    } finally {
+      // The table is dropped even when the browser or the server fails to stop.
+      runSql([`DROP TABLE IF EXISTS public.${table}`]);
     }
   }
-  runSql([`DROP TABLE IF EXISTS public.${table}`]);
 }
 
 if (failure) {

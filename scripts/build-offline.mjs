@@ -24,8 +24,10 @@ export const killSwitchTemplatePath = resolve(
   "../src/service-worker.kill-switch.template.js",
 );
 
-// These three files are not page content, so no snapshot entry names them.
-const GENERATED = new Set([MANIFEST_NAME, WORKER_NAME, KILL_SWITCH_NAME]);
+// These four files are not page content, so no snapshot entry names them.
+// `version.json` is the Pages build stamp. It changes on every deploy, so a
+// snapshot that held it would download again for no page change.
+const GENERATED = new Set([MANIFEST_NAME, WORKER_NAME, KILL_SWITCH_NAME, "version.json"]);
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");

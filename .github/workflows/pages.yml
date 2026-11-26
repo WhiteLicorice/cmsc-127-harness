@@ -27,12 +27,12 @@ jobs:
         run: npm ci
       - name: Build the page
         run: npm run build
+      - name: Write the offline manifest and the worker
+        run: npm run build:offline
       - name: Stamp the page with this commit
         run: |
           printf '{"commit":"%s","run":"%s","attempt":"%s"}\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > public/version.json
-      - name: Write the offline manifest and the worker
-        run: npm run build:offline
       - name: Upload the page
         uses: actions/upload-pages-artifact@v5
         with:

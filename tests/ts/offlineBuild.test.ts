@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -54,6 +54,23 @@ describe("offline build", () => {
     const paths = manifest.files.map((entry: { path: string }) => entry.path);
     expect(paths).not.toContain("service-worker.js");
     expect(paths).not.toContain("offline-manifest.json");
+    expect(second.buildId).toBe(first.buildId);
+  });
+
+  it("leaves the version stamp out of the manifest and the build ID", async () => {
+    const { writeOfflineFiles } = await import("../../scripts/build-offline.mjs");
+    const target = await fixture(resolve(root, ".vitest/offline-stamp"));
+    await rm(resolve(target, "version.json"), { force: true });
+    const first = await writeOfflineFiles(target);
+    await writeFile(
+      resolve(target, "version.json"),
+      '{"commit":"1111111111111111111111111111111111111111","run":"1","attempt":"1"}\n',
+      "utf-8",
+    );
+    const second = await writeOfflineFiles(target);
+    const manifest = JSON.parse(await readFile(resolve(target, "offline-manifest.json"), "utf-8"));
+    const paths = manifest.files.map((entry: { path: string }) => entry.path);
+    expect(paths).not.toContain("version.json");
     expect(second.buildId).toBe(first.buildId);
   });
 
