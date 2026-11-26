@@ -658,6 +658,36 @@ class DoctorDatabaseTests(unittest.TestCase):
             output.getvalue().splitlines(),
         )
 
+    def test_connection_failure_names_the_starting_server(
+        self: DoctorDatabaseTests,
+    ) -> None:
+        output = StringIO()
+        with (
+            patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=["3.3.9", "1.31.6"],
+            ),
+            patch.object(
+                doctor_db,
+                "_connect",
+                side_effect=OSError("connection refused"),
+            ),
+            patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(1, exit_code)
+        self.assertIn(
+            "PostgreSQL did not answer at that address. Check that the PostgreSQL "
+            "server is running and has finished starting.",
+            output.getvalue(),
+        )
+
     def test_connection_check_names_the_missing_required_driver_once(
         self: DoctorDatabaseTests,
     ) -> None:

@@ -383,7 +383,8 @@ the spare driver. The connection check uses it when `psycopg` cannot connect.
 The port is 5432 when the variable is absent or holds a port outside 1 to
 65535.
 
-A server that is starting prints a wait line and passes the listener step.
+The Bash doctor prints a wait line when a server is starting. Both doctors
+pass the listener step in that state.
 When the driver step fails, the doctors skip the connection check. An active
 environment whose Python is older than 3.15 fails the Python step and prints
 the recreate command. Each doctor prints the interpreter that ran the driver

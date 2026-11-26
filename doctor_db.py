@@ -101,8 +101,9 @@ def _failure_message(error: Exception) -> str:
         )
     ):
         return (
-            "PostgreSQL did not answer at that address. Check that the server is "
-            "running. Check the host and port in CMSC127_DATABASE_URL."
+            "PostgreSQL did not answer at that address. Check that the PostgreSQL "
+            "server is running and has finished starting. Check the host and port "
+            "in CMSC127_DATABASE_URL."
         )
     return (
         "The database connection failed. Check the server and CMSC127_DATABASE_URL. "
