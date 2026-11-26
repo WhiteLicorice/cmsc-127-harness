@@ -48,7 +48,7 @@ The page project uses these tool versions:
 | Vite | 6.4.6 | Satisfies the Vite 6 peer requirement of Vitest. |
 | Pyright | 1.1.414 | Runs the strict Python check. |
 | Playwright | 1.64.1 | Runs the headless browser smoke. |
-| Python | 3.15 or newer | Runs the server and the tests. |
+| Python | 3.15.x | Runs the server and the tests. |
 | Mermaid | 12.3.0 | Stored with its MIT license, so the page loads no third-party asset. |
 
 ## Install and Test
@@ -128,8 +128,9 @@ runs. The Pages workflow writes `version.json` with the commit that built the
 page, so a pass cannot come from an older deploy.
 
 The WSL route uses Ubuntu 24.04.5, Python 3.15.2, and PostgreSQL 18.7. The
-harness requires Python 3.15 or newer and PostgreSQL 18 on every platform. On
-WSL, `psql` and `pg_isready` are on `PATH`.
+harness requires Python 3.15.x and PostgreSQL 18 on every platform. The doctors
+and the Block 1 checker reject Python 3.16. On WSL, `psql` and `pg_isready` are
+on `PATH`.
 
 ## Test the Runner
 

@@ -337,6 +337,8 @@ class DoctorShellVersionTest(unittest.TestCase):
 
         output, code = self.run_doctor(environment)
 
+        repairs = [line for line in output.splitlines() if "-m pip install" in line]
+        self.assertEqual(len(repairs), 1, output)
         self.assertIn(
             f'Run "{clean_environment / name}" -m pip install -r requirements.txt '
             "from this folder.",
@@ -603,8 +605,20 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         output = self.run_doctor(clean_environment)
 
         repair = self.repair_line(output, "No pinned PostgreSQL driver passed.")
-        self.assertIn(f'Run "{environment_python}" -m pip install', repair)
+        self.assertIn(f'Run & "{environment_python}" -m pip install', repair)
         self.assertNotIn("Activate .venv", repair)
+
+    def test_only_the_doctor_prints_the_driver_repair(self) -> None:
+        clean_environment = self.bin / "clean-venv"
+        venv.create(clean_environment, with_pip=False)
+
+        output = self.run_doctor(clean_environment)
+
+        repairs = [
+            line.strip() for line in output.splitlines() if "-m pip install" in line
+        ]
+        self.assertEqual(len(repairs), 1, output)
+        self.assertTrue(repairs[0].startswith("Run & "), output)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Both doctors run on Windows.")

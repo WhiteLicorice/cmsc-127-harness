@@ -25,9 +25,10 @@ line.
   reads it every second. Check it with `pg_isready`. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`.
-- Python 3.15 or newer, which runs the harness server. Check it with
-  `python --version`. The reply starts with `Python 3.15` or a later version. If
-  the reply is lower, install Python 3.15 from
+- Python 3.15.x, which runs the harness server. The doctors and the Block 1
+  checker accept the 3.15 series and reject a later series, such as 3.16. Check
+  it with `python --version`. The reply starts with `Python 3.15`. If the reply
+  shows another version, install Python 3.15 from
   <https://www.python.org/downloads/>. On Windows, `py -3.15 --version` selects
   an installed 3.15, and step 1 uses `py -3.15` to create the environment.
   After step 2 activates it, `python` means the environment's interpreter. If
@@ -87,10 +88,13 @@ this bundle. Download the bundle again and unzip the whole folder.` and stops
 with a nonzero status.
 
 The script starts the harness server and opens the local page in the default
-browser. It prints the address, usually `http://127.0.0.1:55440/`. If the browser
-doesn't open, open the address that the script prints. Press Ctrl+C in the
-terminal to stop the harness server. A file from a zip archive may have no
-executable bit. Run the script through `bash` in that case.
+browser. It prints the address, usually `http://127.0.0.1:55440/`. The hosted
+page is the one to use, so open
+<https://whitelicorice.github.io/cmsc-127-harness/> after the script starts the
+server. Open the printed address in the three cases under "The Local Page"
+below. Press Ctrl+C in the terminal to stop the harness server. A file from a
+zip archive may have no executable bit. Run the script through `bash` in that
+case.
 
 The harness server binds to `127.0.0.1`, the loopback address. It accepts
 connections from this computer only.
@@ -260,7 +264,7 @@ The message includes the schema identifier and asks whether your migrations
 
 ### Check Python Types
 
-The harness requires Python 3.15 or newer. Run the Quick Start first.
+The harness requires Python 3.15.x. Run the Quick Start first.
 
 Pyright is a type checker for Python. Pyright 1.1.414 installs with the Python
 packages: run `python -m pip install -r requirements.txt`. Then run `pyright`
@@ -401,7 +405,7 @@ The port is 5432 when the variable is absent or holds a port outside 1 to
 The Bash doctor prints a wait line when a server is starting. Both doctors
 pass the listener step in that state.
 When the driver step fails, the doctors skip the connection check. An active
-environment whose Python is older than 3.15 fails the Python step and prints
+environment whose Python is not 3.15.x fails the Python step and prints
 the recreate command. Each doctor prints the interpreter that ran the driver
 and connection checks. Each doctor ends with a step count. It returns zero
 only when every step passes.

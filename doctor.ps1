@@ -132,7 +132,7 @@ if ($pythonOk) {
     $driversOk = $LASTEXITCODE -eq 0
     $driverOutput | ForEach-Object { Write-Host $_ }
     if ($virtualEnvironment) {
-        $driverRepair = "Run `"$pythonPath`" -m pip install -r requirements.txt from this folder."
+        $driverRepair = "Run & `"$pythonPath`" -m pip install -r requirements.txt from this folder."
     } elseif (Test-Path -LiteralPath '.venv\Scripts\Activate.ps1' -PathType Leaf) {
         $driverRepair = 'Run .\.venv\Scripts\Activate.ps1, then run python -m pip install -r requirements.txt from this folder.'
     } else {

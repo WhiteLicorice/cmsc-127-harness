@@ -13,10 +13,7 @@ from urllib.parse import unquote, urlsplit
 DRIVERS = (("psycopg", "3.3.9"), ("pg8000", "1.31.6"))
 REQUIRED_DRIVER = ("psycopg", "3.3.9")
 def psycopg_requirement() -> str:
-    return (
-        "FAIL  psycopg 3.3.9 is not installed. "
-        f'Run "{sys.executable}" -m pip install -r requirements.txt from this folder.'
-    )
+    return "FAIL  psycopg 3.3.9 is not installed."
 
 
 class _Connection(Protocol):
