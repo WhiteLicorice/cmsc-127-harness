@@ -25,14 +25,14 @@ line.
   reads it every second. Check it with `pg_isready`. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`.
-- Python 3.15 or newer, which runs the server. Check it with `python --version`.
-  The reply starts with `Python 3.15` or a later version. If the reply is
-  lower, install Python 3.15 from <https://www.python.org/downloads/>. On
-  Windows, `py -3.15 --version` selects an installed 3.15, and step 1 uses
-  `py -3.15` to create the environment. After step 2 activates it, `python`
-  means the environment's interpreter. If `python` still reports the system
-  version, the environment isn't active. Rerun the activation command from
-  step 2.
+- Python 3.15 or newer, which runs the harness server. Check it with
+  `python --version`. The reply starts with `Python 3.15` or a later version. If
+  the reply is lower, install Python 3.15 from
+  <https://www.python.org/downloads/>. On Windows, `py -3.15 --version` selects
+  an installed 3.15, and step 1 uses `py -3.15` to create the environment.
+  After step 2 activates it, `python` means the environment's interpreter. If
+  `python` still reports the system version, the environment isn't active.
+  Rerun the activation command from step 2.
 
 In PowerShell, replace the activation command with
 `.\.venv\Scripts\Activate.ps1` and the `export` command with
@@ -109,7 +109,7 @@ computer and reads your own database.
 Start the harness server first, as the previous section describes. Then open
 the link in Chrome or Edge, or in Firefox 151 or later.
 
-The page talks to the server at `http://127.0.0.1:55440`. When the harness server
+The page talks to the harness server at `http://127.0.0.1:55440`. When it
 prints another port, add it to the link as `?port=` and load the link again, for
 example <https://whitelicorice.github.io/cmsc-127-harness/?port=55441>.
 
