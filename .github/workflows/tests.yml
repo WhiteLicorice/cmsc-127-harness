@@ -55,8 +55,8 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
-      - name: Install Chromium for the browser test
-        run: npx playwright install chromium --with-deps --only-shell
+      - name: Install Chromium and WebKit for the browser tests
+        run: npx playwright install chromium webkit --with-deps --only-shell
       - name: Test and build
         run: |
           npm run typecheck
@@ -143,8 +143,8 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Check Python types
         run: pyright
-      - name: Install Chromium for the browser test
-        run: npx playwright install chromium --only-shell
+      - name: Install Chromium and WebKit for the browser tests
+        run: npx playwright install chromium webkit --only-shell
       - name: Test and build
         run: |
           npm run typecheck
