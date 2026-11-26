@@ -376,12 +376,12 @@ export CMSC127_DATABASE_URL='postgresql://postgres:password@127.0.0.1:5432/postg
 bash doctor.sh
 ```
 
-The PowerShell doctor checks Python 3.15.2, the pinned drivers, PostgreSQL
-18.x tools, Git, the PostgreSQL 18 service, the port in
-`CMSC127_DATABASE_URL`, and a database connection. The port is 5432 when the
-variable is absent or holds no port. The Bash doctor checks Python, the
-pinned drivers, PostgreSQL tools, Git, and a database connection. Each doctor
-ends with a step count. It returns zero only when every step passes.
+Both doctors check the same eight steps: Python 3.15.x, the pinned
+`psycopg` 3.3.9 driver, `psql`, `pg_dump`, `pg_ctl`, Git, a listener on the
+port in `CMSC127_DATABASE_URL`, and a `psycopg` connection. The port is 5432
+when the variable is absent or holds no port. Each doctor prints the
+interpreter that ran the driver and connection checks. Each doctor ends with a
+step count. It returns zero only when every step passes.
 
 The doctors read `CMSC127_DATABASE_URL`. They don't print its password.
 Keep the password out of screenshots and shared logs.
