@@ -1,32 +1,24 @@
-"""Check an explicit PostgreSQL URL with each installed PostgreSQL driver."""
+"""Check an explicit PostgreSQL URL with the installed PostgreSQL driver."""
 
 from __future__ import annotations
 
 from importlib import import_module, metadata
 import os
+import platform
 import sys
 from typing import Protocol, cast
-from urllib.parse import unquote, urlsplit
 
 
 DRIVERS = (("psycopg", "3.3.9"), ("pg8000", "1.31.6"))
+REQUIRED_DRIVER = ("psycopg", "3.3.9")
+PSYCOPG_REQUIREMENT = (
+    "FAIL  psycopg 3.3.9 is not installed. "
+    "Run python -m pip install -r requirements.txt from the harness folder."
+)
 
 
 class _Connection(Protocol):
     def close(self: _Connection) -> None: ...
-
-
-class _Pg8000API(Protocol):
-    def connect(
-        self: _Pg8000API,
-        *,
-        user: str,
-        host: str,
-        database: str,
-        port: int,
-        password: str | None,
-        timeout: int,
-    ) -> _Connection: ...
 
 
 class _PsycopgAPI(Protocol):
@@ -35,25 +27,13 @@ class _PsycopgAPI(Protocol):
     ) -> _Connection: ...
 
 
-def _pg8000_connection(url: str) -> _Connection:
-    dbapi = cast(_Pg8000API, import_module("pg8000.dbapi"))
-
-    parsed = urlsplit(url)
-    return dbapi.connect(
-        user=unquote(parsed.username or ""),
-        host=parsed.hostname or "127.0.0.1",
-        database=unquote(parsed.path.lstrip("/")),
-        port=parsed.port or 5432,
-        password=unquote(parsed.password) if parsed.password else None,
-        timeout=3,
-    )
+def _connect(url: str) -> _Connection:
+    psycopg = cast(_PsycopgAPI, import_module("psycopg"))
+    return psycopg.connect(url, connect_timeout=3)
 
 
-def _connect(driver: str, url: str) -> _Connection:
-    if driver == "psycopg":
-        psycopg = cast(_PsycopgAPI, import_module("psycopg"))
-        return psycopg.connect(url, connect_timeout=3)
-    return _pg8000_connection(url)
+def _interpreter_line() -> str:
+    return f"Python {platform.python_version()} at {sys.executable}"
 
 
 def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
@@ -71,11 +51,8 @@ def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
         else:
             installed.append((driver, version))
 
-    if not installed:
-        failures.append(
-            "FAIL  No PostgreSQL driver is installed. "
-            "Install psycopg[binary] 3.3.9 or pg8000 1.31.6."
-        )
+    if not any(driver == REQUIRED_DRIVER[0] for driver, _ in installed):
+        failures.append(PSYCOPG_REQUIREMENT)
     return installed, failures
 
 
@@ -103,6 +80,7 @@ def _failure_message(error: Exception) -> str:
 
 
 def check_drivers() -> int:
+    print(_interpreter_line())
     _installed, failures = _installed_drivers()
     for failure in failures:
         print(failure)
@@ -110,6 +88,7 @@ def check_drivers() -> int:
 
 
 def main() -> int:
+    print(_interpreter_line())
     url = os.environ.get("CMSC127_DATABASE_URL")
     if not url:
         print(
@@ -119,19 +98,21 @@ def main() -> int:
         return 1
 
     installed, _failures = _installed_drivers()
-    connected = False
-    for driver, _version in installed:
-        connection = None
-        try:
-            connection = _connect(driver, url)
-            connected = True
-        except Exception as error:
-            print(f"FAIL  {driver}: {_failure_message(error)}")
-        finally:
-            if connection is not None:
-                connection.close()
+    if not any(driver == REQUIRED_DRIVER[0] for driver, _ in installed):
+        print(PSYCOPG_REQUIREMENT)
+        return 1
 
-    return 0 if connected else 1
+    connection = None
+    try:
+        connection = _connect(url)
+    except Exception as error:
+        print(f"FAIL  psycopg: {_failure_message(error)}")
+        return 1
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return 0
 
 
 if __name__ == "__main__":

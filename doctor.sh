@@ -30,32 +30,44 @@ case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
         os=windows
         python_prefix=(py -3.15)
-        python_expected='Python 3.15.2'
         postgres_expected='18.6'
         ;;
     Linux*)
         os=linux
         python_prefix=(python3.15)
-        python_expected='Python 3.15.2'
         postgres_expected='18.6'
         ;;
     Darwin*)
         os=macos
         python_prefix=(python3.15)
-        python_expected='Python 3.15.2'
         postgres_expected='18.6'
         ;;
     *)
         os=unknown
         python_prefix=(python3)
-        python_expected='unsupported operating system'
         postgres_expected='unsupported operating system'
         ;;
 esac
 
+is_python_315() {
+    case "$1" in
+        'Python 3.15.'*) return 0 ;;
+    esac
+    return 1
+}
+
 if command -v python >/dev/null 2>&1 \
-    && [ "$(python --version 2>&1 | tr -d '\r')" = "$python_expected" ]; then
+    && is_python_315 "$(python --version 2>&1 | tr -d '\r')"; then
     python_prefix=(python)
+fi
+
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    for candidate in "$VIRTUAL_ENV/Scripts/python.exe" "$VIRTUAL_ENV/bin/python"; do
+        if [ -x "$candidate" ]; then
+            python_prefix=("$candidate")
+            break
+        fi
+    done
 fi
 
 case "$os" in
@@ -107,6 +119,22 @@ run_python() {
     "${python_prefix[@]}" "$@"
 }
 
+database_port() {
+    local url="${CMSC127_DATABASE_URL:-}" authority host_port port
+    if [ -z "$url" ]; then
+        printf '5432\n'
+        return
+    fi
+    authority="${url#*://}"
+    authority="${authority%%[/?#]*}"
+    host_port="${authority##*@}"
+    port="${host_port##*:}"
+    case "$port" in
+        ''|*[!0-9]*) port=5432 ;;
+    esac
+    printf '%s\n' "$port"
+}
+
 python_ok=false
 if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
     # A pipeline reports the status of its last command. Read the status of
@@ -119,7 +147,10 @@ if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
     if [ -z "$python_version" ]; then
         bad 'The Python command did not run.' \
             "$python_fix"
-    elif [ "$python_exit" -eq 0 ] && [ "$python_version" = "$python_expected" ]; then
+    elif [ "$os" = unknown ]; then
+        bad "Python reports $python_version on an unsupported operating system." \
+            "$python_fix"
+    elif [ "$python_exit" -eq 0 ] && is_python_315 "$python_version"; then
         ok "$python_version runs on $os."
         python_ok=true
     else
@@ -181,6 +212,23 @@ else
     else
         ok "Git runs on $os."
     fi
+fi
+
+database_port_number="$(database_port)"
+pg_isready_command=""
+if command -v pg_isready >/dev/null 2>&1; then
+    pg_isready_command="$(command -v pg_isready)"
+elif [ -x "/c/Program Files/PostgreSQL/18/bin/pg_isready.exe" ]; then
+    pg_isready_command="/c/Program Files/PostgreSQL/18/bin/pg_isready.exe"
+fi
+if [ -z "$pg_isready_command" ]; then
+    bad 'pg_isready is not on PATH.' \
+        "$postgres_fix"
+elif "$pg_isready_command" -h 127.0.0.1 -p "$database_port_number" >/dev/null 2>&1; then
+    ok "A server listens on port $database_port_number."
+else
+    bad "No server listens on port $database_port_number." \
+        "Start PostgreSQL on port $database_port_number, then run the doctor again."
 fi
 
 if [ "$python_ok" = true ]; then

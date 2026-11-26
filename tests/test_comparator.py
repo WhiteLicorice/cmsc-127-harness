@@ -658,7 +658,7 @@ class DoctorDatabaseTests(unittest.TestCase):
             output.getvalue().splitlines(),
         )
 
-    def test_no_driver_diagnostic_is_not_repeated_by_connection_check(
+    def test_connection_check_names_the_missing_required_driver_once(
         self: DoctorDatabaseTests,
     ) -> None:
         output = StringIO()
@@ -680,7 +680,12 @@ class DoctorDatabaseTests(unittest.TestCase):
             exit_code = doctor_db.main()
 
         self.assertEqual(1, exit_code)
-        self.assertEqual("", output.getvalue())
+        lines = output.getvalue().splitlines()
+        self.assertEqual(
+            1,
+            sum("psycopg 3.3.9 is not installed" in line for line in lines),
+        )
+        self.assertFalse(any("No PostgreSQL driver is installed" in line for line in lines))
 
     def test_stale_fallback_version_is_hidden_during_connection_check(
         self: DoctorDatabaseTests,

@@ -57,18 +57,24 @@ function Get-DatabasePort {
 Write-Host "Checking the Windows toolchain."
 
 $pythonOk = $false
-$python = $null
+$pythonPath = $null
 $virtualEnvironment = -not [string]::IsNullOrWhiteSpace($env:VIRTUAL_ENV)
 if ($virtualEnvironment) {
-    $python = Find-Application 'python'
+    $environmentPython = Join-Path $env:VIRTUAL_ENV 'Scripts\python.exe'
+    if (Test-Path -LiteralPath $environmentPython -PathType Leaf) {
+        $pythonPath = $environmentPython
+    }
 } else {
     $python = Find-Application 'py'
+    if ($null -ne $python) {
+        $pythonPath = $python.Source
+    }
 }
-if ($null -ne $python) {
+if ($null -ne $pythonPath) {
     if ($virtualEnvironment) {
-        $pythonOutput = @(& $python.Source --version 2>&1)
+        $pythonOutput = @(& $pythonPath --version 2>&1)
     } else {
-        $pythonOutput = @(& $python.Source -3.15 --version 2>&1)
+        $pythonOutput = @(& $pythonPath -3.15 --version 2>&1)
     }
     $pythonExitCode = $LASTEXITCODE
     $pythonVersionOutput = ($pythonOutput | ForEach-Object { "$_" }) -join ' '
@@ -79,10 +85,14 @@ if ($null -ne $python) {
             $pythonVersionOutput, '\d+(?:\.\d+)+'
         ).Value
     }
-    $pythonOk = $pythonExitCode -eq 0 -and $pythonVersion -eq '3.15.2'
+    $pythonOk = $pythonExitCode -eq 0 -and $pythonVersion -match '^3\.15\.'
 }
-if ($null -eq $python) {
-    $pythonFailure = 'The Python command is not on PATH.'
+if ($null -eq $pythonPath) {
+    if ($virtualEnvironment) {
+        $pythonFailure = 'The environment has no Python. Run py -3.15 -m venv .venv again.'
+    } else {
+        $pythonFailure = 'The Python command is not on PATH.'
+    }
 } elseif ([string]::IsNullOrWhiteSpace($pythonVersionOutput)) {
     $pythonFailure = 'The Python 3.15 command did not run.'
 } else {
@@ -94,15 +104,15 @@ if ($null -eq $python) {
     }
     $pythonFailure = "Python reports $pythonFailureOutput."
 }
-Report-Result $pythonOk 'Python 3.15.2 runs.' $pythonFailure `
+Report-Result $pythonOk "Python $pythonVersion runs." $pythonFailure `
     'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
 
 if ($pythonOk) {
     $driversOk = $false
     if ($virtualEnvironment) {
-        $driverOutput = & $python.Source -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
+        $driverOutput = & $pythonPath -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
     } else {
-        $driverOutput = & $python.Source -3.15 -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
+        $driverOutput = & $pythonPath -3.15 -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
     }
     $driversOk = $LASTEXITCODE -eq 0
     $driverOutput | ForEach-Object { Write-Host $_ }
@@ -113,7 +123,7 @@ if ($pythonOk) {
     Write-Host 'Skipped the driver and connection checks because Python did not run.'
 }
 
-foreach ($tool in @('psql', 'pg_dump')) {
+foreach ($tool in @('psql', 'pg_dump', 'pg_ctl')) {
     $application = Find-Application $tool
     $repair = 'Add C:\Program Files\PostgreSQL\18\bin to PATH in Windows settings. Open a new PowerShell. Run the installer if that folder is missing.'
     if ($null -eq $application) {
@@ -156,12 +166,6 @@ if ($null -eq $git) {
 Report-Result $gitOk 'Git runs from PATH.' $gitFailure `
     'Install Git for Windows with WinGet. Run winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements. If WinGet says Git is in use, close Git Bash, bash.exe, and sleep.exe. Run the install command again.'
 
-$service = Get-Service -Name 'postgresql-x64-18' -ErrorAction SilentlyContinue
-$serviceOk = $null -ne $service -and $service.Status -eq 'Running'
-Report-Result $serviceOk 'The PostgreSQL 18 service is running.' `
-    'The PostgreSQL 18 service is not running.' `
-    'Start the postgresql-x64-18 service. If the installer returned to the prompt at once, check the newest %TEMP%\installbuilder_installer*.log. Run the installer with Start-Process -Wait when the prompt must wait.'
-
 $databasePort = Get-DatabasePort
 $listener = Get-NetTCPConnection -LocalPort $databasePort -State Listen -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -173,9 +177,9 @@ Report-Result $portOk "A server listens on port $databasePort." `
 if ($pythonOk) {
     $databaseOk = $false
     if ($virtualEnvironment) {
-        $databaseOutput = & $python.Source -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
+        $databaseOutput = & $pythonPath -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
     } else {
-        $databaseOutput = & $python.Source -3.15 -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
+        $databaseOutput = & $pythonPath -3.15 -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
     }
     $databaseOk = $LASTEXITCODE -eq 0
     $databaseOutput | ForEach-Object { Write-Host $_ }
