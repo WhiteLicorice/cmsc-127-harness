@@ -603,7 +603,7 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         output = self.run_doctor(clean_environment)
 
         repair = self.repair_line(output, "No pinned PostgreSQL driver passed.")
-        self.assertIn(f'Run "{environment_python}" -m pip install', repair)
+        self.assertIn(f'Run & "{environment_python}" -m pip install', repair)
         self.assertNotIn("Activate .venv", repair)
 
 
