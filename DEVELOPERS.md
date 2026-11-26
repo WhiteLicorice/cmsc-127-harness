@@ -130,6 +130,9 @@ staged checks from a clean checkout on Ubuntu, macOS, and Windows.
 Harness tags `v1.15` and `v1.16` have incorrect protected-file hashes. Treat
 both tags as superseded. Use `v1.17` or a later tag.
 
+Harness tag `v1.37` has incorrect protected-file hashes for `check.sh` and
+`.github/workflows/check.yml`. Treat it as superseded. Use `v1.38` or a later tag.
+
 Harness tags `v1.9` to `v1.12` fail their self-tests on Ubuntu and macOS. No
 fork pins those tags.
 
