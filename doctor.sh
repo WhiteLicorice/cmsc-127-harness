@@ -61,10 +61,13 @@ if command -v python >/dev/null 2>&1 \
     python_prefix=(python)
 fi
 
+virtual_environment_missing=false
 if [ -n "${VIRTUAL_ENV:-}" ]; then
+    virtual_environment_missing=true
     for candidate in "$VIRTUAL_ENV/Scripts/python.exe" "$VIRTUAL_ENV/bin/python"; do
         if [ -x "$candidate" ]; then
             python_prefix=("$candidate")
+            virtual_environment_missing=false
             break
         fi
     done
@@ -119,6 +122,85 @@ run_python() {
     "${python_prefix[@]}" "$@"
 }
 
+venv_activate_repair() {
+    case "$os" in
+        windows)
+            printf 'Run source .venv/Scripts/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+        *)
+            printf 'Run source .venv/bin/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+    esac
+}
+
+venv_create_repair() {
+    case "$os" in
+        windows)
+            printf 'Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+        *)
+            printf 'Run python3.15 -m venv .venv, then source .venv/bin/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+    esac
+}
+
+venv_recreate_repair() {
+    case "$os" in
+        windows)
+            printf 'Run py -3.15 -m venv --clear .venv, then source .venv/Scripts/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+        *)
+            printf 'Run python3.15 -m venv --clear .venv, then source .venv/bin/activate, then run bash doctor.sh in the same terminal.\n'
+            ;;
+    esac
+}
+
+venv_python_is_315() {
+    case "$os" in
+        windows)
+            [ -x .venv/Scripts/python.exe ] \
+                && is_python_315 "$(.venv/Scripts/python.exe --version 2>&1 | tr -d '\r')"
+            ;;
+        *)
+            [ -x .venv/bin/python ] \
+                && is_python_315 "$(.venv/bin/python --version 2>&1 | tr -d '\r')"
+            ;;
+    esac
+}
+
+pip_repair() {
+    local venv_python=""
+    case "$os" in
+        windows)
+            if [ -n "${VIRTUAL_ENV:-}" ]; then
+                venv_python="$VIRTUAL_ENV\\Scripts\\python.exe"
+                [ -x "$venv_python" ] || venv_python="$VIRTUAL_ENV/bin/python"
+            fi
+            if [ -x "$venv_python" ]; then
+                printf 'Run "%s" -m pip install -r requirements.txt from this folder.\n' \
+                    "$venv_python"
+            elif [ -f .venv/Scripts/activate ]; then
+                printf 'Run source .venv/Scripts/activate, then run python -m pip install -r requirements.txt from this folder.\n'
+            else
+                printf 'Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, then run python -m pip install -r requirements.txt from this folder.\n'
+            fi
+            ;;
+        *)
+            if [ -n "${VIRTUAL_ENV:-}" ]; then
+                venv_python="$VIRTUAL_ENV/bin/python"
+            fi
+            if [ -x "$venv_python" ]; then
+                printf 'Run "%s" -m pip install -r requirements.txt from this folder.\n' \
+                    "$venv_python"
+            elif [ -f .venv/bin/activate ]; then
+                printf 'Run source .venv/bin/activate, then run python -m pip install -r requirements.txt from this folder.\n'
+            else
+                printf 'Run python3.15 -m venv .venv, then source .venv/bin/activate, then run python -m pip install -r requirements.txt from this folder.\n'
+            fi
+            ;;
+    esac
+}
+
 database_port() {
     local url="${CMSC127_DATABASE_URL:-}" authority host_port port
     if [ -z "$url" ]; then
@@ -131,12 +213,21 @@ database_port() {
     port="${host_port##*:}"
     case "$port" in
         ''|*[!0-9]*) port=5432 ;;
+        *)
+            port=$((10#$port))
+            if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+                port=5432
+            fi
+            ;;
     esac
     printf '%s\n' "$port"
 }
 
 python_ok=false
-if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
+if [ "$virtual_environment_missing" = true ]; then
+    bad 'The environment has no Python.' \
+        "$(venv_create_repair)"
+elif command -v "${python_prefix[0]}" >/dev/null 2>&1; then
     # A pipeline reports the status of its last command. Read the status of
     # the tool itself.
     python_version=$(run_python --version 2>&1)
@@ -153,6 +244,12 @@ if command -v "${python_prefix[0]}" >/dev/null 2>&1; then
     elif [ "$python_exit" -eq 0 ] && is_python_315 "$python_version"; then
         ok "$python_version runs on $os."
         python_ok=true
+    elif [ -n "${VIRTUAL_ENV:-}" ]; then
+        bad "Python reports $python_version on $os." \
+            "$(venv_recreate_repair)"
+    elif venv_python_is_315; then
+        bad "Python reports $python_version on $os." \
+            "$(venv_activate_repair)"
     else
         bad "Python reports $python_version on $os." \
             "$python_fix"
@@ -162,8 +259,8 @@ else
         "$python_fix"
 fi
 
+drivers_ok=false
 if [ "$python_ok" = true ]; then
-    drivers_ok=false
     if run_python -B "$(dirname "$0")/doctor_db.py" --drivers; then
         drivers_ok=true
     fi
@@ -171,7 +268,7 @@ if [ "$python_ok" = true ]; then
         ok 'The pinned PostgreSQL driver is installed.'
     else
         bad 'No pinned PostgreSQL driver passed.' \
-            'Run python -m pip install -r requirements.txt from this folder.'
+            "$(pip_repair)"
     fi
 else
     printf '%s\n' 'Skipped the driver and connection checks because Python did not run.'
@@ -224,14 +321,25 @@ fi
 if [ -z "$pg_isready_command" ]; then
     bad 'pg_isready is not on PATH.' \
         "$postgres_fix"
-elif "$pg_isready_command" -h 127.0.0.1 -p "$database_port_number" >/dev/null 2>&1; then
-    ok "A server listens on port $database_port_number."
 else
-    bad "No server listens on port $database_port_number." \
-        "Start PostgreSQL on port $database_port_number, then run the doctor again."
+    pg_status=0
+    "$pg_isready_command" -h 127.0.0.1 -p "$database_port_number" \
+        >/dev/null 2>&1 || pg_status=$?
+    case "$pg_status" in
+        0)
+            ok "A server listens on port $database_port_number."
+            ;;
+        1)
+            ok "PostgreSQL is starting on port $database_port_number. Wait, then run the doctor again."
+            ;;
+        *)
+            bad "No server listens on port $database_port_number." \
+                "Start PostgreSQL on port $database_port_number, then run the doctor again."
+            ;;
+    esac
 fi
 
-if [ "$python_ok" = true ]; then
+if [ "$python_ok" = true ] && [ "$drivers_ok" = true ]; then
     database_ok=false
     if run_python -B "$(dirname "$0")/doctor_db.py"; then
         database_ok=true
@@ -242,6 +350,8 @@ if [ "$python_ok" = true ]; then
         bad 'The PostgreSQL driver did not connect to the configured database.' \
             'Set CMSC127_DATABASE_URL to a PostgreSQL database that the installed driver can read. Check its password. Check the host and port. Check the server state.'
     fi
+elif [ "$python_ok" = true ]; then
+    printf '%s\n' 'Skipped the connection check because the driver did not pass.'
 fi
 
 printf '%s of %s steps complete\n' "$passed" "$total"

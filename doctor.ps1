@@ -87,9 +87,15 @@ if ($null -ne $pythonPath) {
     }
     $pythonOk = $pythonExitCode -eq 0 -and $pythonVersion -match '^3\.15\.'
 }
+$activateRepair = 'Run .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
+$createRepair = 'Run py -3.15 -m venv .venv, then .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
+$recreateRepair = 'Run py -3.15 -m venv --clear .venv, then .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
+$installRepair = 'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
+$pythonRepair = $installRepair
 if ($null -eq $pythonPath) {
     if ($virtualEnvironment) {
-        $pythonFailure = 'The environment has no Python. Run py -3.15 -m venv .venv again.'
+        $pythonFailure = 'The environment has no Python.'
+        $pythonRepair = $createRepair
     } else {
         $pythonFailure = 'The Python command is not on PATH.'
     }
@@ -103,12 +109,21 @@ if ($null -eq $pythonPath) {
         )
     }
     $pythonFailure = "Python reports $pythonFailureOutput."
+    if (-not $pythonOk) {
+        if ($virtualEnvironment) {
+            $pythonRepair = $recreateRepair
+        } elseif (Test-Path -LiteralPath '.venv\Scripts\python.exe' -PathType Leaf) {
+            $localVersion = @(& '.\.venv\Scripts\python.exe' --version 2>&1) -join ' '
+            if ($LASTEXITCODE -eq 0 -and $localVersion -match '3\.15\.') {
+                $pythonRepair = $activateRepair
+            }
+        }
+    }
 }
-Report-Result $pythonOk "Python $pythonVersion runs." $pythonFailure `
-    'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
+Report-Result $pythonOk "Python $pythonVersion runs." $pythonFailure $pythonRepair
 
+$driversOk = $false
 if ($pythonOk) {
-    $driversOk = $false
     if ($virtualEnvironment) {
         $driverOutput = & $pythonPath -B (Join-Path $PSScriptRoot 'doctor_db.py') --drivers 2>&1
     } else {
@@ -116,9 +131,16 @@ if ($pythonOk) {
     }
     $driversOk = $LASTEXITCODE -eq 0
     $driverOutput | ForEach-Object { Write-Host $_ }
+    if ($virtualEnvironment) {
+        $driverRepair = "Run `"$pythonPath`" -m pip install -r requirements.txt from this folder."
+    } elseif (Test-Path -LiteralPath '.venv\Scripts\Activate.ps1' -PathType Leaf) {
+        $driverRepair = 'Run .\.venv\Scripts\Activate.ps1, then run python -m pip install -r requirements.txt from this folder.'
+    } else {
+        $driverRepair = 'Run py -3.15 -m venv .venv, then .\.venv\Scripts\Activate.ps1, then run python -m pip install -r requirements.txt from this folder.'
+    }
     Report-Result $driversOk 'The pinned PostgreSQL driver is installed.' `
         'No pinned PostgreSQL driver passed.' `
-        'Run py -3.15 -m venv .venv. Activate .venv. Run python -m pip install -r requirements.txt from this folder.'
+        $driverRepair
 } else {
     Write-Host 'Skipped the driver and connection checks because Python did not run.'
 }
@@ -174,7 +196,7 @@ Report-Result $portOk "A server listens on port $databasePort." `
     "No server listens on port $databasePort." `
     "Run Get-NetTCPConnection -LocalPort $databasePort. If WSL holds the port, run pg_lsclusters in WSL. Select a free port for one server."
 
-if ($pythonOk) {
+if ($pythonOk -and $driversOk) {
     $databaseOk = $false
     if ($virtualEnvironment) {
         $databaseOutput = & $pythonPath -B (Join-Path $PSScriptRoot 'doctor_db.py') 2>&1
@@ -186,6 +208,8 @@ if ($pythonOk) {
     Report-Result $databaseOk 'The PostgreSQL driver connects to the configured database.' `
         'The PostgreSQL driver did not connect to the configured database.' `
         'Set CMSC127_DATABASE_URL to a PostgreSQL database that the installed driver can read. Check its password. Check the host and port. Check the server state.'
+} elseif ($pythonOk) {
+    Write-Host 'Skipped the connection check because the driver did not pass.'
 }
 
 Write-Host "$script:passed of $script:total steps complete."

@@ -248,6 +248,113 @@ class DoctorShellVersionTest(unittest.TestCase):
         self.assertNotIn("FAIL  Python reports", output)
         self.assertEqual(code, 0, output)
 
+    def test_old_venv_interpreter_gets_the_recreate_repair(self) -> None:
+        if sys.platform == "win32":
+            name = Path("Scripts") / "python.exe"
+        else:
+            name = Path("bin") / "python"
+        environment_python = self.bin / "venv" / name
+        environment_python.parent.mkdir(parents=True)
+        environment_python.write_text(fake_python("3.12.10"), encoding="utf-8", newline="\n")
+        environment_python.chmod(0o755)
+        (environment_python.parent / "activate").write_text("", encoding="utf-8")
+        self.write_version("3.12.0")
+        environment = self.environment()
+        environment["VIRTUAL_ENV"] = str(self.bin / "venv")
+
+        output, code = self.run_doctor(environment)
+
+        self.assertIn("FAIL  Python reports Python 3.12.10 on", output)
+        self.assertIn(
+            "Run py -3.15 -m venv --clear .venv, then source "
+            ".venv/Scripts/activate, then run bash doctor.sh in the same terminal.",
+            output,
+        )
+        self.assertNotIn("pymanager", output)
+        self.assertEqual(code, 1)
+
+    def test_venv_without_interpreter_fails_the_python_step(self) -> None:
+        empty_environment = self.bin / "empty-venv"
+        empty_environment.mkdir()
+        environment = self.environment()
+        environment["VIRTUAL_ENV"] = str(empty_environment)
+
+        output, code = self.run_doctor(environment)
+
+        self.assertIn("FAIL  The environment has no Python.", output)
+        self.assertIn(
+            "Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, "
+            "then run bash doctor.sh in the same terminal.",
+            output,
+        )
+        self.assertIn("5 of 6 steps complete", output)
+        self.assertEqual(code, 1)
+
+    def test_driver_failure_skips_the_connection_check(self) -> None:
+        clean_environment = self.bin / "clean-venv"
+        venv.create(clean_environment, with_pip=False)
+        environment = self.environment()
+        environment["VIRTUAL_ENV"] = str(clean_environment)
+
+        output, code = self.run_doctor(environment)
+
+        self.assertIn("FAIL  No pinned PostgreSQL driver passed.", output)
+        self.assertIn(
+            "Skipped the connection check because the driver did not pass.", output
+        )
+        self.assertNotIn("did not connect to the configured database", output)
+        self.assertIn("6 of 7 steps complete", output)
+        self.assertEqual(code, 1)
+
+    def test_driver_repair_names_the_venv_interpreter(self) -> None:
+        clean_environment = self.bin / "clean-venv"
+        venv.create(clean_environment, with_pip=False)
+        if sys.platform == "win32":
+            name = Path("Scripts") / "python.exe"
+        else:
+            name = Path("bin") / "python"
+        environment = self.environment()
+        environment["VIRTUAL_ENV"] = str(clean_environment)
+
+        output, code = self.run_doctor(environment)
+
+        self.assertIn(
+            f'Run "{clean_environment / name}" -m pip install -r requirements.txt '
+            "from this folder.",
+            output,
+        )
+        self.assertEqual(code, 1)
+
+    def test_starting_server_is_not_absent(self) -> None:
+        self.write_tool("pg_isready", "#!/usr/bin/env bash\nexit 1\n")
+
+        output, code = self.run_doctor()
+
+        self.assertIn("PostgreSQL is starting on port 5432.", output)
+        self.assertNotIn("No server listens", output)
+        self.assertEqual(code, 0)
+
+    def test_absent_server_names_start(self) -> None:
+        self.write_tool("pg_isready", "#!/usr/bin/env bash\nexit 2\n")
+
+        output, code = self.run_doctor()
+
+        self.assertIn("No server listens on port 5432.", output)
+        self.assertNotIn("PostgreSQL is starting", output)
+        self.assertEqual(code, 1)
+
+    def test_port_above_range_falls_back(self) -> None:
+        environment = self.environment()
+        environment["CMSC127_DATABASE_URL"] = (
+            "postgresql://postgres:p@127.0.0.1:99999/postgres"
+        )
+
+        output, code = self.run_doctor(environment)
+
+        self.assertIn("port 5432", output)
+        self.assertNotIn("port 99999", output)
+        self.assertEqual(code, 0, output)
+
     def test_nonzero_exit_is_rejected(self) -> None:
         self.write_tool("python", FAKE_PYTHON_FAILS)
         output, code = self.run_doctor()
@@ -359,9 +466,9 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
             "@echo Python 3.12.0\r\n", encoding="utf-8", newline=""
         )
 
-    def run_doctor(self) -> str:
+    def run_doctor(self, environment_dir: Path | None = None) -> str:
         environment = dict(os.environ)
-        environment["VIRTUAL_ENV"] = str(self.environment_dir)
+        environment["VIRTUAL_ENV"] = str(environment_dir or self.environment_dir)
         environment.pop("CMSC127_DATABASE_URL", None)
         environment["PATH"] = str(self.bin) + os.pathsep + environment.get("PATH", "")
         completed = subprocess.run(
@@ -382,11 +489,78 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         )
         return completed.stdout + completed.stderr
 
+    def repair_line(self, output: str, message: str) -> str:
+        lines = output.splitlines()
+        for index, line in enumerate(lines):
+            if message in line:
+                self.assertTrue(index + 1 < len(lines), output)
+                return lines[index + 1].strip()
+        self.fail(output)
+
     def test_environment_python_wins_over_path(self) -> None:
         output = self.run_doctor()
 
         self.assertIn("ok    Python 3.15.", output)
         self.assertNotIn("FAIL  Python reports Python 3.12.0.", output)
+
+    def test_environment_without_python_fails(self) -> None:
+        empty_environment = self.bin / "empty-venv"
+        empty_environment.mkdir()
+
+        output = self.run_doctor(empty_environment)
+
+        self.assertIn("FAIL  The environment has no Python.", output)
+        self.assertIn(
+            "Run py -3.15 -m venv .venv, then .\\.venv\\Scripts\\Activate.ps1, "
+            "then run .\\doctor.ps1 in the same window.",
+            output,
+        )
+        self.assertIn("5 of 6 steps complete.", output)
+
+    def test_environment_312_gets_the_recreate_repair(self) -> None:
+        old_environment = self.bin / "old-venv"
+        created = subprocess.run(
+            ["py", "-3.12", "-m", "venv", "--without-pip", str(old_environment)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if created.returncode != 0:
+            self.skipTest("Python 3.12 is not installed.")
+
+        output = self.run_doctor(old_environment)
+
+        self.assertIn("FAIL  Python reports Python 3.12.", output)
+        self.assertIn(
+            "Run py -3.15 -m venv --clear .venv, then .\\.venv\\Scripts"
+            "\\Activate.ps1, then run .\\doctor.ps1 in the same window.",
+            output,
+        )
+        self.assertNotIn("pymanager", output)
+
+    def test_driver_failure_skips_the_connection_check(self) -> None:
+        clean_environment = self.bin / "clean-venv"
+        venv.create(clean_environment, with_pip=False)
+
+        output = self.run_doctor(clean_environment)
+
+        self.assertIn("FAIL  No pinned PostgreSQL driver passed.", output)
+        self.assertIn(
+            "Skipped the connection check because the driver did not pass.", output
+        )
+        self.assertNotIn("did not connect to the configured database", output)
+        self.assertIn("6 of 7 steps complete.", output)
+
+    def test_driver_repair_names_the_venv_interpreter(self) -> None:
+        clean_environment = self.bin / "clean-venv"
+        venv.create(clean_environment, with_pip=False)
+        environment_python = clean_environment / "Scripts" / "python.exe"
+
+        output = self.run_doctor(clean_environment)
+
+        repair = self.repair_line(output, "No pinned PostgreSQL driver passed.")
+        self.assertIn(f'Run "{environment_python}" -m pip install', repair)
+        self.assertNotIn("Activate .venv", repair)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Both doctors run on Windows.")
@@ -530,7 +704,68 @@ class DoctorDatabaseTest(unittest.TestCase):
             lines,
         )
 
-    def test_connection_check_requires_psycopg(self) -> None:
+    def test_connection_check_falls_back_to_pg8000(self) -> None:
+        output = StringIO()
+        connection = mock.Mock()
+
+        def connect(driver: str, _url: str) -> mock.Mock:
+            if driver == "psycopg":
+                raise AssertionError("psycopg is not installed")
+            return connection
+
+        with (
+            mock.patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=[
+                    doctor_db.metadata.PackageNotFoundError,
+                    "1.31.6",
+                ],
+            ),
+            mock.patch.object(doctor_db, "_connect", side_effect=connect),
+            mock.patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("psycopg 3.3.9 is not installed", output.getvalue())
+        self.assertIn("pg8000", output.getvalue())
+        connection.close.assert_called_once()
+
+    def test_connection_check_falls_back_when_psycopg_cannot_connect(self) -> None:
+        output = StringIO()
+        connection = mock.Mock()
+
+        def connect(driver: str, _url: str) -> mock.Mock:
+            if driver == "psycopg":
+                raise OSError("connection refused")
+            return connection
+
+        with (
+            mock.patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=["3.3.9", "1.31.6"],
+            ),
+            mock.patch.object(doctor_db, "_connect", side_effect=connect),
+            mock.patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("FAIL  psycopg:", output.getvalue())
+        self.assertIn("pg8000", output.getvalue())
+        connection.close.assert_called_once()
+
+    def test_connection_check_fails_without_a_driver(self) -> None:
         output = StringIO()
         connect = mock.Mock()
         with (
@@ -539,7 +774,7 @@ class DoctorDatabaseTest(unittest.TestCase):
                 "version",
                 side_effect=[
                     doctor_db.metadata.PackageNotFoundError,
-                    "1.31.6",
+                    doctor_db.metadata.PackageNotFoundError,
                 ],
             ),
             mock.patch.object(doctor_db, "_connect", connect),

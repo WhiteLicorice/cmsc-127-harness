@@ -7,18 +7,33 @@ import os
 import platform
 import sys
 from typing import Protocol, cast
+from urllib.parse import unquote, urlsplit
 
 
 DRIVERS = (("psycopg", "3.3.9"), ("pg8000", "1.31.6"))
 REQUIRED_DRIVER = ("psycopg", "3.3.9")
-PSYCOPG_REQUIREMENT = (
-    "FAIL  psycopg 3.3.9 is not installed. "
-    "Run python -m pip install -r requirements.txt from this folder."
-)
+def psycopg_requirement() -> str:
+    return (
+        "FAIL  psycopg 3.3.9 is not installed. "
+        f'Run "{sys.executable}" -m pip install -r requirements.txt from this folder.'
+    )
 
 
 class _Connection(Protocol):
     def close(self: _Connection) -> None: ...
+
+
+class _Pg8000API(Protocol):
+    def connect(
+        self: _Pg8000API,
+        *,
+        user: str,
+        host: str,
+        database: str,
+        port: int,
+        password: str | None,
+        timeout: int,
+    ) -> _Connection: ...
 
 
 class _PsycopgAPI(Protocol):
@@ -27,9 +42,25 @@ class _PsycopgAPI(Protocol):
     ) -> _Connection: ...
 
 
-def _connect(url: str) -> _Connection:
-    psycopg = cast(_PsycopgAPI, import_module("psycopg"))
-    return psycopg.connect(url, connect_timeout=3)
+def _pg8000_connection(url: str) -> _Connection:
+    dbapi = cast(_Pg8000API, import_module("pg8000.dbapi"))
+
+    parsed = urlsplit(url)
+    return dbapi.connect(
+        user=unquote(parsed.username or ""),
+        host=parsed.hostname or "127.0.0.1",
+        database=unquote(parsed.path.lstrip("/")),
+        port=parsed.port or 5432,
+        password=unquote(parsed.password) if parsed.password else None,
+        timeout=3,
+    )
+
+
+def _connect(driver: str, url: str) -> _Connection:
+    if driver == "psycopg":
+        psycopg = cast(_PsycopgAPI, import_module("psycopg"))
+        return psycopg.connect(url, connect_timeout=3)
+    return _pg8000_connection(url)
 
 
 def _interpreter_line() -> str:
@@ -52,7 +83,7 @@ def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
             installed.append((driver, version))
 
     if not any(driver == REQUIRED_DRIVER[0] for driver, _ in installed):
-        failures.append(PSYCOPG_REQUIREMENT)
+        failures.append(psycopg_requirement())
     return installed, failures
 
 
@@ -98,21 +129,32 @@ def main() -> int:
         return 1
 
     installed, _failures = _installed_drivers()
-    if not any(driver == REQUIRED_DRIVER[0] for driver, _ in installed):
-        print(PSYCOPG_REQUIREMENT)
-        return 1
-
-    connection = None
-    try:
-        connection = _connect(url)
-    except Exception as error:
-        print(f"FAIL  psycopg: {_failure_message(error)}")
-        return 1
-    finally:
-        if connection is not None:
+    versions = dict(installed)
+    psycopg_version = versions.get(REQUIRED_DRIVER[0])
+    if psycopg_version is None:
+        print(psycopg_requirement())
+    else:
+        try:
+            connection = _connect("psycopg", url)
+        except Exception as error:
+            print(f"FAIL  psycopg: {_failure_message(error)}")
+        else:
             connection.close()
+            print(f"Connected with psycopg {psycopg_version}.")
+            return 0
 
-    return 0
+    pg8000_version = versions.get("pg8000")
+    if pg8000_version is not None:
+        try:
+            connection = _connect("pg8000", url)
+        except Exception as error:
+            print(f"FAIL  pg8000: {_failure_message(error)}")
+        else:
+            connection.close()
+            print(f"Connected with pg8000 {pg8000_version}.")
+            return 0
+
+    return 1
 
 
 if __name__ == "__main__":

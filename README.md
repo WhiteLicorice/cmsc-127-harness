@@ -378,10 +378,17 @@ bash doctor.sh
 
 Both doctors check the same eight steps: Python 3.15.x, the pinned
 `psycopg` 3.3.9 driver, `psql`, `pg_dump`, `pg_ctl`, Git, a listener on the
-port in `CMSC127_DATABASE_URL`, and a `psycopg` connection. The port is 5432
-when the variable is absent or holds no port. Each doctor prints the
-interpreter that ran the driver and connection checks. Each doctor ends with a
-step count. It returns zero only when every step passes.
+port in `CMSC127_DATABASE_URL`, and a database connection. `pg8000` 1.31.6 is
+the spare driver. The connection check uses it when `psycopg` cannot connect.
+The port is 5432 when the variable is absent or holds a port outside 1 to
+65535.
+
+A server that is starting prints a wait line and passes the listener step.
+When the driver step fails, the doctors skip the connection check. An active
+environment whose Python is older than 3.15 fails the Python step and prints
+the recreate command. Each doctor prints the interpreter that ran the driver
+and connection checks. Each doctor ends with a step count. It returns zero
+only when every step passes.
 
 The doctors read `CMSC127_DATABASE_URL`. They don't print its password.
 Keep the password out of screenshots and shared logs.
