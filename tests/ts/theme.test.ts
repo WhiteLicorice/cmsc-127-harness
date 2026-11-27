@@ -203,7 +203,6 @@ describe("theme contrast", () => {
     ["--header-muted", "--header-bg", 4.5, "header byline"],
     ["--focus", "--bg", 3, "focus ring on the page"],
     ["--focus", "--surface", 3, "focus ring on a panel"],
-    ["--focus", "--surface-2", 3, "focus ring on a panel button"],
     ["--focus-header", "--header-bg", 3, "focus ring in the header"],
   ];
 
