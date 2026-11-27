@@ -12,5 +12,5 @@ export const panelRegistry = [
     { id: "sessions", title: "Sessions", endpoint: () => "/api/sessions", render: (data) => renderSessions(data.sessions) },
     { id: "checks", title: "Checks", endpoint: () => "/api/checks", render: (data) => renderChecks(data) },
     { id: "roles", title: "Roles", endpoint: (schema) => `/api/roles?schema=${encodeURIComponent(schema)}`, render: (data) => renderRoles(data.privileges) },
-    { id: "status", title: "Status", endpoint: () => "/api/status", render: (data) => renderStatus(data) },
+    { id: "status", title: "Status", endpoint: () => "/api/status", render: (data, previous) => renderStatus(data, previous) },
 ];

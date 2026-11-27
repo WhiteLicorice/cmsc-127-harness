@@ -29,7 +29,10 @@ export function renderStatus(status, view = LOCAL_VIEW) {
         ? `<p class="offline-saved">${escapeHtml(OFFLINE_SAVED)}</p>`
         : "";
     if (view.hosted && !view.connected) {
-        return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p><button type="button" data-action="connect">Connect</button></p>${saved}`;
+        const button = view.connecting === true
+            ? `<button type="button" data-action="connect" disabled>Connecting…</button>`
+            : `<button type="button" data-action="connect">Connect</button>`;
+        return `<p>${escapeHtml(CONNECT_PROMPT)}</p><p>${button}</p>${saved}`;
     }
     if (status.databaseStatus !== "connected") {
         return `<p class="error-message">${escapeHtml(statusMessage(status))}</p>${saved}`;

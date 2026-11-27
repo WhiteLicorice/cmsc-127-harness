@@ -284,6 +284,72 @@ describe("hosted page", () => {
     await page.context().close();
   }, 60_000);
 
+  it("starts one poll loop when Connect is clicked twice", async () => {
+    const context = await browser.newContext();
+    await grantLoopback(context);
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const state = globalThis as unknown as { intervalCount: number };
+      state.intervalCount = 0;
+      const original = window.setInterval.bind(window);
+      window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        state.intervalCount += 1;
+        return original(handler, timeout, ...args);
+      }) as typeof window.setInterval;
+    });
+    await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
+    let statusRequests = 0;
+    let changesRequests = 0;
+    let releaseStatus: () => void = () => undefined;
+    const pendingStatus = new Promise<void>((resolve) => { releaseStatus = resolve; });
+    await page.route(`${SERVER}/api/**`, async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/status") {
+        statusRequests += 1;
+        await pendingStatus;
+      }
+      if (url.pathname === "/api/changes") {
+        changesRequests += 1;
+      }
+      const body = url.pathname === "/api/status" ? STATUS_OK : apiBody(url.pathname);
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    });
+    try {
+      await page.goto(HOSTED_PAGE, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(
+        () => document.querySelectorAll("#panels button").length === 7,
+        undefined,
+        { timeout: 15_000 },
+      );
+      // The second click lands while the first status read is still open.
+      await page.locator('button[data-action="connect"]').dispatchEvent("click");
+      await page.locator('button[data-action="connect"]').dispatchEvent("click");
+      const inFlight = await page.locator('button[data-action="connect"]').evaluate((node) => ({
+        disabled: (node as HTMLButtonElement).disabled,
+        text: node.textContent,
+      }));
+      // Let both clicks reach the route while the status read is still open.
+      await page.waitForTimeout(500);
+      const connectRequests = statusRequests;
+      releaseStatus();
+      await page.waitForFunction(
+        () => (document.querySelector("#poll-summary")?.textContent ?? "").startsWith("Last table poll:"),
+        undefined,
+        { timeout: 15_000 },
+      );
+      const intervals = await page.evaluate(
+        () => (globalThis as unknown as { intervalCount: number }).intervalCount,
+      );
+      expect(connectRequests).toBe(1);
+      expect(changesRequests).toBe(1);
+      expect(intervals).toBe(2);
+      expect(inFlight).toEqual({ disabled: true, text: "Connecting…" });
+    } finally {
+      releaseStatus();
+      await context.close();
+    }
+  }, 60_000);
+
   it("draws one plain line for a server older than the minimum", async () => {
     const tooOld = { server: "running", databaseStatus: "connected" };
     const { page, requested } = await hostedPage(tooOld);

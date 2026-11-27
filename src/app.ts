@@ -47,6 +47,7 @@ const pollSummary = requireElement<HTMLElement>("#poll-summary");
 const HOSTED = isHostedPage();
 const server = serverAddress();
 let connected = !HOSTED;
+let connecting = false;
 let tooOld = false;
 // True only after a complete snapshot is in the browser cache. The Status panel
 // shows the offline line from this value alone.
@@ -73,7 +74,7 @@ function showMessage(message: string, source: "tables" | "panel" = "panel"): voi
 }
 
 const SERVER_UNREACHABLE =
-  'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.';
+  "The page cannot reach its server. Run bash start.sh from the b1 bundle folder.";
 
 function describeRequestError(error: unknown): string {
   if (error instanceof TypeError) {
@@ -175,6 +176,9 @@ async function drawMermaid(): Promise<void> {
 
 function statusView(): StatusView {
   const view: StatusView = { hosted: HOSTED, connected, saved };
+  if (connecting) {
+    view.connecting = true;
+  }
   if (tooOld) {
     view.tooOld = true;
   }
@@ -203,7 +207,7 @@ function renderCurrentPanel(): void {
   } else if (activePanel === "changes") {
     markup = panel.render(feed);
   } else if (activePanel === "status" && statusData !== null) {
-    markup = renderStatus(statusData, statusView());
+    markup = panel.render(statusData, statusView());
   } else if (panelData !== null) {
     markup = panel.render(panelData);
   } else {
@@ -372,6 +376,11 @@ function startPolling(): void {
 // The hosted page checks the server release before it polls, so an old server
 // draws one plain line instead of seven empty panels.
 function connectHosted(): void {
+  if (connecting) {
+    return;
+  }
+  connecting = true;
+  renderCurrentPanel();
   void fetchStatus()
     .then((data) => {
       if (versionSupported(data)) {
@@ -385,7 +394,7 @@ function connectHosted(): void {
     })
     .catch((error: unknown) => showMessage(describeRequestError(error)))
     .finally(() => {
-      renderedMarkup = "";
+      connecting = false;
       renderCurrentPanel();
     });
 }

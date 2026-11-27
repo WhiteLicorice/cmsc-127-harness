@@ -24,6 +24,7 @@ const pollSummary = requireElement("#poll-summary");
 const HOSTED = isHostedPage();
 const server = serverAddress();
 let connected = !HOSTED;
+let connecting = false;
 let tooOld = false;
 // True only after a complete snapshot is in the browser cache. The Status panel
 // shows the offline line from this value alone.
@@ -46,7 +47,7 @@ function showMessage(message, source = "panel") {
     connectionMessage.textContent = visibleMessage;
     connectionMessage.hidden = visibleMessage.length === 0;
 }
-const SERVER_UNREACHABLE = 'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.';
+const SERVER_UNREACHABLE = "The page cannot reach its server. Run bash start.sh from the b1 bundle folder.";
 function describeRequestError(error) {
     if (error instanceof TypeError) {
         return HOSTED ? unreachableMessage(server ?? DEFAULT_SERVER_ADDRESS) : SERVER_UNREACHABLE;
@@ -142,6 +143,9 @@ async function drawMermaid() {
 }
 function statusView() {
     const view = { hosted: HOSTED, connected, saved };
+    if (connecting) {
+        view.connecting = true;
+    }
     if (tooOld) {
         view.tooOld = true;
     }
@@ -173,7 +177,7 @@ function renderCurrentPanel() {
         markup = panel.render(feed);
     }
     else if (activePanel === "status" && statusData !== null) {
-        markup = renderStatus(statusData, statusView());
+        markup = panel.render(statusData, statusView());
     }
     else if (panelData !== null) {
         markup = panel.render(panelData);
@@ -337,6 +341,11 @@ function startPolling() {
 // The hosted page checks the server release before it polls, so an old server
 // draws one plain line instead of seven empty panels.
 function connectHosted() {
+    if (connecting) {
+        return;
+    }
+    connecting = true;
+    renderCurrentPanel();
     void fetchStatus()
         .then((data) => {
         if (versionSupported(data)) {
@@ -351,7 +360,7 @@ function connectHosted() {
     })
         .catch((error) => showMessage(describeRequestError(error)))
         .finally(() => {
-        renderedMarkup = "";
+        connecting = false;
         renderCurrentPanel();
     });
 }

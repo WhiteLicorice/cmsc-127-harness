@@ -125,6 +125,18 @@ describe("status panel connect control", () => {
     expect(markup).not.toContain(">Connect</button>");
   });
 
+  it("renders the Status panel through its registry entry", async () => {
+    const { panelRegistry } = await import("../../src/panelRegistry.js");
+    const status = panelRegistry.find((panel) => panel.id === "status");
+    expect(status?.render).toBeTypeOf("function");
+    const markup = status?.render(
+      { server: "running", databaseStatus: "connected" },
+      { hosted: true, connected: false },
+    );
+    expect(markup).toContain("Start the harness server on your computer, then click Connect.");
+    expect(markup).toContain(">Connect</button>");
+  });
+
   it("shows the offline line only after a verified snapshot", async () => {
     const { renderStatus } = await import("../../src/panels/status.js");
     const status = { server: "running", databaseStatus: "connected" } as const;
