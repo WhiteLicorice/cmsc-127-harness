@@ -84,7 +84,7 @@ connection without a password.
 In WSL, Linux, or macOS, install the drivers and set the connection variables:
 
 ```bash
-python3 -m venv .venv
+python3.15 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 npm ci
