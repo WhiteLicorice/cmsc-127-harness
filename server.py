@@ -837,8 +837,8 @@ def main() -> int:
         if server.server_port == DEFAULT_PORT
         else f"{HOSTED_PAGE}?port={server.server_port}"
     )
-    print(f"Hosted harness page: {hosted}", flush=True)
-    print(f"Local harness page: {address}", flush=True)
+    print(f"Hosted harness page: {hosted}.", flush=True)
+    print(f"Local harness page: {address}.", flush=True)
     if not arguments.no_browser and not webbrowser.open(hosted, new=2):
         print(f"Open this address in your browser: {hosted}", flush=True)
     try:
