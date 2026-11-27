@@ -21,4 +21,37 @@ describe("change feed", () => {
 
     expect(ordered.map((event) => event.key)).toEqual(["1", "2"]);
   });
+
+  it("reports no change when the fallback returns a different schema", async () => {
+    const { diffSnapshot } = await import("../../src/panels/changes.js");
+    const before = {
+      schema: "pair",
+      tables: [{ table: "item", primaryKey: ["id"], rows: [{ id: 1, value: "old" }] }],
+    };
+    const after = {
+      schema: "public",
+      tables: [{ table: "item", primaryKey: ["id"], rows: [{ id: 1, value: "new" }] }],
+    };
+
+    const result = diffSnapshot(before, after, "2026-11-13T00:00:00.000Z");
+
+    expect(result.events).toEqual([]);
+    expect(result.previous).toBe(after.tables);
+  });
+
+  it("reports a change within one schema", async () => {
+    const { diffSnapshot } = await import("../../src/panels/changes.js");
+    const before = {
+      schema: "public",
+      tables: [{ table: "item", primaryKey: ["id"], rows: [{ id: 1, value: "old" }] }],
+    };
+    const after = {
+      schema: "public",
+      tables: [{ table: "item", primaryKey: ["id"], rows: [{ id: 1, value: "new" }] }],
+    };
+
+    const result = diffSnapshot(before, after, "2026-11-13T00:00:00.000Z");
+
+    expect(result.events).toMatchObject([{ table: "item", kind: "update" }]);
+  });
 });

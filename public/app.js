@@ -1,4 +1,4 @@
-import { buildFeed } from "./panels/changes.js";
+import { diffSnapshot } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
 import { escapeHtml } from "./panels/html.js";
 import { CONNECT_IN_STATUS_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
@@ -240,7 +240,8 @@ async function pollTables() {
         currentTables = response;
         const now = new Date();
         if (previousTables) {
-            feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now.toISOString())].slice(-100);
+            const diff = diffSnapshot({ schema: previousTables.schema, tables: previousTables.tables }, { schema: response.schema, tables: response.tables }, now.toISOString());
+            feed = [...feed, ...diff.events].slice(-100);
         }
         pollSummary.textContent = `Last table poll: ${now.toLocaleTimeString()}.`;
         showMessage(response.message ?? "", "tables");

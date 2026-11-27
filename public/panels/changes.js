@@ -17,6 +17,15 @@ export function buildFeed(previous, current, observedAt) {
 export function orderFeed(events) {
     return [...events].sort((left, right) => left.time.localeCompare(right.time) || left.table.localeCompare(right.table) || left.key.localeCompare(right.key));
 }
+export function diffSnapshot(previous, current, observedAt) {
+    if (previous === null || previous.schema !== current.schema) {
+        return { previous: current.tables, events: [] };
+    }
+    return {
+        previous: current.tables,
+        events: buildFeed(previous.tables, current.tables, observedAt),
+    };
+}
 export function renderChangeFeed(events) {
     if (events.length === 0) {
         return "<p>No changes observed yet. The page checks once per second.</p>";

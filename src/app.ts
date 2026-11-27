@@ -1,4 +1,4 @@
-import { buildFeed, type ChangeFeedEvent } from "./panels/changes.js";
+import { diffSnapshot, type ChangeFeedEvent } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
 import { escapeHtml } from "./panels/html.js";
 import {
@@ -269,7 +269,12 @@ async function pollTables(): Promise<void> {
     currentTables = response;
     const now = new Date();
     if (previousTables) {
-      feed = [...feed, ...buildFeed(previousTables.tables, currentTables.tables, now.toISOString())].slice(-100);
+      const diff = diffSnapshot(
+        { schema: previousTables.schema, tables: previousTables.tables },
+        { schema: response.schema, tables: response.tables },
+        now.toISOString(),
+      );
+      feed = [...feed, ...diff.events].slice(-100);
     }
     pollSummary.textContent = `Last table poll: ${now.toLocaleTimeString()}.`;
     showMessage(response.message ?? "", "tables");

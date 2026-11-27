@@ -33,6 +33,25 @@ export function orderFeed(events: ChangeFeedEvent[]): ChangeFeedEvent[] {
   );
 }
 
+export type SnapshotPair = {
+  schema: string | null;
+  tables: TableSnapshot[];
+};
+
+export function diffSnapshot(
+  previous: SnapshotPair | null,
+  current: SnapshotPair,
+  observedAt: string,
+): { previous: TableSnapshot[]; events: ChangeFeedEvent[] } {
+  if (previous === null || previous.schema !== current.schema) {
+    return { previous: current.tables, events: [] };
+  }
+  return {
+    previous: current.tables,
+    events: buildFeed(previous.tables, current.tables, observedAt),
+  };
+}
+
 export function renderChangeFeed(events: ChangeFeedEvent[]): string {
   if (events.length === 0) {
     return "<p>No changes observed yet. The page checks once per second.</p>";
