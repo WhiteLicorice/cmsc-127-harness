@@ -765,6 +765,7 @@ class DoctorDatabaseTest(unittest.TestCase):
     def test_connection_check_falls_back_to_pg8000(self) -> None:
         output = StringIO()
         connection = mock.Mock()
+        connection.cursor.return_value.fetchone.return_value = ("180002",)
 
         def connect(driver: str, _url: str) -> mock.Mock:
             if driver == "psycopg":
@@ -797,6 +798,7 @@ class DoctorDatabaseTest(unittest.TestCase):
     def test_connection_check_falls_back_when_psycopg_cannot_connect(self) -> None:
         output = StringIO()
         connection = mock.Mock()
+        connection.cursor.return_value.fetchone.return_value = ("180002",)
 
         def connect(driver: str, _url: str) -> mock.Mock:
             if driver == "psycopg":
