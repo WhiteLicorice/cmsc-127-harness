@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -412,6 +413,23 @@ class LintTests(unittest.TestCase):
                 )
                 self.assertIn("bash check.sh 1 checks", output)
                 self.assertNotIn("== form ==", output)
+
+
+class StarterProtectedPinTests(unittest.TestCase):
+    """Check that ``protected.json`` matches the starter it protects."""
+
+    def test_the_manifest_matches_the_starter(
+        self: StarterProtectedPinTests,
+    ) -> None:
+        starter = os.environ.get("CMSC127_STARTER_DIR")
+        if not starter:
+            self.skipTest("set CMSC127_STARTER_DIR to the starter repository")
+        runner_dir = Path(__file__).resolve().parent.parent
+
+        code, output, errors = run_lint(Path(starter), runner_dir)
+
+        self.assertEqual(0, code, output + errors)
+        self.assertIn("The form is clean.", output)
 
 
 if __name__ == "__main__":

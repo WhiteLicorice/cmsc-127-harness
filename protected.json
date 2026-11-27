@@ -1,10 +1,10 @@
 {
   "files": {
     ".gitattributes": "4ad4ec36f3651d644cc8d5136289c90652160936e279827259e7272915b2dafd",
-    ".github/workflows/check.yml": "c8c885a542c9d3422b6a9e4c65ce4edf841e13668874a70937708bf83de4dbd5",
+    ".github/workflows/check.yml": "2f8013895a0640584e97138be02537097307f454f83bc86419cc9467498bd2dd",
     ".gitignore": "83b093d118d89bfedbf2fcf245803e9f163227b973b619801a7f91f0110e5d4e",
     ".vscode/settings.json": "8bfb32c4026f9dad53d7aab3cb70d57a0ea69e154b3b87daff735369ab1d0015",
-    "OPERATIONS.md": "64b59de444824c0958d03ac5fbcea50e9a9c0fb4730870b9e2748eeb32feeef5",
+    "OPERATIONS.md": "50de158a363886da7f3cc46be72291a48befee208f04130dc2b28271f8aaa3fe",
     "RESTORE.md": "073240231c7a0e82c247d2af7e4c75ee94ba1d11516aab24308c6abe6db76df5",
     "cases/lab1/health.expected": "22c84e36dd3a43270222b210ca863c7db2c561aa4cad2d0a493e641fe50f7b67",
     "cases/lab1/health.sql": "8bc0c5f99568e014de054f91776d9d603e2a09f860139fb00ecaf1899b49de67",
@@ -78,7 +78,7 @@
     "cases/published/lab3/registrar-cannot-pay.sql": "b90ef0379f93ca49a6f14acbc46fea2d71a7223a77f5df0155b6568c74181fa9",
     "cases/published/lab3/restore-state.expected": "b65dbfcd35488e19c787ff593f1e99a3ac5e5f28710f808bcef0126995ffcc82",
     "cases/published/lab3/restore-state.json": "2eac0cea905522171a98f11aa28b259a515b523e12f55e1b9564696052c5c758",
-    "check.sh": "9c0934fb1f1bd5b584b6693f1be1489e80c1fc0a3e69fa0ff458f78e043d286b",
+    "check.sh": "5867a9ffb3fd9872b43b4bcaf548ce6ec024116277791ee44b5fe38468707ce6",
     "connection.py": "3400fb9a8007049c3b32ce2a120e03f76cacda71625fbb5a9317e6777ec21d12",
     "lint": "e67938cc3630c9768e487983edf8d54f27faa4a9c9f3bb689625d19d35d27531",
     "pyrightconfig.json": "47e3011aebef04fa67814baa636f4b71d8d24d886e1218c0aa25ee562585b97a",
