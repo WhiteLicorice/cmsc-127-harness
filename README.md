@@ -26,14 +26,15 @@ line.
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`.
 - Python 3.15.x, which runs the harness server. The doctors and the Block 1
-  checker accept the 3.15 series and reject a later series, such as 3.16. Check
-  it with `python --version`. The reply starts with `Python 3.15`. If the reply
-  shows another version, install Python 3.15 from
-  <https://www.python.org/downloads/>. On Windows, `py -3.15 --version` selects
-  an installed 3.15, and step 1 uses `py -3.15` to create the environment.
-  After step 2 activates it, `python` means the environment's interpreter. If
-  `python` still reports the system version, the environment isn't active.
-  Rerun the activation command from step 2.
+  checker accept the 3.15 series and reject a later series, such as 3.16. On
+  macOS and Linux, check it with `python3.15 --version`, the command that
+  Block 1 installs. On Windows, check it with `py -3.15 --version`, which
+  selects an installed 3.15. The reply starts with `Python 3.15`. If the command
+  is missing or the reply shows another version, install Python 3.15 from
+  <https://www.python.org/downloads/>. Step 1 uses `python3.15` or `py -3.15`
+  to create the environment. After step 2 activates it, `python` means the
+  environment's interpreter. If `python` still reports the system version, the
+  environment isn't active. Rerun the activation command from step 2.
 
 In PowerShell, replace the activation command with
 `.\.venv\Scripts\Activate.ps1` and the `export` command with
@@ -43,9 +44,9 @@ PowerShell may find a different `bash`.
 
 ### Steps
 
-1. Create the Python environment. Run `python -m venv .venv`. On Windows, run
-   `py -3.15 -m venv .venv`. Skip this step when the folder already holds
-   `.venv`.
+1. Create the Python environment. On macOS and Linux, run
+   `python3.15 -m venv .venv`. On Windows, run `py -3.15 -m venv .venv`. Skip
+   this step when the folder already holds `.venv`.
 2. Activate it. Run `source .venv/Scripts/activate`. On macOS and Linux, run
    `source .venv/bin/activate`.
 3. Install the Python packages into the environment. Run
@@ -68,9 +69,9 @@ PowerShell may find a different `bash`.
 ## The Details
 
 The harness has a web page that shows your database while you work. It also
-checks your entity-relationship diagram (ERD) against the live schema, runs
-your pair's checks, and reports a missing tool. A pair is two students who work
-together.
+compares your entity-relationship diagram (ERD) with the live schema, shows the
+last result from `bash check.sh`, and reports a missing tool. A pair is two
+students who work together.
 
 ### The Harness Page
 
