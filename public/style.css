@@ -585,6 +585,37 @@ main {
   font-size: 0.9rem;
 }
 
+/* Panel buttons take every colour from the theme, and the disabled border
+   drops to the rule token so an unavailable button reads as unavailable. */
+.panel-content button {
+  min-height: 44px;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  color: var(--text);
+  background: var(--surface-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel-content button:hover {
+  border-color: var(--accent);
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.panel-content button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.panel-content button:disabled {
+  border-color: var(--rule);
+  color: var(--text);
+  background: var(--surface-2);
+  cursor: not-allowed;
+}
+
 .panel-tabs {
   display: flex;
   flex-wrap: wrap;

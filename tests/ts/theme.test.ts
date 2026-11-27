@@ -187,6 +187,7 @@ describe("theme contrast", () => {
     ["--muted", "--surface", 4.5, "panel prose and table captions"],
     ["--muted", "--bg", 4.5, "poll summary"],
     ["--surface", "--accent", 4.5, "text selection"],
+    ["--bg", "--accent", 4.5, "button hover"],
     ["--border", "--surface", 3, "control edge"],
     ["--border", "--bg", 3, "control edge on the page"],
     ["--rule", "--surface", 1.25, "table rule"],
