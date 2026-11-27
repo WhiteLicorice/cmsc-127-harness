@@ -106,6 +106,12 @@ it. The check skips the two worker files that `npm run build:offline` writes
 into `public/`. Any other extra JavaScript fails it. Run `npm run build` and
 commit `public/` when it fails.
 
+The page tests also need Playwright's Chromium and WebKit engines. Install them
+once after `npm ci` with `npx playwright install chromium webkit`. On Ubuntu,
+add `--with-deps --only-shell`. The hosted-page workflow also runs
+`tests/ts/hostedMode.browser.test.ts` in Firefox, so install `firefox` there and
+set `CMSC127_BROWSER=firefox`.
+
 `start.sh` runs the built page and never builds it. A student runs no build
 step. A clean clone carries the built page. When `public/app.js` is missing,
 the script stops and asks the reader to download the bundle again.
@@ -137,9 +143,12 @@ on `PATH`.
 Set `CMSC127_RUNNER_DIR` to a local harness checkout to test the runner before
 a release.
 
-The harness self-tests use a separate scratch database. Run them with
-`./check.sh --self-test`. The GitHub workflow runs the self-tests and the same
-staged checks from a clean checkout on Ubuntu, macOS, and Windows.
+The harness self-tests use a separate scratch database. Run them from a starter
+checkout: `cd` to the `cmsc-127-lab-starter` directory and run
+`./check.sh --self-test`. Keep `CMSC127_RUNNER_DIR` pointed at this harness
+checkout, so the self-test exercises the code under development. The GitHub
+workflow runs the self-tests and the same staged checks from a clean checkout on
+Ubuntu, macOS, and Windows.
 
 ## Release History and Order
 
