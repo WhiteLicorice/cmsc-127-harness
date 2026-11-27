@@ -136,10 +136,10 @@ venv_activate_repair() {
 venv_create_repair() {
     case "$os" in
         windows)
-            printf 'Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, then run bash doctor.sh in the same terminal.\n'
+            printf 'Run py -3.15 -m venv .venv, then source .venv/Scripts/activate, then python -m pip install -r requirements.txt, then run bash doctor.sh in the same terminal.\n'
             ;;
         *)
-            printf 'Run python3.15 -m venv .venv, then source .venv/bin/activate, then run bash doctor.sh in the same terminal.\n'
+            printf 'Run python3.15 -m venv .venv, then source .venv/bin/activate, then python -m pip install -r requirements.txt, then run bash doctor.sh in the same terminal.\n'
             ;;
     esac
 }
@@ -147,10 +147,10 @@ venv_create_repair() {
 venv_recreate_repair() {
     case "$os" in
         windows)
-            printf 'Run py -3.15 -m venv --clear .venv, then source .venv/Scripts/activate, then run bash doctor.sh in the same terminal.\n'
+            printf 'Run py -3.15 -m venv --clear .venv, then source .venv/Scripts/activate, then python -m pip install -r requirements.txt, then run bash doctor.sh in the same terminal.\n'
             ;;
         *)
-            printf 'Run python3.15 -m venv --clear .venv, then source .venv/bin/activate, then run bash doctor.sh in the same terminal.\n'
+            printf 'Run python3.15 -m venv --clear .venv, then source .venv/bin/activate, then python -m pip install -r requirements.txt, then run bash doctor.sh in the same terminal.\n'
             ;;
     esac
 }

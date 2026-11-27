@@ -88,8 +88,8 @@ if ($null -ne $pythonPath) {
     $pythonOk = $pythonExitCode -eq 0 -and $pythonVersion -match '^3\.15\.'
 }
 $activateRepair = 'Run .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
-$createRepair = 'Run py -3.15 -m venv .venv, then .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
-$recreateRepair = 'Run py -3.15 -m venv --clear .venv, then .\.venv\Scripts\Activate.ps1, then run .\doctor.ps1 in the same window.'
+$createRepair = 'Run py -3.15 -m venv .venv, then .\.venv\Scripts\Activate.ps1, then python -m pip install -r requirements.txt, then run .\doctor.ps1 in the same window.'
+$recreateRepair = 'Run py -3.15 -m venv --clear .venv, then .\.venv\Scripts\Activate.ps1, then python -m pip install -r requirements.txt, then run .\doctor.ps1 in the same window.'
 $installRepair = 'Install the python.org manager with Add-AppxPackage -AppInstallerFile https://www.python.org/ftp/python/pymanager/pymanager.appinstaller. Open a new PowerShell. Run pymanager install --refresh. Run pymanager install 3.15.'
 $pythonRepair = $installRepair
 if ($null -eq $pythonPath) {

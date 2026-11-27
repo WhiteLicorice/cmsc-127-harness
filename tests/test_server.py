@@ -209,7 +209,7 @@ def wait_for_server_port(
                 break
             continue
         output.append(line)
-        if "CMSC 127 Harness is available at http://127.0.0.1:" in line:
+        if "Local harness page: http://127.0.0.1:" in line:
             port = int(line.rsplit(":", 1)[1].split("/", 1)[0])
             return port, output, output_queue, reader
     return None, output, output_queue, reader
@@ -431,6 +431,35 @@ class HarnessPageTests(unittest.TestCase):
             self.assertNotEqual(held_port, selected_port)
             self.assertIn(f":{selected_port}/", output)
         self.assertIsNotNone(selected_port, output)
+
+    def test_main_opens_the_hosted_page_and_prints_both_addresses(self) -> None:
+        """The hosted page opens, and the terminal prints both addresses."""
+        server_module = self.load_server()
+        hosted = "https://whitelicorice.github.io/cmsc-127-harness/"
+        for port, expected in (
+            (55440, hosted),
+            (55691, f"{hosted}?port=55691"),
+        ):
+            with self.subTest(port=port):
+                server = Mock()
+                server.server_port = port
+                server.serve_forever.side_effect = KeyboardInterrupt
+                stdout = io.StringIO()
+                with (
+                    patch.object(server_module, "create_server", return_value=server),
+                    patch.object(
+                        server_module.webbrowser, "open", return_value=True
+                    ) as open_page,
+                    patch.object(sys, "argv", ["server.py"]),
+                    redirect_stdout(stdout),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    exit_code = server_module.main()
+
+                self.assertEqual(0, exit_code)
+                open_page.assert_called_once_with(expected, new=2)
+                self.assertIn(expected, stdout.getvalue())
+                self.assertIn(f"http://127.0.0.1:{port}/", stdout.getvalue())
 
     def test_main_keeps_an_explicit_port_outside_the_default_range(self) -> None:
         """A gate that reserves a port gets that port."""

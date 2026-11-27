@@ -28,6 +28,7 @@ POLL_INTERVAL_MS = 1000
 FEED_LIMIT = 100
 API_VERSION = 1
 ALLOWED_ORIGIN = "https://whitelicorice.github.io"
+HOSTED_PAGE = "https://whitelicorice.github.io/cmsc-127-harness/"
 # The port the launcher tries when CMSC127_PORT is unset.
 DEFAULT_PORT = 55440
 _NO_SCHEMA_MESSAGE = (
@@ -831,9 +832,15 @@ def main() -> int:
             return 1
 
     address = f"http://127.0.0.1:{server.server_port}/"
-    print(f"CMSC 127 Harness is available at {address}", flush=True)
-    if not arguments.no_browser and not webbrowser.open(address, new=2):
-        print(f"Open this address in your browser: {address}", flush=True)
+    hosted = (
+        HOSTED_PAGE
+        if server.server_port == DEFAULT_PORT
+        else f"{HOSTED_PAGE}?port={server.server_port}"
+    )
+    print(f"Hosted harness page: {hosted}", flush=True)
+    print(f"Local harness page: {address}", flush=True)
+    if not arguments.no_browser and not webbrowser.open(hosted, new=2):
+        print(f"Open this address in your browser: {hosted}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

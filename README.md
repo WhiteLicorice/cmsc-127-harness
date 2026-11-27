@@ -26,7 +26,7 @@ line.
   uses another port, add `-p` and that number. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
   folder to `PATH`. The database doctor reads the server version and fails when
-  the server is older than 18.
+  the server is not version 18.
 - Python 3.15.x, which runs the harness server. The doctors and the Block 1
   checker accept the 3.15 series and reject a later series, such as 3.16. On
   macOS and Linux, check it with `python3.15 --version`, the command that
@@ -61,12 +61,11 @@ PowerShell may find a different `bash`.
    you set for the role when you installed PostgreSQL.
    If the password contains URL punctuation, percent-encode it before putting
    it in the URL. For example, write `@` as `%40`.
-5. Start the harness server. Run `bash start.sh`. The script prints the address
-   and opens the local page in your browser. Then open
-   <https://whitelicorice.github.io/cmsc-127-harness/> in Chrome or Edge, or in
-   Firefox 151 or later. If the harness server printed another port, add `?port=`
-   and that number to the link. Click `Connect` in the Status panel. The page is
-   ready when the Status panel lists the harness server and the database.
+5. Start the harness server. Run `bash start.sh`. The script prints the hosted
+   and local addresses and opens the hosted page in your browser. That page
+   loads from <https://whitelicorice.github.io/cmsc-127-harness/>. Click
+   `Connect` in the Status panel. The page is ready when the Status panel lists
+   the harness server and the database.
 
 ## The Details
 
@@ -90,12 +89,12 @@ The folder holds the built page, so `start.sh` doesn't build it. If
 this bundle. Download the bundle again and unzip the whole folder.` and stops
 with a nonzero status.
 
-The script starts the harness server and opens the local page in the default
-browser. It prints the address, usually `http://127.0.0.1:55440/`. The hosted
-page is the one to use, so open
-<https://whitelicorice.github.io/cmsc-127-harness/> after the script starts the
-server. Open the printed address in the three cases under "The Local Page"
-below. Press Ctrl+C in the terminal to stop the harness server. A file from a
+The script starts the harness server, prints the hosted and local addresses,
+and opens the hosted page in the default browser. The hosted page loads from
+<https://whitelicorice.github.io/cmsc-127-harness/>. The local address is
+usually `http://127.0.0.1:55440/`. Open the local address in the three cases
+under "The Local Page" below. Press Ctrl+C in the terminal to stop the harness
+server. A file from a
 zip archive may have no executable bit. Run the script through `bash` in that
 case.
 

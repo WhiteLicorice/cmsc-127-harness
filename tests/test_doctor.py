@@ -230,7 +230,8 @@ class DoctorShellVersionTest(unittest.TestCase):
             command, activate = "python3.15 -m venv", ".venv/bin/activate"
         clear = " --clear" if recreate else ""
         return (
-            f"Run {command}{clear} .venv, then source {activate}, then run "
+            f"Run {command}{clear} .venv, then source {activate}, then "
+            "python -m pip install -r requirements.txt, then run "
             "bash doctor.sh in the same terminal."
         )
 
@@ -558,6 +559,7 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         self.assertIn("FAIL  The environment has no Python.", output)
         self.assertIn(
             "Run py -3.15 -m venv .venv, then .\\.venv\\Scripts\\Activate.ps1, "
+            "then python -m pip install -r requirements.txt, "
             "then run .\\doctor.ps1 in the same window.",
             output,
         )
@@ -579,7 +581,8 @@ class DoctorVirtualEnvironmentTest(unittest.TestCase):
         self.assertIn("FAIL  Python reports Python 3.12.", output)
         self.assertIn(
             "Run py -3.15 -m venv --clear .venv, then .\\.venv\\Scripts"
-            "\\Activate.ps1, then run .\\doctor.ps1 in the same window.",
+            "\\Activate.ps1, then python -m pip install -r requirements.txt, "
+            "then run .\\doctor.ps1 in the same window.",
             output,
         )
         self.assertNotIn("pymanager", output)
