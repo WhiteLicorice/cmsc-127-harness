@@ -81,6 +81,6 @@ it("names the bundle start command when the server cannot be reached", async () 
   await settle();
   const message = elements.get("#connection-message")!;
   expect(message.textContent).toBe(
-    'The page cannot reach its server. Run bash "/c/Users/ada/My Documents/cmsc127/b1/start.sh" from the folder you started the page in, and replace the example path inside the quotes with your Block 1 bundle.',
+    "The page cannot reach its server. Run bash start.sh from the b1 bundle folder.",
   );
 });
