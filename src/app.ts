@@ -1,5 +1,6 @@
 import { diffSnapshot, type ChangeFeedEvent } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
+import { readPollSettings } from "./polling.js";
 import { escapeHtml } from "./panels/html.js";
 import {
   CONNECT_IN_STATUS_PROMPT,
@@ -356,16 +357,16 @@ document.addEventListener("cmsc127:theme", () => {
 });
 
 function startPolling(): void {
-  void requestJson("/api/changes")
-    .then((data) => {
-      const settings = data as { pollIntervalMs?: number };
-      pollInterval = settings.pollIntervalMs ?? 1000;
-      void pollTables();
-      void refreshActivePanel();
-      window.setInterval(() => void pollTables(), pollInterval);
-      window.setInterval(() => void refreshActivePanel(), pollInterval);
-    })
-    .catch((error: unknown) => showMessage(describeRequestError(error)));
+  void readPollSettings(() => requestJson("/api/changes")).then((settings) => {
+    pollInterval = settings.intervalMs;
+    if (settings.error !== null) {
+      showMessage(describeRequestError(settings.error));
+    }
+    void pollTables();
+    void refreshActivePanel();
+    window.setInterval(() => void pollTables(), pollInterval);
+    window.setInterval(() => void refreshActivePanel(), pollInterval);
+  });
 }
 
 // The hosted page checks the server release before it polls, so an old server

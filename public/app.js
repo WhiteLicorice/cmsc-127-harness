@@ -1,5 +1,6 @@
 import { diffSnapshot } from "./panels/changes.js";
 import { registerOfflineWorker, watchOfflineSave } from "./offline.js";
+import { readPollSettings } from "./polling.js";
 import { escapeHtml } from "./panels/html.js";
 import { CONNECT_IN_STATUS_PROMPT, DEFAULT_SERVER_ADDRESS, isHostedPage, loopbackInit, serverAddress, apiUrl, TOO_OLD_MESSAGE, unreachableMessage, versionSupported, } from "./hosted.js";
 import { panelRegistry } from "./panelRegistry.js";
@@ -322,16 +323,16 @@ document.addEventListener("cmsc127:theme", () => {
     renderCurrentPanel();
 });
 function startPolling() {
-    void requestJson("/api/changes")
-        .then((data) => {
-        const settings = data;
-        pollInterval = settings.pollIntervalMs ?? 1000;
+    void readPollSettings(() => requestJson("/api/changes")).then((settings) => {
+        pollInterval = settings.intervalMs;
+        if (settings.error !== null) {
+            showMessage(describeRequestError(settings.error));
+        }
         void pollTables();
         void refreshActivePanel();
         window.setInterval(() => void pollTables(), pollInterval);
         window.setInterval(() => void refreshActivePanel(), pollInterval);
-    })
-        .catch((error) => showMessage(describeRequestError(error)));
+    });
 }
 // The hosted page checks the server release before it polls, so an old server
 // draws one plain line instead of seven empty panels.
