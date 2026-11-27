@@ -92,7 +92,6 @@ FRAGMENT_PATTERNS = [
     r"^  expected: ",
     r"^  actual:   ",
     r"^  \{text\}$",
-    r"^CMSC 127 Harness is available at ",
     r"^Open this address in your browser: ",
 ]
 
