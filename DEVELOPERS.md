@@ -163,5 +163,6 @@ fork pins those tags.
 
 For a release, first commit and push the starter `check.sh` and
 `.github/workflows/check.yml` with the new runner tag. Then compute both hashes
-from those committed files. Commit the hashes in `protected.json`. Then create
-the harness tag.
+from those committed files. Commit the hashes in `protected.json`. Set
+`STARTER_REF` in `.github/workflows/tests.yml` and `.github/workflows/test.yml`
+to the starter tag that carries those files. Then create the harness tag.

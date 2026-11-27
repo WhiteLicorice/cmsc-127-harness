@@ -14,6 +14,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # The starter release that this harness release protects. Bump this tag with
+  # the starter release, as DEVELOPERS.md says. The pin test compares
+  # protected.json with the tree at this tag, so a missed bump fails the run.
+  STARTER_REF: v1.40
+
 jobs:
   linux:
     runs-on: ubuntu-latest
@@ -38,11 +44,11 @@ jobs:
       CMSC127_STARTER_DIR: ${{ github.workspace }}/starter
     steps:
       - uses: actions/checkout@v7
-      - name: Check out the starter
+      - name: Check out the starter release
         uses: actions/checkout@v7
         with:
           repository: WhiteLicorice/cmsc-127-lab-starter
-          ref: main
+          ref: ${{ env.STARTER_REF }}
           path: starter
       - uses: actions/setup-node@v7
         with:
@@ -135,11 +141,11 @@ jobs:
       CMSC127_STARTER_DIR: ${{ github.workspace }}/starter
     steps:
       - uses: actions/checkout@v7
-      - name: Check out the starter
+      - name: Check out the starter release
         uses: actions/checkout@v7
         with:
           repository: WhiteLicorice/cmsc-127-lab-starter
-          ref: main
+          ref: ${{ env.STARTER_REF }}
           path: starter
       - uses: actions/setup-node@v7
         with:
