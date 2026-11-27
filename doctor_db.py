@@ -16,8 +16,18 @@ def psycopg_requirement() -> str:
     return "FAIL  psycopg 3.3.9 is not installed."
 
 
+class _Cursor(Protocol):
+    def execute(self: _Cursor, query: str) -> object: ...
+
+    def fetchone(self: _Cursor) -> tuple[object, ...] | None: ...
+
+    def close(self: _Cursor) -> None: ...
+
+
 class _Connection(Protocol):
     def close(self: _Connection) -> None: ...
+
+    def cursor(self: _Connection) -> _Cursor: ...
 
 
 class _Pg8000API(Protocol):
@@ -62,6 +72,36 @@ def _connect(driver: str, url: str) -> _Connection:
 
 def _interpreter_line() -> str:
     return f"Python {platform.python_version()} at {sys.executable}"
+
+
+def _server_major(connection: _Connection) -> int:
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SHOW server_version_num")
+        row = cursor.fetchone()
+    finally:
+        cursor.close()
+    if not row:
+        raise RuntimeError("The server did not report its version.")
+    return int(str(row[0])) // 10000
+
+
+def _connected(connection: _Connection, driver: str, version: str) -> int:
+    try:
+        major = _server_major(connection)
+    except Exception as error:
+        print(f"FAIL  {driver}: {error}")
+        return 1
+    finally:
+        connection.close()
+    if major != 18:
+        print(
+            f"FAIL  The server reports PostgreSQL {major}. "
+            "The course needs PostgreSQL 18."
+        )
+        return 1
+    print(f"Connected with {driver} {version}.")
+    return 0
 
 
 def _installed_drivers() -> tuple[list[tuple[str, str]], list[str]]:
@@ -137,9 +177,7 @@ def main() -> int:
         except Exception as error:
             print(f"FAIL  psycopg: {_failure_message(error)}")
         else:
-            connection.close()
-            print(f"Connected with psycopg {psycopg_version}.")
-            return 0
+            return _connected(connection, "psycopg", psycopg_version)
 
     pg8000_version = versions.get("pg8000")
     if pg8000_version is not None:
@@ -148,9 +186,7 @@ def main() -> int:
         except Exception as error:
             print(f"FAIL  pg8000: {_failure_message(error)}")
         else:
-            connection.close()
-            print(f"Connected with pg8000 {pg8000_version}.")
-            return 0
+            return _connected(connection, "pg8000", pg8000_version)
 
     return 1
 

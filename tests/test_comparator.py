@@ -717,11 +717,41 @@ class DoctorDatabaseTests(unittest.TestCase):
         )
         self.assertFalse(any("No PostgreSQL driver is installed" in line for line in lines))
 
+    def test_connection_to_an_older_server_exits_one(
+        self: DoctorDatabaseTests,
+    ) -> None:
+        output = StringIO()
+        connection = Mock()
+        connection.cursor.return_value.fetchone.return_value = ("160009",)
+        with (
+            patch.object(
+                doctor_db.metadata,
+                "version",
+                side_effect=["3.3.9", "1.31.6"],
+            ),
+            patch.object(doctor_db, "_connect", return_value=connection),
+            patch.dict(
+                os.environ,
+                {"CMSC127_DATABASE_URL": "postgresql://postgres@127.0.0.1/postgres"},
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = doctor_db.main()
+
+        self.assertEqual(1, exit_code)
+        self.assertIn(
+            "FAIL  The server reports PostgreSQL 16. "
+            "The course needs PostgreSQL 18.",
+            output.getvalue().splitlines(),
+        )
+        connection.close.assert_called_once()
+
     def test_stale_fallback_version_is_hidden_during_connection_check(
         self: DoctorDatabaseTests,
     ) -> None:
         output = StringIO()
         connection = Mock()
+        connection.cursor.return_value.fetchone.return_value = ("180002",)
         with (
             patch.object(
                 doctor_db.metadata,

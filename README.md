@@ -22,9 +22,11 @@ line.
 - Git, which clones the folder. Check it with `git --version`. If the command
   is missing, install Git from <https://git-scm.com/downloads>.
 - PostgreSQL 18, the database server that holds your tables. The harness server
-  reads it every second. Check it with `pg_isready`. The reply is
+  reads it every second. Check it with `pg_isready -h 127.0.0.1`. If your server
+  uses another port, add `-p` and that number. The reply is
   `accepting connections`. If the command is missing, add the PostgreSQL `bin`
-  folder to `PATH`.
+  folder to `PATH`. The database doctor reads the server version and fails when
+  the server is older than 18.
 - Python 3.15.x, which runs the harness server. The doctors and the Block 1
   checker accept the 3.15 series and reject a later series, such as 3.16. On
   macOS and Linux, check it with `python3.15 --version`, the command that
