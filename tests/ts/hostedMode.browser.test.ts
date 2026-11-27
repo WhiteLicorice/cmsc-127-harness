@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { chromium, firefox, webkit, type Browser, type BrowserType, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { closeServer } from "./listen";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -346,6 +346,50 @@ describe("hosted page", () => {
       expect(inFlight).toEqual({ disabled: true, text: "Connecting…" });
     } finally {
       releaseStatus();
+      await context.close();
+    }
+  }, 60_000);
+
+  it("restores the Connect button when the status read fails", async () => {
+    const context = await browser.newContext();
+    await grantLoopback(context);
+    const page = await context.newPage();
+    await page.route(`${HOSTED_ORIGIN}/**`, (route) => fulfilPage(route, route.request().url()));
+    let statusRequests = 0;
+    await page.route(`${SERVER}/api/**`, (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/status") {
+        statusRequests += 1;
+        return route.abort();
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(apiBody(url.pathname)),
+      });
+    });
+    try {
+      await page.goto(HOSTED_PAGE, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(
+        () => document.querySelectorAll("#panels button").length === 7,
+        undefined,
+        { timeout: 15_000 },
+      );
+      await page.locator('button[data-action="connect"]').dispatchEvent("click");
+      await page.waitForFunction(
+        () => (document.querySelector("#connection-message")?.textContent ?? "")
+          .includes("can't reach the harness server"),
+        undefined,
+        { timeout: 15_000 },
+      );
+      const restored = await page.locator('button[data-action="connect"]').evaluate((node) => ({
+        disabled: (node as HTMLButtonElement).disabled,
+        text: node.textContent,
+      }));
+      expect(restored).toEqual({ disabled: false, text: "Connect" });
+      await page.locator('button[data-action="connect"]').dispatchEvent("click");
+      await vi.waitFor(() => expect(statusRequests).toBe(2));
+    } finally {
       await context.close();
     }
   }, 60_000);
