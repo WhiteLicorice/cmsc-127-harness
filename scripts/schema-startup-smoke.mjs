@@ -56,7 +56,7 @@ try {
   const startupDeadline = Date.now() + 15_000;
   let address;
   while (Date.now() < startupDeadline) {
-    const match = /CMSC 127 Harness is available at (http:\/\/127\.0\.0\.1:\d+\/)/.exec(serverOutput);
+    const match = /Local harness page: (http:\/\/127\.0\.0\.1:\d+\/)/.exec(serverOutput);
     if (match?.[1]) {
       address = match[1];
       break;

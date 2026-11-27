@@ -990,7 +990,7 @@ try {
   const deadline = Date.now() + 20_000;
   let address;
   while (Date.now() < deadline) {
-    const match = /CMSC 127 Harness is available at (http:\/\/127\.0\.0\.1:\d+\/)/.exec(serverOutput);
+    const match = /Local harness page: (http:\/\/127\.0\.0\.1:\d+\/)/.exec(serverOutput);
     if (match?.[1]) {
       address = match[1];
       break;
